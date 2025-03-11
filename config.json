@@ -1,0 +1,4 @@
+{
+  "max_recording_length_minutes": 60,
+  "recordings_directory": "/home/elata/elata-eeg/recordings/"
+}

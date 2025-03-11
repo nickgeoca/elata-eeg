@@ -1,6 +1,7 @@
 import Image from "next/image";
 import EegMonitor from '@/components/EegMonitor';
 import EegConfigDisplay, { EegConfigProvider } from '@/components/EegConfig';
+import { EegRecordingControls } from '@/components/EegRecordingControls';
 
 export default function Home() {
   return (
@@ -9,7 +10,10 @@ export default function Home() {
       
       {/* Wrap components with the provider to share configuration */}
       <EegConfigProvider>
-        <EegConfigDisplay />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <EegConfigDisplay />
+          <EegRecordingControls />
+        </div>
         <EegMonitor />
       </EegConfigProvider>
     </div>
