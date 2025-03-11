@@ -25,6 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         gain: 4.0,
         board_driver: DriverType::Mock,
         batch_size: 32,
+        Vref: 4.5,
     };
 
     println!("Starting EEG system...");

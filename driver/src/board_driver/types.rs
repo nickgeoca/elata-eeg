@@ -41,7 +41,7 @@ pub struct AdcConfig {
     pub channels: Vec<usize>,
     pub board_driver: DriverType,
     pub batch_size: usize,  // Number of samples to collect in a batch
-    // Add other configuration parameters as needed
+    pub Vref: f32,  // Vref of adc
 }
 
 impl Default for AdcConfig {
@@ -52,6 +52,7 @@ impl Default for AdcConfig {
             channels: vec![0],
             board_driver: DriverType::Mock,
             batch_size: 32,    // Default batch size (typical SPI buffer size)
+            Vref: 4.5,         // Vref for the ADC
         }
     }
 }
@@ -59,8 +60,9 @@ impl Default for AdcConfig {
 // ADC data point
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdcData {
-    pub samples: Vec<Vec<f32>>,
     pub timestamp: u64,
+    pub raw_samples: Vec<Vec<i32>>,
+    pub voltage_samples: Vec<Vec<f32>>,
 }
 
 // Driver error

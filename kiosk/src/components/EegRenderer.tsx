@@ -17,6 +17,7 @@ interface EegRendererProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
+  voltageScaleFactor?: number; // Default to 1.0 if not provided
 }
 
 export function EegRenderer({
@@ -25,7 +26,8 @@ export function EegRenderer({
   config,
   renderNeededRef,
   latestTimestampRef,
-  debugInfoRef
+  debugInfoRef,
+  voltageScaleFactor = 5.0
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
   const pointsArraysRef = useRef<Float32Array[]>([]);
@@ -180,7 +182,8 @@ export function EegRenderer({
       VOLTAGE_TICKS.forEach(voltage => {
         // Normalize voltage to [-1, 1] range within channel space
         // Scale based on channel count to prevent overlap with many channels
-        const scaleFactor = Math.min(0.1, 0.3 / channelCount);
+        const baseScaleFactor = Math.min(0.1, 0.3 / channelCount);
+        const scaleFactor = baseScaleFactor * voltageScaleFactor;
         const normalizedVoltage = (voltage / 3) * scaleFactor;
         const y = chOffset + normalizedVoltage;
         
@@ -259,7 +262,7 @@ export function EegRenderer({
               count: count,
               color: getChannelColor(ch),
               yOffset: yOffset,
-              yScale: Math.min(0.1, 0.3 / channelCount) // Scale based on channel count
+              yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor
             });
           }
         }
@@ -284,7 +287,7 @@ export function EegRenderer({
       cancelAnimationFrame(animationId);
       regl.destroy();
     };
-  }, [canvasRef, config, dataRef, renderNeededRef, latestTimestampRef, debugInfoRef]);
+  }, [canvasRef, config, dataRef, renderNeededRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);
 
   return null;
 }

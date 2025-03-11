@@ -80,6 +80,8 @@ impl EegSystem {
         // Start the processing task
         let processor: Arc<Mutex<SignalProcessor>> = Arc::clone(&self.processor);
         let tx = self.tx.clone();
+        // Capture the channel count from the configuration
+        let channel_count = config.channels.len();
 
         self.processing_task = Some(tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
@@ -87,12 +89,20 @@ impl EegSystem {
                     DriverEvent::Data(data_batch) => {
                         // Pre-allocate with known capacity
                         let batch_size = data_batch.len();
-                        let channel_count = data_batch[0].samples.len();
-                        let samples_per_channel = data_batch[0].samples[0].len();
+                        // Use the channel count from the configuration instead of the data
+                        // let channel_count = data_batch[0].voltage_samples.len();
+                        let samples_per_channel = data_batch[0].voltage_samples[0].len();
                         
-                        let mut processed_channels: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+                        // Pre-allocate for processed voltage samples
+                        let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
                         for _ in 0..channel_count {
-                            processed_channels.push(Vec::with_capacity(batch_size * samples_per_channel));
+                            processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+                        }
+                        
+                        // Pre-allocate for raw samples
+                        let mut raw_samples: Vec<Vec<i32>> = Vec::with_capacity(channel_count);
+                        for _ in 0..channel_count {
+                            raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
                         }
                         
                         // Single lock acquisition for the batch
@@ -100,10 +110,16 @@ impl EegSystem {
                         
                         // Process all samples in the batch
                         for data in &data_batch {
-                            for (ch_idx, channel_samples) in data.samples.iter().enumerate() {
-                                processed_channels[ch_idx].extend(
-                                    channel_samples.iter().map(|&sample| 
-                                        proc_guard.process_sample(ch_idx, sample as f32)
+                            // Collect raw samples
+                            for (ch_idx, channel_raw_samples) in data.raw_samples.iter().enumerate() {
+                                raw_samples[ch_idx].extend(channel_raw_samples.iter().cloned());
+                            }
+                            
+                            // Process voltage samples
+                            for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
+                                processed_voltage_samples[ch_idx].extend(
+                                    channel_samples.iter().map(|&voltage|
+                                        proc_guard.process_sample(ch_idx, voltage)
                                     )
                                 );
                             }
@@ -111,9 +127,9 @@ impl EegSystem {
                         drop(proc_guard);
 
                         if tx.send(ProcessedData {
-                            data: processed_channels,
                             timestamp: data_batch.last().unwrap().timestamp,
-                            channel_count,
+                            raw_samples,
+                            processed_voltage_samples,
                         }).await.is_err() {
                             break;
                         }

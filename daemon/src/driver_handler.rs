@@ -10,13 +10,9 @@ use tokio::sync::Mutex;
 
 use crate::config::DaemonConfig;
 
-#[derive(Clone, Serialize)]
-pub struct EegData {
-    pub channels: Vec<f32>,
-    pub timestamp: u64,
-}
 
-#[derive(Clone, Serialize)]
+// We'll use ProcessedData directly instead of EegBatchData
+#[derive(Clone, Serialize, Debug)]
 pub struct EegBatchData {
     pub channels: Vec<Vec<f32>>,  // Each inner Vec represents a channel's data for the batch
     pub timestamp: u64,           // Timestamp for the start of the batch
@@ -63,21 +59,35 @@ impl CsvRecorder {
         let now: DateTime<Local> = Local::now();
         let gain = self.current_adc_config.gain;
         let driver = format!("{:?}", self.current_adc_config.board_driver);
+        let vref = self.current_adc_config.Vref;
         
         let filename = format!(
-            "{}/{}_gain{}_board{}.csv",
+            "{}/{}_gain{}_board{}_vref{}.csv",
             self.config.recordings_directory,
             now.format("%Y-%m-%d_%H-%M"),
             gain,
-            driver
+            driver,
+            vref
         );
         
         // Create CSV writer
         let file = File::create(&filename)?;
         let mut writer = csv::Writer::from_writer(file);
         
-        // Write header row
-        writer.write_record(&["timestamp", "channel_1", "channel_2", "channel_3", "channel_4"])?;
+        // Write header row with both voltage and raw samples
+        let mut header = vec!["timestamp".to_string()];
+        
+        // Add voltage channel headers
+        for i in 1..=4 {
+            header.push(format!("ch{}_voltage", i));
+        }
+        
+        // Add raw channel headers
+        for i in 1..=4 {
+            header.push(format!("ch{}_raw_sample", i));
+        }
+        
+        writer.write_record(&header)?;
         writer.flush()?;
         
         self.writer = Some(writer);
@@ -106,8 +116,8 @@ impl CsvRecorder {
         Ok(format!("Stopped recording to {}", file_path))
     }
     
-    /// Write a batch of EEG data to the CSV file
-    pub fn write_data(&mut self, data: &EegBatchData) -> io::Result<String> {
+    /// Write a batch of processed EEG data to the CSV file
+    pub fn write_data(&mut self, data: &ProcessedData) -> io::Result<String> {
         if !self.is_recording || self.writer.is_none() {
             return Ok("Not recording".to_string());
         }
@@ -118,8 +128,8 @@ impl CsvRecorder {
         }
         
         let writer = self.writer.as_mut().unwrap();
-        let num_channels = data.channels.len().min(4); // Limit to 4 channels
-        let samples_per_channel = data.channels[0].len();
+        let num_channels = data.processed_voltage_samples.len().min(4); // Limit to 4 channels
+        let samples_per_channel = data.processed_voltage_samples[0].len();
         
         // Calculate microseconds per sample based on sample rate
         let us_per_sample = 1_000_000 / self.sample_rate as u64;
@@ -128,17 +138,28 @@ impl CsvRecorder {
         for i in 0..samples_per_channel {
             let sample_timestamp = data.timestamp + (i as u64 * us_per_sample);
             
-            // Create a record with timestamp and channel values
-            let mut record = Vec::with_capacity(num_channels + 1);
+            // Create a record with timestamp, voltage values, and raw values
+            let mut record = Vec::with_capacity(1 + num_channels * 2); // timestamp + voltage channels + raw channels
             record.push(sample_timestamp.to_string());
             
+            // Add voltage values
             for ch in 0..num_channels {
-                record.push(data.channels[ch][i].to_string());
+                record.push(data.processed_voltage_samples[ch][i].to_string());
             }
             
-            // Pad with zeros if we have fewer than 4 channels
+            // Pad with zeros if we have fewer than 4 voltage channels
             for _ in num_channels..4 {
                 record.push("0.0".to_string());
+            }
+            
+            // Add raw values
+            for ch in 0..num_channels {
+                record.push(data.raw_samples[ch][i].to_string());
+            }
+            
+            // Pad with zeros if we have fewer than 4 raw channels
+            for _ in num_channels..4 {
+                record.push("0".to_string());
             }
             
             writer.write_record(&record)?;
@@ -167,57 +188,63 @@ impl CsvRecorder {
 
 // Function to process EEG data batches
 pub async fn process_eeg_data(
-    mut data_rx: tokio::sync::mpsc::Receiver<ProcessedData>,
-    tx: tokio::sync::broadcast::Sender<EegBatchData>,
+    mut rx_data_from_adc: tokio::sync::mpsc::Receiver<ProcessedData>,
+    tx_to_web_socket: tokio::sync::broadcast::Sender<EegBatchData>,
     csv_recorder: Arc<Mutex<CsvRecorder>>,
 ) {
     let mut count = 0;
     let mut last_time = std::time::Instant::now();
     let mut last_timestamp = None;
     
-    while let Some(data) = data_rx.recv().await {
-        // Create smaller batches to send more frequently
+    while let Some(data) = rx_data_from_adc.recv().await {
+        // Write to CSV if recording is active - write the full ProcessedData
+        if let Ok(mut recorder) = csv_recorder.try_lock() {
+            match recorder.write_data(&data) {
+                Ok(msg) => {
+                    // Only log if something interesting happened (like auto-rotating files)
+                    if msg != "Data written successfully" && msg != "Not recording" {
+                        println!("CSV Recording: {}", msg);
+                    }
+                },
+                Err(e) => {
+                    println!("Warning: Failed to write data to CSV: {}", e);
+                }
+            }
+        }
+        
+        // Create smaller batches to send more frequently to WebSocket clients
         // Split the incoming data into chunks of 32 samples
         let batch_size = 32;
-        let num_channels = data.data.len();
-        let samples_per_channel = data.data[0].len();
+        let num_channels = data.processed_voltage_samples.len();
+        let samples_per_channel = data.processed_voltage_samples[0].len();
         
         for chunk_start in (0..samples_per_channel).step_by(batch_size) {
             let chunk_end = (chunk_start + batch_size).min(samples_per_channel);
-            let mut chunk_channels = Vec::with_capacity(num_channels);
             
-            for channel in &data.data {
-                chunk_channels.push(channel[chunk_start..chunk_end].to_vec());
-            }
-            
+            // More efficient chunking - use slices instead of cloning when possible
+            // If we need to send the data to multiple clients, we'll still need to clone
             let chunk_timestamp = data.timestamp + (chunk_start as u64 * 4000); // Adjust timestamp for each chunk
+            
+            // Create EegBatchData for WebSocket clients (they don't need raw samples)
+            let mut chunk_channels = Vec::with_capacity(num_channels);
+            for channel in &data.processed_voltage_samples {
+                // More efficient: pre-allocate and use extend_from_slice
+                let mut channel_chunk = Vec::with_capacity(chunk_end - chunk_start);
+                channel_chunk.extend_from_slice(&channel[chunk_start..chunk_end]);
+                chunk_channels.push(channel_chunk);
+            }
             
             let eeg_batch_data = EegBatchData {
                 channels: chunk_channels,
                 timestamp: chunk_timestamp / 1000, // Convert to milliseconds
             };
             
-            // Write to CSV if recording is active
-            if let Ok(mut recorder) = csv_recorder.try_lock() {
-                match recorder.write_data(&eeg_batch_data) {
-                    Ok(msg) => {
-                        // Only log if something interesting happened (like auto-rotating files)
-                        if msg != "Data written successfully" && msg != "Not recording" {
-                            println!("CSV Recording: {}", msg);
-                        }
-                    },
-                    Err(e) => {
-                        println!("Warning: Failed to write data to CSV: {}", e);
-                    }
-                }
-            }
-            
-            if let Err(e) = tx.send(eeg_batch_data) {
+            if let Err(e) = tx_to_web_socket.send(eeg_batch_data) {
                 println!("Warning: Failed to send data chunk to WebSocket clients: {}", e);
             }
         }
         
-        count += data.data[0].len();
+        count += data.processed_voltage_samples[0].len();
         last_timestamp = Some(data.timestamp);
         
         if let Some(last_ts) = last_timestamp {
@@ -237,7 +264,7 @@ pub async fn process_eeg_data(
             println!("Processing rate: {:.2} Hz", rate);
             println!("Total samples processed: {}", count);
             println!("Sample data (first 5 values from first channel):");
-            println!("  Channel 0: {:?}", &data.data[0][..5]);
+            println!("  Channel 0: {:?}", &data.processed_voltage_samples[0][..5]);
             last_time = std::time::Instant::now();
         }
     }

@@ -10,9 +10,9 @@ use serde::{Serialize, Deserialize};
 /// Processed EEG data structure
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProcessedData {
-    pub data: Vec<Vec<f32>>,
     pub timestamp: u64,
-    pub channel_count: usize,
+    pub raw_samples: Vec<Vec<i32>>,
+    pub processed_voltage_samples: Vec<Vec<f32>>,
 }
 
 // Optionally expose lower-level access through a raw module

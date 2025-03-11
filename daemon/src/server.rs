@@ -109,6 +109,7 @@ pub async fn handle_config_websocket(ws: WebSocket, config: AdcConfig) {
             println!("Gain: {}", config.gain);
             println!("Board driver: {:?}", config.board_driver);
             println!("Batch size: {}", config.batch_size);
+            println!("Vref: {}", config.Vref);
         }
     } else {
         println!("Error serializing configuration");

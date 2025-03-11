@@ -32,17 +32,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gain: 24.0,
         board_driver: DriverType::Mock,
         batch_size: 32,
+        Vref: 4.5,
     };
 
     // Create the EEG system (using mock driver)
     let (mut eeg_system, mut data_rx) = EegSystem::new(config.clone()).await?;
+    
+    // Create a copy of the channel count before moving config
+    let channel_count = config.channels.len();
     
     // Start the system
     eeg_system.start(config).await?;
 
     // Example: Process received data for a while
     while let Some(processed_data) = data_rx.recv().await {
-        println!("Received data with {} channels", processed_data.channel_count);
+        println!("Received data with {} channels", channel_count);
         println!("Data: {:?}", processed_data); 
         // Add your data handling logic here
     }

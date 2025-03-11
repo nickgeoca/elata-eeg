@@ -1,4 +1,5 @@
 pub mod mock_driver;
+pub mod mock_data_generator;
 pub mod types;
 
 // Re-export types for convenience
