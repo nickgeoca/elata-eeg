@@ -8,6 +8,10 @@ pub struct DaemonConfig {
     pub max_recording_length_minutes: u32,
     /// Directory where recordings are stored
     pub recordings_directory: String,
+    /// High-pass filter cutoff frequency in Hz
+    pub dsp_high_pass_cutoff_hz: f32,
+    /// Low-pass filter cutoff frequency in Hz
+    pub dsp_low_pass_cutoff_hz: f32,
 }
 
 impl Default for DaemonConfig {
@@ -15,6 +19,8 @@ impl Default for DaemonConfig {
         Self {
             max_recording_length_minutes: 60,
             recordings_directory: "../recordings/".to_string(),
+            dsp_high_pass_cutoff_hz: 0.1,  // Default value from current implementation
+            dsp_low_pass_cutoff_hz: 100.0, // Default value from current implementation
         }
     }
 }

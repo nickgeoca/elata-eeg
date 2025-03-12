@@ -13,6 +13,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Daemon configuration:");
     println!("  Max recording length: {} minutes", daemon_config.max_recording_length_minutes);
     println!("  Recordings directory: {}", daemon_config.recordings_directory);
+    println!("  High-pass filter cutoff: {} Hz", daemon_config.dsp_high_pass_cutoff_hz);
+    println!("  Low-pass filter cutoff: {} Hz", daemon_config.dsp_low_pass_cutoff_hz);
 
     // Increase channel capacity but not too much to avoid excessive buffering
     let (tx, _) = broadcast::channel::<driver_handler::EegBatchData>(32);  // Reduced from 1024
@@ -27,6 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         board_driver: DriverType::Mock,
         batch_size: 32,
         Vref: 4.5,
+        dsp_high_pass_cutoff_hz: daemon_config.dsp_high_pass_cutoff_hz,
+        dsp_low_pass_cutoff_hz: daemon_config.dsp_low_pass_cutoff_hz,
     };
 
     println!("Starting EEG system...");
