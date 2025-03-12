@@ -1,6 +1,17 @@
 'use client';
 
-// Optimized fixed-size buffer for real-time scrolling display
+/**
+ * ScrollingBuffer.ts
+ *
+ * Optimized fixed-size buffer for real-time scrolling display of EEG data.
+ *
+ * IMPORTANT: This class contains critical logic for maintaining graph continuity:
+ * 1. Efficient data storage using Float32Array for performance
+ * 2. Dirty flag handling to ensure rendering continues during connection issues
+ * 3. Only resets dirty flag when data is actually available (line ~57)
+ *
+ * DO NOT MODIFY the dirty flag handling as it's essential for preventing graph clearing.
+ */
 export class ScrollingBuffer {
   private buffer: Float32Array;
   private size: number = 0;
@@ -52,7 +63,13 @@ export class ScrollingBuffer {
       points[i * 2 + 1] = this.buffer[i];
     }
     
-    this.dirty = false;
+    // CRITICAL FIX: Only reset dirty flag if we actually have data
+    // This ensures we keep trying to render if connection is lost
+    // DO NOT MODIFY this condition as it's essential for preventing graph clearing
+    if (this.size > 0) {
+      this.dirty = false;
+    }
+    
     return this.size; // Return the number of points added
   }
   

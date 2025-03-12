@@ -12,3 +12,4 @@ This..
 
 ## TODO
 - Does putting filtering in the daemon make more sense? Just pass raw from the driver
+- Add normalization for the GUI and pass voltage range per channel

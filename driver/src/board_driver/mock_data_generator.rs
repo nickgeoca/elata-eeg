@@ -176,6 +176,7 @@ impl EegGenerator {
         // Create different weights for each channel
         // Format: [delta, theta, alpha, beta, gamma]
         let base_channel_weights = [
+            // ch1 - ch8
             [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal left (Fp1) - more delta/theta
             [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal right (Fp2) - similar to Fp1
             [2.0, 1.2, 1.5, 0.6, 0.1],  // Central left (C3) - mix
@@ -184,6 +185,33 @@ impl EegGenerator {
             [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal right (P4) - stronger alpha
             [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital left (O1) - strongest alpha
             [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital right (O2) - strongest alpha
+            // ch9 - ch16
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal left (Fp1) - more delta/theta
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal right (Fp2) - similar to Fp1
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central left (C3) - mix
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central right (C4) - mix
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal left (P3) - stronger alpha
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal right (P4) - stronger alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital left (O1) - strongest alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital right (O2) - strongest alpha            
+            // ch17 - ch24
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal left (Fp1) - more delta/theta
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal right (Fp2) - similar to Fp1
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central left (C3) - mix
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central right (C4) - mix
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal left (P3) - stronger alpha
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal right (P4) - stronger alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital left (O1) - strongest alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital right (O2) - strongest alpha
+            // ch25 - ch32
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal left (Fp1) - more delta/theta
+            [3.0, 1.5, 0.8, 0.4, 0.1],  // Frontal right (Fp2) - similar to Fp1
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central left (C3) - mix
+            [2.0, 1.2, 1.5, 0.6, 0.1],  // Central right (C4) - mix
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal left (P3) - stronger alpha
+            [1.5, 1.0, 2.5, 0.7, 0.1],  // Parietal right (P4) - stronger alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital left (O1) - strongest alpha
+            [1.2, 0.8, 3.0, 0.5, 0.1],  // Occipital right (O2) - strongest alpha  
         ];
         
         // Create channel weights for the requested number of channels

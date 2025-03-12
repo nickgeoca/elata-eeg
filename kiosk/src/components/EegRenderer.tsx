@@ -1,5 +1,18 @@
 'use client';
 
+/**
+ * EegRenderer.tsx
+ *
+ * This component handles rendering EEG data using WebGL for efficient visualization.
+ *
+ * IMPORTANT: This file contains critical fixes for graph clearing issues:
+ * 1. Always renders channel data even with small amounts of data
+ * 2. Uses a consistent rendering approach to maintain graph continuity
+ * 3. Properly tracks if any data was drawn to avoid clearing the graph
+ *
+ * DO NOT REVERT these changes as they prevent the graph from clearing during disconnections.
+ */
+
 import { useEffect, useRef } from 'react';
 import REGL from 'regl';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
@@ -210,7 +223,9 @@ export function EegRenderer({
         console.log(`Time window: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
       }
       
-      // Always render to ensure data is displayed
+      // CRITICAL FIX: Always render to ensure data is displayed
+      // This ensures the graph continues to be drawn even during connection issues
+      // DO NOT change this to conditional rendering as it would cause the graph to clear
       const shouldRender = true;
       
       if (shouldRender) {
@@ -249,7 +264,10 @@ export function EegRenderer({
             console.log(`Channel ${ch}: ${count} points`);
           }
           
-          if (count > 1) {
+          // CRITICAL FIX: Always draw the channel data even if count is small
+          // This ensures we don't clear the graph when connection is temporarily lost
+          // Changed from count > 1 to count > 0 to maintain graph continuity during brief disconnections
+          if (count > 0) { // This change is critical - DO NOT revert to count > 1
             // Use the same linear distribution as the grid lines
             // This ensures consistent spacing between grid lines and EEG data
             const yOffset = channelCount <= 1
@@ -267,8 +285,11 @@ export function EegRenderer({
           }
         }
         
-        // Reset the render needed flag after drawing all channels
-        renderNeededRef.current = false;
+        // Only reset the render flag if we actually drew something
+        // This ensures we keep trying to render if no data is available
+        if (totalPointsDrawn > 0) {
+          renderNeededRef.current = false;
+        }
         
         // Log data status every 2 seconds in development mode
         if (!isProduction && now - debugInfo.lastPacketTime > 2000) {

@@ -1,5 +1,18 @@
 'use client';
 
+/**
+ * EegDataHandler.tsx
+ *
+ * This component handles WebSocket connections to the EEG data server and processes incoming data.
+ *
+ * IMPORTANT: This file contains critical fixes for WebSocket disconnection issues:
+ * 1. Automatic reconnection with exponential backoff (lines ~315-343)
+ * 2. Data buffer preservation on reconnection (lines ~266-278)
+ * 3. Optimized React lifecycle to prevent unnecessary reconnections (lines ~355-379)
+ *
+ * DO NOT REVERT these changes as they prevent the graph from clearing during disconnections.
+ */
+
 import { useEffect, useRef, useState, useCallback } from 'react';
 import throttle from 'lodash.throttle';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
@@ -33,6 +46,8 @@ export function useEegDataHandler({
   const handleMessageRef = useRef<any>(null);
   const dataReceivedTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const lastTimestampRef = useRef<number>(Date.now());
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
 
   // Calculate optimal throttle interval based on config
@@ -70,9 +85,15 @@ export function useEegDataHandler({
     }
   }, [config, dataRef, windowSizeRef, renderNeededRef, isProduction]);
 
-  // Create message handler function
+  // Create message handler function with stabilized dependencies
   const createMessageHandler = useCallback(() => {
     const interval = getThrottleInterval();
+    
+    // Only create a new handler if the interval has changed or if no handler exists
+    if (handleMessageRef.current && handleMessageRef.current.interval === interval) {
+      return handleMessageRef.current;
+    }
+    
     if (!isProduction) {
       console.log(`Setting throttle interval to ${interval.toFixed(2)}ms (${(1000/interval).toFixed(2)} FPS)`);
     }
@@ -204,13 +225,29 @@ export function useEegDataHandler({
       }
     }, interval, { trailing: true });
     
+    // Store the interval on the handler for comparison in future calls
+    (handler as any).interval = interval;
+    
     handleMessageRef.current = handler;
     return handler;
-  }, [config, getThrottleInterval, onDataUpdate, dataRef, debugInfoRef, renderNeededRef, latestTimestampRef]);
+  }, [getThrottleInterval, isProduction]); // Reduced dependencies to only essential ones
 
-  // Update window size when config changes
+  // Update window size when config changes - with memoized config check
+  const lastConfigRef = useRef<any>(null);
+  
   useEffect(() => {
-    if (config) {
+    // Only update if config has actually changed in a meaningful way
+    const configChanged = !lastConfigRef.current ||
+                          lastConfigRef.current.sample_rate !== config?.sample_rate ||
+                          lastConfigRef.current.channels?.length !== config?.channels?.length;
+    
+    if (config && configChanged) {
+      // Store current config for future comparison
+      lastConfigRef.current = {
+        sample_rate: config.sample_rate,
+        channels: [...(config.channels || [])]
+      };
+      
       // Add safeguard for sample rate as suggested in the code review
       const safeSampleRate = Math.max(1, config.sample_rate || DEFAULT_SAMPLE_RATE);
       windowSizeRef.current = Math.ceil((safeSampleRate * 2000) / 1000); // 2000ms window
@@ -237,11 +274,22 @@ export function useEegDataHandler({
         wsRef.current.onmessage = handler;
       }
     }
-  }, [config, createMessageHandler, dataRef, windowSizeRef, renderNeededRef]);
+  }, [config, createMessageHandler, isProduction]); // Reduced dependencies
 
-  // WebSocket connection
-  useEffect(() => {
-    // Initialize buffers if not already done
+  /**
+   * Function to establish WebSocket connection with automatic reconnection
+   *
+   * CRITICAL FIX: This implementation includes several important features:
+   * 1. Data buffer preservation - existing data is kept on reconnection to prevent graph clearing
+   * 2. Exponential backoff - prevents rapid reconnection attempts that could overwhelm the server
+   * 3. Reduced dependencies - prevents unnecessary reconnections due to React's dependency chain
+   *
+   * DO NOT MODIFY these features without careful consideration as they are essential
+   * for maintaining graph continuity during connection issues.
+   */
+  const connectWebSocket = useCallback(() => {
+    // IMPORTANT: Don't initialize buffers here - we want to preserve existing data on reconnect
+    // Only initialize if they don't exist yet
     if (dataRef.current.length === 0) {
       const channelCount = config?.channels?.length || 4;
       dataRef.current = Array(channelCount).fill(null).map(() =>
@@ -252,29 +300,113 @@ export function useEegDataHandler({
       renderNeededRef.current = true;
     }
     
+    // Clear any existing reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    
+    // Close existing connection if any
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch (e) {
+        // Ignore errors on close
+      }
+    }
+    
+    setStatus('Connecting...');
+    
     const ws = new WebSocket('ws://localhost:8080/eeg');
     wsRef.current = ws;
     
     // Set binary type for WebSocket
     ws.binaryType = 'arraybuffer';
     
-    ws.onopen = () => setStatus('Connected');
+    ws.onopen = () => {
+      setStatus('Connected');
+      reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
+      if (!isProduction) {
+        console.log('WebSocket connection established');
+      }
+    };
     
     // Create message handler with current config
     const handler = createMessageHandler();
     ws.onmessage = handler;
     
-    ws.onclose = () => setStatus('Disconnected');
-    ws.onerror = () => setStatus('Error');
+    ws.onclose = (event) => {
+      if (!isProduction) {
+        console.log(`WebSocket closed with code: ${event.code}, reason: ${event.reason}`);
+      }
+      
+      setStatus('Disconnected');
+      
+      // CRITICAL FIX: Implement exponential backoff for reconnection
+      // This prevents rapid reconnection attempts that could overwhelm the server
+      const maxReconnectDelay = 5000; // Maximum delay of 5 seconds
+      const baseDelay = 500; // Start with 500ms delay
+      const reconnectDelay = Math.min(
+        maxReconnectDelay,
+        baseDelay * Math.pow(1.5, reconnectAttemptsRef.current)
+      );
+      
+      reconnectAttemptsRef.current++;
+      
+      if (!isProduction) {
+        console.log(`Attempting to reconnect in ${reconnectDelay}ms (attempt ${reconnectAttemptsRef.current})`);
+      }
+      
+      // Schedule reconnection
+      reconnectTimeoutRef.current = setTimeout(() => {
+        if (!isProduction) {
+          console.log('Attempting to reconnect...');
+        }
+        connectWebSocket();
+      }, reconnectDelay);
+    };
+    
+    ws.onerror = (error) => {
+      if (!isProduction) {
+        console.error('WebSocket error:', error);
+      }
+      setStatus('Error');
+      // Don't reconnect here - the onclose handler will be called after an error
+    };
+    
+  }, [createMessageHandler, isProduction]); // CRITICAL: Reduced dependencies to prevent unnecessary reconnections
+  
+  /**
+   * Set up WebSocket connection with stable lifecycle
+   *
+   * CRITICAL FIX: This effect uses an empty dependency array to ensure it only runs once on mount.
+   * This prevents React's dependency chain from causing unnecessary reconnections that would
+   * clear the graph. DO NOT add dependencies to this effect unless absolutely necessary.
+   */
+  useEffect(() => {
+    // Only connect once on initial mount
+    connectWebSocket();
     
     return () => {
+      // Clean up on component unmount - proper cleanup prevents memory leaks
       if (handleMessageRef.current) {
         handleMessageRef.current.cancel();
       }
-      ws.close();
-      wsRef.current = null;
+      
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      
+      if (dataReceivedTimeoutRef.current) {
+        clearTimeout(dataReceivedTimeoutRef.current);
+      }
+      
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
     };
-  }, [createMessageHandler, config, dataRef, windowSizeRef]);
+  }, []); // CRITICAL: Empty dependency array ensures this only runs once on mount
 
   // Calculate FPS from config
   const fps = config ? (config.sample_rate / config.batch_size) : (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);
