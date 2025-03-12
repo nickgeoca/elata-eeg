@@ -28,7 +28,7 @@ impl Default for DaemonConfig {
 /// Load daemon configuration from file or create default if not found
 pub fn load_config() -> Arc<DaemonConfig> {
     // Try to load from file
-    let config_path = "./config.json";
+    let config_path = "../config.json";
     match std::fs::read_to_string(config_path) {
         Ok(contents) => {
             match serde_json::from_str(&contents) {
