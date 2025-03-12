@@ -19,5 +19,5 @@ tokio-test = "0.4"
 bytes = "1.0"
 
 [[bin]]
-name = "adc_daemon"
+name = "eeg_daemon"
 path = "src/main.rs"

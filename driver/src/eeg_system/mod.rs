@@ -27,6 +27,8 @@ impl EegSystem {
         let processor = Arc::new(Mutex::new(SignalProcessor::new(
             config.sample_rate,
             config.channels.len(),
+            config.dsp_high_pass_cutoff_hz,
+            config.dsp_low_pass_cutoff_hz,
         )));
         let (tx, rx) = mpsc::channel(100);
 
@@ -69,7 +71,12 @@ impl EegSystem {
         // Reset the signal processor
         {
             let mut proc_guard = self.processor.lock().await;
-            proc_guard.reset(config.sample_rate, config.channels.len());
+            proc_guard.reset(
+                config.sample_rate,
+                config.channels.len(),
+                config.dsp_high_pass_cutoff_hz,
+                config.dsp_low_pass_cutoff_hz
+            );
         }
 
         self.driver.start_acquisition().await?;

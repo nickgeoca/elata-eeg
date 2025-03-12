@@ -42,6 +42,10 @@ pub struct AdcConfig {
     pub board_driver: DriverType,
     pub batch_size: usize,  // Number of samples to collect in a batch
     pub Vref: f32,  // Vref of adc
+    /// High-pass filter cutoff frequency in Hz
+    pub dsp_high_pass_cutoff_hz: f32,
+    /// Low-pass filter cutoff frequency in Hz
+    pub dsp_low_pass_cutoff_hz: f32,
 }
 
 impl Default for AdcConfig {
@@ -53,6 +57,8 @@ impl Default for AdcConfig {
             board_driver: DriverType::Mock,
             batch_size: 32,    // Default batch size (typical SPI buffer size)
             Vref: 4.5,         // Vref for the ADC
+            dsp_high_pass_cutoff_hz: 0.1,  // Default high-pass filter cutoff (Hz)
+            dsp_low_pass_cutoff_hz: 100.0, // Default low-pass filter cutoff (Hz)
         }
     }
 }

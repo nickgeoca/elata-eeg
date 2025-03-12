@@ -1,4 +1,6 @@
 {
   "max_recording_length_minutes": 60,
-  "recordings_directory": "/home/elata/elata-eeg/recordings/"
+  "recordings_directory": "./recordings/",
+  "dsp_high_pass_cutoff_hz": 0.5,
+  "dsp_low_pass_cutoff_hz": 80.0
 }

@@ -89,9 +89,7 @@ impl NotchFilter {
 
 // Similar updates for HighpassFilter
 impl HighpassFilter {
-    fn new(sample_rate: f32) -> Self {
-        // Lower the cutoff frequency to reduce impact on low frequency signals
-        let cutoff_freq = 0.1; // Changed from 0.5 to 0.1 Hz
+    fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
         let coeffs = Coefficients::<f32>::from_params(
             Type::HighPass,
             sample_rate.hz(),
@@ -109,8 +107,7 @@ impl HighpassFilter {
 
 // And LowpassFilter
 impl LowpassFilter {
-    fn new(sample_rate: f32) -> Self {
-        let cutoff_freq = 100.0;
+    fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
         let coeffs = Coefficients::<f32>::from_params(
             Type::LowPass,
             sample_rate.hz(),
@@ -136,7 +133,7 @@ pub struct SignalProcessor {
 }
 
 impl SignalProcessor {
-    pub fn new(sample_rate: u32, num_channels: usize) -> Self {
+    pub fn new(sample_rate: u32, num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32) -> Self {
         // Add validation for sample rate
         assert!(sample_rate > 0, "Sample rate must be positive");
         assert!(sample_rate >= 200, "Sample rate should be at least 200Hz for proper filter operation");
@@ -153,10 +150,10 @@ impl SignalProcessor {
                 .map(|_| NotchFilter::new(sample_rate_f32, 60.0))
                 .collect(),
             highpass_filters: (0..num_channels)
-                .map(|_| HighpassFilter::new(sample_rate_f32))
+                .map(|_| HighpassFilter::new(sample_rate_f32, dsp_high_pass_cutoff))
                 .collect(),
             lowpass_filters: (0..num_channels)
-                .map(|_| LowpassFilter::new(sample_rate_f32))
+                .map(|_| LowpassFilter::new(sample_rate_f32, dsp_low_pass_cutoff))
                 .collect(),
         }
     }
@@ -173,7 +170,7 @@ impl SignalProcessor {
         processed
     }
 
-    pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize) {
+    pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32) {
         self.sample_rate = new_sample_rate;
         self.num_channels = new_num_channels;
         // Recreate all filters
@@ -185,10 +182,10 @@ impl SignalProcessor {
             .map(|_| NotchFilter::new(sample_rate, 60.0))
             .collect();
         self.highpass_filters = (0..self.num_channels)
-            .map(|_| HighpassFilter::new(sample_rate))
+            .map(|_| HighpassFilter::new(sample_rate, dsp_high_pass_cutoff))
             .collect();
         self.lowpass_filters = (0..self.num_channels)
-            .map(|_| LowpassFilter::new(sample_rate))
+            .map(|_| LowpassFilter::new(sample_rate, dsp_low_pass_cutoff))
             .collect();
     }
 }
