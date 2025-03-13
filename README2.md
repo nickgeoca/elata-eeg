@@ -17,12 +17,29 @@ bash setup.sh
 - 
 
 ## Dev Usage
-term 1
-`cd driver; cargo build`
-term 2
-`cd daemon; cargo build; cargo run`
-term 3
-`npm run dev`
+#### Change Code
+```bash
+# Stop kiosk mode
+bash stop.sh
+
+# Term 1, driver
+cd driver; cargo build
+# Term 2, daemon
+cd daemon; cargo build; cargo run
+# Term 3, kiosk
+cd kiosk; npm run dev
+```
+
+#### Rebuild Production
+```bash
+# Stop
+bash stop.sh
+
+# ...<Change code here> ...
+
+# Rebuild code base and run kiosk mode
+bash rebuild.sh
+```
 
 ## TODO
 - Interent security check review
