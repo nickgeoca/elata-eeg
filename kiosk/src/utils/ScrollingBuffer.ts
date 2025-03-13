@@ -51,6 +51,13 @@ export class ScrollingBuffer {
     // Calculate spacing between points in normalized coordinates
     const spacing = 1.0 / this.capacity;
     
+    // Check if we might exceed buffer bounds and log warning
+    if (this.size * 2 > points.length) {
+      console.warn(`[ScrollingBuffer] Buffer overflow risk: size=${this.size}, points.length=${points.length}, capacity=${this.capacity}`);
+      // Limit size to prevent buffer overflow
+      this.size = Math.floor(points.length / 2);
+    }
+    
     // Fill the points array with x,y pairs
     for (let i = 0; i < this.size; i++) {
       // For traditional EEG style (right-to-left):

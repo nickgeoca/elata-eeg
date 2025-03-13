@@ -52,8 +52,39 @@ impl CsvRecorder {
             return Ok(format!("Already recording to {}", self.file_path.clone().unwrap_or_default()));
         }
         
+        // Debug: Print the recordings directory path from config
+        println!("DEBUG: Recordings directory from config: {}", self.config.recordings_directory);
+        
+        // Get absolute path of the current directory
+        let current_dir = match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(e) => {
+                println!("ERROR: Failed to get current directory: {}", e);
+                return Err(io::Error::new(io::ErrorKind::Other, "Failed to get current directory"));
+            }
+        };
+        println!("DEBUG: Current directory: {:?}", current_dir);
+        
+        // Determine if we're running from the daemon directory
+        let is_in_daemon_dir = current_dir.to_string_lossy().ends_with("/daemon");
+        println!("DEBUG: Running from daemon directory: {}", is_in_daemon_dir);
+        
+        // Adjust the path if needed to ensure it's relative to the repo root
+        let recordings_dir = if is_in_daemon_dir && self.config.recordings_directory.starts_with("./") {
+            // Convert "./recordings/" to "../recordings/" when running from daemon directory
+            let adjusted_path = format!("..{}", &self.config.recordings_directory[1..]);
+            println!("DEBUG: Adjusted recordings path: {}", adjusted_path);
+            adjusted_path
+        } else {
+            self.config.recordings_directory.clone()
+        };
+        
+        // Debug: Print the absolute path of the recordings directory
+        let absolute_recordings_path = current_dir.join(&recordings_dir);
+        println!("DEBUG: Absolute recordings path: {:?}", absolute_recordings_path);
+        
         // Create recordings directory if it doesn't exist
-        std::fs::create_dir_all(&self.config.recordings_directory)?;
+        std::fs::create_dir_all(&recordings_dir)?;
         
         // Create filename with current timestamp and parameters
         let now: DateTime<Local> = Local::now();
@@ -63,12 +94,13 @@ impl CsvRecorder {
         
         let filename = format!(
             "{}/{}_gain{}_board{}_vref{}.csv",
-            self.config.recordings_directory,
+            recordings_dir,
             now.format("%Y-%m-%d_%H-%M"),
             gain,
             driver,
             vref
         );
+        println!("DEBUG: Creating recording file at: {}", filename);
         
         // Create CSV writer
         let file = File::create(&filename)?;

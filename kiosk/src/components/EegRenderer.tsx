@@ -273,11 +273,23 @@ export function EegRenderer({
             const yOffset = channelCount <= 1
               ? 0
               : -0.9 + (ch / (channelCount - 1)) * 1.8;
+            // Check if we might exceed buffer bounds and log warning
+            const pointsLength = points.length;
+            const neededLength = count * 2;
+            
+            // Use a safe count to prevent buffer overflow
+            let safeCount = count;
+            
+            if (neededLength > pointsLength) {
+              console.warn(`[EegRenderer] Buffer size issue: channel=${ch}, count=${count}, needed=${neededLength}, available=${pointsLength}`);
+              // Adjust count to prevent buffer overflow
+              safeCount = Math.floor(pointsLength / 2);
+            }
             
             // Draw the channel data
             drawLines({
-              points: points.subarray(0, count * 2),
-              count: count,
+              points: points.subarray(0, safeCount * 2),
+              count: safeCount,
               color: getChannelColor(ch),
               yOffset: yOffset,
               yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor

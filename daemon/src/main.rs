@@ -15,6 +15,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Recordings directory: {}", daemon_config.recordings_directory);
     println!("  High-pass filter cutoff: {} Hz", daemon_config.dsp_high_pass_cutoff_hz);
     println!("  Low-pass filter cutoff: {} Hz", daemon_config.dsp_low_pass_cutoff_hz);
+    
+    // Debug: Print current working directory
+    match std::env::current_dir() {
+        Ok(path) => println!("Current working directory: {:?}", path),
+        Err(e) => println!("Failed to get current working directory: {}", e),
+    }
 
     // Increase channel capacity but not too much to avoid excessive buffering
     let (tx, _) = broadcast::channel::<driver_handler::EegBatchData>(32);  // Reduced from 1024

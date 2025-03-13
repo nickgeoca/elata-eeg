@@ -171,6 +171,11 @@ export function useEegDataHandler({
             // Pre-calculate base offset for this channel to avoid repeated calculations
             const channelBaseOffset = 8 + (ch * samplesPerChannel * 4);
             
+            // Log buffer capacity and current size occasionally for debugging
+            if (!isProduction && Math.random() < 0.01) {
+              console.log(`[EegDataHandler] Channel ${ch} buffer: capacity=${dataRef.current[ch].getCapacity()}, samples=${samplesPerChannel}`);
+            }
+            
             // Process all samples for this channel in a single loop
             for (let i = 0; i < samplesPerChannel; i++) {
               const offset = channelBaseOffset + (i * 4);
