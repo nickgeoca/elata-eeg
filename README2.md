@@ -52,3 +52,4 @@ bash rebuild.sh
   6) add screen rotate... wlr-randr --output HDMI-A-2 --transform 270
 - X11 (LDXE-pi) to Wayland (labwc) was rocky
 - After kiosk is solid, make sure all the files in setup.sh (e.g. /home/elata/.config/labwc/autostart) mathc what we got working in the acutal files. 
+- Realtime hardware update? pros and cons

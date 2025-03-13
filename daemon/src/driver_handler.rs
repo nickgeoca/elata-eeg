@@ -92,9 +92,17 @@ impl CsvRecorder {
         let driver = format!("{:?}", self.current_adc_config.board_driver);
         let vref = self.current_adc_config.Vref;
         
+        // Get session field from config
+        let session_prefix = if self.config.session.is_empty() {
+            "".to_string()
+        } else {
+            format!("session{}_", self.config.session)
+        };
+
         let filename = format!(
-            "{}/{}_gain{}_board{}_vref{}.csv",
+            "{}/{}{}_gain{}_board{}_vref{}.csv",
             recordings_dir,
+            session_prefix,
             now.format("%Y-%m-%d_%H-%M"),
             gain,
             driver,
