@@ -8,8 +8,8 @@ After the product is assembled with the touch screen, clone then start the kiosk
 ```bash
 git clone https://github.com/Elata-Biosciences/elata-eeg
 cd elata-eeg
-chmod +x setup.sh
-bash setup.sh
+chmod +x install.sh
+bash install.sh
 ```
 
 ## Behavior
@@ -51,5 +51,5 @@ bash rebuild.sh
   5) Security Hardening: Consider additional security measures for a production system.
   6) add screen rotate... wlr-randr --output HDMI-A-2 --transform 270
 - X11 (LDXE-pi) to Wayland (labwc) was rocky
-- After kiosk is solid, make sure all the files in setup.sh (e.g. /home/elata/.config/labwc/autostart) mathc what we got working in the acutal files. 
+- After kiosk is solid, make sure all the files in install.sh (e.g. /home/elata/.config/labwc/autostart) mathc what we got working in the acutal files. 
 - Realtime hardware update? pros and cons

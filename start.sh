@@ -34,15 +34,40 @@ fi
 # Fix the autostart file for labwc
 echo "📝 Updating labwc autostart file configuration..."
 mkdir -p "/home/elata/.config/labwc"
-cat > "/home/elata/.config/labwc/autostart" <<EOL
-#!/bin/sh
 
+# Check if autostart file already exists
+if [ -f "/home/elata/.config/labwc/autostart" ]; then
+    # If it exists, check if our marker section is already there
+    if grep -q "BEGIN ELATA-EEG SECTION" "/home/elata/.config/labwc/autostart"; then
+        # Remove the existing section between markers
+        sed -i '/# BEGIN ELATA-EEG SECTION/,/# END ELATA-EEG SECTION/d' "/home/elata/.config/labwc/autostart"
+    fi
+    
+    # Append our section with markers
+    cat >> "/home/elata/.config/labwc/autostart" <<EOL
+
+# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 # Start the Wayland desktop components
 /usr/bin/kanshi &
 
 # Start Chromium in kiosk mode with Wayland
 chromium-browser --ozone-platform=wayland --kiosk --disable-infobars --disable-session-crashed-bubble --incognito --disable-features=MediaDevices http://localhost:3000 &
+# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 EOL
+else
+    # If it doesn't exist, create it with our section with markers
+    cat > "/home/elata/.config/labwc/autostart" <<EOL
+#!/bin/sh
+
+# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
+# Start the Wayland desktop components
+/usr/bin/kanshi &
+
+# Start Chromium in kiosk mode with Wayland
+chromium-browser --ozone-platform=wayland --kiosk --disable-infobars --disable-session-crashed-bubble --incognito --disable-features=MediaDevices http://localhost:3000 &
+# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
+EOL
+fi
 
 # Make the autostart file executable
 chmod +x "/home/elata/.config/labwc/autostart"

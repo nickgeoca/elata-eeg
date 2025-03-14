@@ -24,11 +24,21 @@ if pgrep -f chromium-browser > /dev/null || pgrep -f chromium > /dev/null; then
     sleep 1
 fi
 
-# Create a modified autostart file that doesn't start Chromium
+# Update the autostart file for development mode
 echo "📝 Updating autostart file for development mode..."
-cat > "/home/elata/.config/labwc/autostart" <<EOL
-#!/bin/sh
 
+# Check if autostart file exists
+if [ -f "/home/elata/.config/labwc/autostart" ]; then
+    # Check if our marker section is there
+    if grep -q "BEGIN ELATA-EEG SECTION" "/home/elata/.config/labwc/autostart"; then
+        # Remove the existing section between markers
+        sed -i '/# BEGIN ELATA-EEG SECTION/,/# END ELATA-EEG SECTION/d' "/home/elata/.config/labwc/autostart"
+    fi
+    
+    # Append our development mode section with markers
+    cat >> "/home/elata/.config/labwc/autostart" <<EOL
+
+# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 # Start the default desktop components
 /usr/bin/pcmanfm --desktop --profile LXDE-pi &
 /usr/bin/wf-panel-pi &
@@ -39,7 +49,28 @@ cat > "/home/elata/.config/labwc/autostart" <<EOL
 
 # Start the XDG autostart applications
 /usr/bin/lxsession-xdg-autostart
+# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 EOL
+else
+    # If it doesn't exist, create it with our development mode section
+    mkdir -p "/home/elata/.config/labwc"
+    cat > "/home/elata/.config/labwc/autostart" <<EOL
+#!/bin/sh
+
+# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
+# Start the default desktop components
+/usr/bin/pcmanfm --desktop --profile LXDE-pi &
+/usr/bin/wf-panel-pi &
+/usr/bin/kanshi &
+
+# Chromium is disabled in development mode
+# chromium-browser --kiosk --disable-infobars --disable-session-crashed-bubble --incognito http://localhost:3000 &
+
+# Start the XDG autostart applications
+/usr/bin/lxsession-xdg-autostart
+# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
+EOL
+fi
 
 # Make the autostart file executable
 chmod +x "/home/elata/.config/labwc/autostart"

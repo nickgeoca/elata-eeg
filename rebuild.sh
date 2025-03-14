@@ -1,13 +1,13 @@
 #!/bin/bash
 set -e  # Exit on error
 
-# Check if script is being called from setup.sh
-FROM_SETUP=${1:-"false"}
+# Check if script is being called from install.sh
+FROM_INSTALL=${1:-"false"}
 
 echo "🚀 Starting full rebuild process..."
 
-# Stop services and exit kiosk mode (unless called from setup.sh)
-if [ "$FROM_SETUP" != "from-setup" ]; then
+# Stop services and exit kiosk mode (unless called from install.sh)
+if [ "$FROM_INSTALL" != "from-install" ]; then
   echo "🛑 Stopping services and exiting kiosk mode..."
   ./stop.sh
 fi
@@ -39,8 +39,8 @@ npm run build
 cd ..
 echo "✅ Kiosk rebuild complete!"
 
-# Start services and kiosk mode (unless called from setup.sh)
-if [ "$FROM_SETUP" != "from-setup" ]; then
+# Start services and kiosk mode (unless called from install.sh)
+if [ "$FROM_INSTALL" != "from-install" ]; then
   echo "🚀 Starting services and kiosk mode..."
   ./start.sh
 fi
