@@ -445,33 +445,97 @@ sudo systemctl stop kiosk || print_warning "Failed to stop kiosk service (it may
 sudo systemctl disable daemon || print_warning "Failed to disable daemon service"
 sudo systemctl disable kiosk || print_warning "Failed to disable kiosk service"
 
-# Kill Chromium processes
-echo "Killing Chromium processes..."
+# Kill Chromium and Wayland compositor processes
+echo "Killing Chromium and Wayland compositor processes..."
 pkill -9 -f chromium-browser || print_info "No Chromium browser processes found"
 pkill -9 -f chromium || print_info "No Chromium processes found"
+pkill -9 -f labwc || print_info "No labwc compositor processes found"
+sleep 2  # Give it time to terminate
 
-# Check if manifest file exists
-if [ -f "$MANIFEST_FILE" ]; then
-    print_info "Found installation manifest file. Using it for precise uninstallation."
+# Function for fallback uninstallation
+use_fallback_uninstall() {
+    print_header "Using Fallback Uninstallation Method"
     
-    # Parse the manifest file
-    if parse_manifest "$MANIFEST_FILE"; then
-        print_header "Processing Created Files"
-        process_created_files "$MANIFEST_CREATED_FILES"
-        
-        print_header "Processing Modified Files"
-        process_modified_files "$MANIFEST_MODIFIED_FILES"
-        
-        # Reload systemd to apply changes
-        sudo systemctl daemon-reload && print_success "Systemd configuration reloaded"
-    else
-        print_warning "Failed to parse manifest file. Using fallback uninstallation method."
-        use_fallback_uninstall
+    print_header "Removing Systemd Services"
+    # Remove systemd service files
+    safe_remove "/etc/systemd/system/daemon.service"
+    safe_remove "/etc/systemd/system/kiosk.service"
+    
+    # Reload systemd to apply changes
+    sudo systemctl daemon-reload && print_success "Systemd configuration reloaded"
+    
+    print_header "Removing Binaries"
+    # Remove installed binaries
+    safe_remove "/usr/local/bin/eeg_daemon"
+    
+    print_header "Cleaning Configuration Files"
+    # Clean up LXDE autostart configuration
+    if [ -f "$HOME/.config/lxsession/LXDE-pi/autostart" ]; then
+        # Check if the file was created by our installation
+        if grep -q "chromium-browser --kiosk" "$HOME/.config/lxsession/LXDE-pi/autostart"; then
+            # Remove the file if it appears to be our kiosk configuration
+            safe_remove "$HOME/.config/lxsession/LXDE-pi/autostart"
+        else
+            # Otherwise just remove our additions
+            remove_lines_containing "$HOME/.config/lxsession/LXDE-pi/autostart" "chromium-browser --kiosk"
+        fi
     fi
-else
-    print_warning "No installation manifest found. Using fallback uninstallation method."
-    use_fallback_uninstall
-fi
+    
+    # Clean up labwc autostart configuration
+    if [ -f "$HOME/.config/labwc/autostart" ]; then
+        # Check if the file contains our marker section (old format)
+        if grep -q "BEGIN ELATA-EEG SECTION" "$HOME/.config/labwc/autostart"; then
+            # Remove only the section between our markers
+            remove_marked_section "$HOME/.config/labwc/autostart" "BEGIN ELATA-EEG SECTION" "END ELATA-EEG SECTION"
+            
+            # If the file is now empty or only contains whitespace/comments, remove it
+            if [ ! -s "$HOME/.config/labwc/autostart" ] || ! grep -v '^[[:space:]]*\(#.*\)\?$' "$HOME/.config/labwc/autostart" > /dev/null; then
+                safe_remove "$HOME/.config/labwc/autostart"
+                print_info "Removed empty autostart file after marker removal"
+            fi
+        # Check for new format (without markers)
+        elif grep -q "chromium-browser --ozone-platform=wayland --kiosk" "$HOME/.config/labwc/autostart"; then
+            # If it contains our kiosk configuration, remove the file
+            safe_remove "$HOME/.config/labwc/autostart"
+            print_info "Removed autostart file with kiosk configuration"
+        else
+            # Otherwise just remove our additions
+            remove_lines_containing "$HOME/.config/labwc/autostart" "chromium-browser"
+        fi
+    fi
+    
+    # Clean up .xinitrc
+    if [ -f "$HOME/.xinitrc" ]; then
+        # Check if the file was created by our installation
+        if grep -q "exec startlxde" "$HOME/.xinitrc" && [ $(wc -l < "$HOME/.xinitrc") -lt 5 ]; then
+            # Remove the file if it appears to be our simple configuration
+            safe_remove "$HOME/.xinitrc"
+        else
+            # Otherwise just remove our additions
+            remove_lines_containing "$HOME/.xinitrc" "exec startlxde"
+        fi
+    fi
+    
+    # Clean up auto-login configuration
+    safe_remove "/etc/systemd/system/getty@tty1.service.d/autologin.conf"
+    
+    # Clean up bash profile additions
+    if [ -f "$HOME/.bash_profile" ]; then
+        # Remove the lines we added for X11 autostart
+        remove_lines_containing "$HOME/.bash_profile" "startx"
+        remove_lines_containing "$HOME/.bash_profile" "bash_profile was sourced"
+        remove_lines_containing "$HOME/.bash_profile" "Added by EEG System Installer"
+    fi
+    
+    # Restore LightDM configuration if needed
+    if [ -f "/etc/lightdm/lightdm.conf" ]; then
+        # Comment out our specific settings rather than removing them
+        comment_lines_containing "/etc/lightdm/lightdm.conf" "user-session=labwc"
+        comment_lines_containing "/etc/lightdm/lightdm.conf" "autologin-session=labwc"
+        comment_lines_containing "/etc/lightdm/lightdm.conf" "autologin-user=$CURRENT_USER"
+        print_info "LightDM configuration has been modified. You may need to reconfigure it manually."
+    fi
+}
 
 # Function for fallback uninstallation
 use_fallback_uninstall() {
