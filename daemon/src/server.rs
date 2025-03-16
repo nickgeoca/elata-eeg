@@ -22,13 +22,13 @@ pub struct CommandResponse {
 }
 
 /// Creates a binary EEG packet according to the specified format:
-/// [timestamp (8 bytes)] [channel1_samples...] [channel2_samples...] [channel3_samples...] [channel4_samples...]
+/// [timestamp (8 bytes)] [channel_samples...] for each channel in the data
 pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
     // Get timestamp in milliseconds
     let timestamp = eeg_batch_data.timestamp;
     
-    // We'll use exactly 4 channels as per spec
-    let num_channels = 4;
+    // Use the actual number of channels from the data
+    let num_channels = eeg_batch_data.channels.len();
     let samples_per_channel = eeg_batch_data.channels[0].len();
     
     // Calculate buffer size: 8 bytes for timestamp + 4 bytes per float per channel
@@ -38,9 +38,8 @@ pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
     // Write timestamp (8 bytes) in little-endian format
     buffer.extend_from_slice(&timestamp.to_le_bytes());
     
-    // Write each channel's samples (exactly 4 channels)
-    // If we have more than 4 channels, use only the first 4
-    // If we have fewer than 4 channels, duplicate the last channel
+    // Write each channel's samples
+    // Use all available channels from the data
     for channel_idx in 0..num_channels {
         let channel_data = if channel_idx < eeg_batch_data.channels.len() {
             &eeg_batch_data.channels[channel_idx]
@@ -62,7 +61,7 @@ pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatc
     let (mut tx, _) = ws.split();
     
     println!("WebSocket client connected - sending binary EEG data");
-    println!("Binary format: [timestamp (8 bytes)] [channel1_samples...] [channel2_samples...] [channel3_samples...] [channel4_samples...]");
+    println!("Binary format: [timestamp (8 bytes)] [channel_samples...] for each channel");
     
     let mut packet_count = 0;
     let start_time = std::time::Instant::now();
