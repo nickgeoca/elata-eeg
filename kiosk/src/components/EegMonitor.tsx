@@ -1,12 +1,12 @@
 'use client';
 
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState } from 'react';
 import { useEegConfig } from './EegConfig';
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
-import { GRAPH_HEIGHT, GRAPH_WIDTH, TIME_TICKS, VOLTAGE_TICKS } from '../utils/eegConstants';
+import { GRAPH_HEIGHT, GRAPH_WIDTH, TIME_TICKS } from '../utils/eegConstants';
 
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -14,7 +14,6 @@ export default function EegMonitorWebGL() {
   const dataRef = useRef<ScrollingBuffer[]>([]);
   const [dataReceived, setDataReceived] = useState(false);
   const latestTimestampRef = useRef<number>(Date.now());
-  const renderNeededRef = useRef<boolean>(false);
   
   // Get configuration from context
   const { config } = useEegConfig();
@@ -42,7 +41,6 @@ export default function EegMonitorWebGL() {
     dataRef,
     windowSizeRef,
     debugInfoRef,
-    renderNeededRef,
     latestTimestampRef
   });
 
@@ -51,7 +49,7 @@ export default function EegMonitorWebGL() {
       <h1 className="text-2xl font-bold mb-4 text-white">EEG Monitor (WebGL)</h1>
       
       {/* Status Bar */}
-      <EegStatusBar 
+      <EegStatusBar
         status={status}
         dataReceived={dataReceived}
         fps={fps}
@@ -95,7 +93,6 @@ export default function EegMonitorWebGL() {
             canvasRef={canvasRef}
             dataRef={dataRef}
             config={config}
-            renderNeededRef={renderNeededRef}
             latestTimestampRef={latestTimestampRef}
             debugInfoRef={debugInfoRef}
           />

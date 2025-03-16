@@ -5,12 +5,8 @@
  *
  * This component handles WebSocket connections to the EEG data server and processes incoming data.
  *
- * IMPORTANT: This file contains critical fixes for WebSocket disconnection issues:
- * 1. Automatic reconnection with exponential backoff (lines ~315-343)
- * 2. Data buffer preservation on reconnection (lines ~266-278)
- * 3. Optimized React lifecycle to prevent unnecessary reconnections (lines ~355-379)
- *
- * DO NOT REVERT these changes as they prevent the graph from clearing during disconnections.
+ * This implementation uses a constant FPS rendering approach, removing the need for
+ * render flags and simplifying the overall rendering process.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
@@ -28,7 +24,6 @@ interface EegDataHandlerProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
-  renderNeededRef: React.MutableRefObject<boolean>;
   latestTimestampRef: React.MutableRefObject<number>;
 }
 
@@ -38,7 +33,6 @@ export function useEegDataHandler({
   dataRef,
   windowSizeRef,
   debugInfoRef,
-  renderNeededRef,
   latestTimestampRef
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
@@ -76,14 +70,11 @@ export function useEegDataHandler({
         new ScrollingBuffer(windowSizeRef.current)
       );
       
-      // Set render needed flag to ensure all channels are drawn
-      renderNeededRef.current = true;
-      
       if (!isProduction) {
         console.log(`Initialized ${channelCount} channel buffers in useEffect`);
       }
     }
-  }, [config, dataRef, windowSizeRef, renderNeededRef, isProduction]);
+  }, [config, dataRef, windowSizeRef, isProduction]);
 
   // Create message handler function with stabilized dependencies
   const createMessageHandler = useCallback(() => {
@@ -155,9 +146,6 @@ export function useEegDataHandler({
             onDataUpdate(false);
           }, 500);
           
-          // Set flag to indicate rendering is needed
-          renderNeededRef.current = true;
-          
           // Process each channel - optimized for performance
           // Use the channelCount already defined above
           for (let ch = 0; ch < channelCount; ch++) {
@@ -221,9 +209,6 @@ export function useEegDataHandler({
               }
             }
           });
-          
-          // Set flag to indicate rendering is needed
-          renderNeededRef.current = true;
         }
       } catch (error) {
         console.error('WebSocket error:', error);
@@ -265,9 +250,6 @@ export function useEegDataHandler({
         new ScrollingBuffer(windowSizeRef.current)
       );
       
-      // Set render needed flag to ensure all channels are drawn
-      renderNeededRef.current = true;
-      
       if (!isProduction) {
         console.log(`Updated window size to ${windowSizeRef.current} based on sample rate ${safeSampleRate}Hz`);
         console.log(`Reinitialized ${channelCount} channel buffers`);
@@ -283,26 +265,14 @@ export function useEegDataHandler({
 
   /**
    * Function to establish WebSocket connection with automatic reconnection
-   *
-   * CRITICAL FIX: This implementation includes several important features:
-   * 1. Data buffer preservation - existing data is kept on reconnection to prevent graph clearing
-   * 2. Exponential backoff - prevents rapid reconnection attempts that could overwhelm the server
-   * 3. Reduced dependencies - prevents unnecessary reconnections due to React's dependency chain
-   *
-   * DO NOT MODIFY these features without careful consideration as they are essential
-   * for maintaining graph continuity during connection issues.
    */
   const connectWebSocket = useCallback(() => {
-    // IMPORTANT: Don't initialize buffers here - we want to preserve existing data on reconnect
-    // Only initialize if they don't exist yet
+    // Only initialize if buffers don't exist yet
     if (dataRef.current.length === 0) {
       const channelCount = config?.channels?.length || 4;
       dataRef.current = Array(channelCount).fill(null).map(() =>
         new ScrollingBuffer(windowSizeRef.current)
       );
-      
-      // Set render needed flag to ensure all channels are drawn on initial setup
-      renderNeededRef.current = true;
     }
     
     // Clear any existing reconnect timeout
@@ -347,8 +317,7 @@ export function useEegDataHandler({
       
       setStatus('Disconnected');
       
-      // CRITICAL FIX: Implement exponential backoff for reconnection
-      // This prevents rapid reconnection attempts that could overwhelm the server
+      // Implement exponential backoff for reconnection
       const maxReconnectDelay = 5000; // Maximum delay of 5 seconds
       const baseDelay = 500; // Start with 500ms delay
       const reconnectDelay = Math.min(
@@ -379,14 +348,10 @@ export function useEegDataHandler({
       // Don't reconnect here - the onclose handler will be called after an error
     };
     
-  }, [createMessageHandler, isProduction]); // CRITICAL: Reduced dependencies to prevent unnecessary reconnections
+  }, [createMessageHandler, isProduction]); // Reduced dependencies to prevent unnecessary reconnections
   
   /**
    * Set up WebSocket connection with stable lifecycle
-   *
-   * CRITICAL FIX: This effect uses an empty dependency array to ensure it only runs once on mount.
-   * This prevents React's dependency chain from causing unnecessary reconnections that would
-   * clear the graph. DO NOT add dependencies to this effect unless absolutely necessary.
    */
   useEffect(() => {
     // Only connect once on initial mount
@@ -411,7 +376,7 @@ export function useEegDataHandler({
         wsRef.current = null;
       }
     };
-  }, []); // CRITICAL: Empty dependency array ensures this only runs once on mount
+  }, []); // Empty dependency array ensures this only runs once on mount
 
   // Calculate FPS from config
   const fps = config ? (config.sample_rate / config.batch_size) : (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);

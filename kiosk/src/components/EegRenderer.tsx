@@ -5,12 +5,10 @@
  *
  * This component handles rendering EEG data using WebGL for efficient visualization.
  *
- * IMPORTANT: This file contains critical fixes for graph clearing issues:
- * 1. Always renders channel data even with small amounts of data
- * 2. Uses a consistent rendering approach to maintain graph continuity
- * 3. Properly tracks if any data was drawn to avoid clearing the graph
- *
- * DO NOT REVERT these changes as they prevent the graph from clearing during disconnections.
+ * This implementation uses a constant FPS rendering approach, which:
+ * 1. Renders at a consistent frame rate regardless of data arrival
+ * 2. Simplifies the rendering logic by removing conditional rendering
+ * 3. Provides a smoother visual experience
  */
 
 import { useEffect, useRef } from 'react';
@@ -23,7 +21,6 @@ interface EegRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   dataRef: React.MutableRefObject<ScrollingBuffer[]>;
   config: any;
-  renderNeededRef: React.MutableRefObject<boolean>;
   latestTimestampRef: React.MutableRefObject<number>;
   debugInfoRef: React.MutableRefObject<{
     lastPacketTime: number;
@@ -37,7 +34,6 @@ export function EegRenderer({
   canvasRef,
   dataRef,
   config,
-  renderNeededRef,
   latestTimestampRef,
   debugInfoRef,
   voltageScaleFactor = 5.0
@@ -61,11 +57,8 @@ export function EegRenderer({
       if (!isProduction) {
         console.log(`Initialized ${channelCount} point arrays with size ${windowSize}`);
       }
-      
-      // Set render needed flag to ensure all channels are drawn after initialization
-      renderNeededRef.current = true;
     }
-  }, [config, isProduction, renderNeededRef]);
+  }, [config, isProduction]);
 
   // WebGL setup
   useEffect(() => {
@@ -207,7 +200,7 @@ export function EegRenderer({
       });
     }
     
-    // Optimized animation frame function
+    // Constant FPS animation frame function
     const animate = () => {
       // Get current time for logging and other operations
       const now = Date.now();
@@ -223,93 +216,79 @@ export function EegRenderer({
         console.log(`Time window: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
       }
       
-      // CRITICAL FIX: Always render to ensure data is displayed
-      // This ensures the graph continues to be drawn even during connection issues
-      // DO NOT change this to conditional rendering as it would cause the graph to clear
-      const shouldRender = true;
+      // Clear the canvas
+      regl.clear({
+        color: [0.1, 0.1, 0.2, 1],
+        depth: 1
+      });
       
-      if (shouldRender) {
-        // Clear the canvas
-        regl.clear({
-          color: [0.1, 0.1, 0.2, 1],
-          depth: 1
-        });
+      // Draw grid
+      drawGrid({
+        points: gridLines,
+        color: [0.2, 0.2, 0.2, 0.8],
+        count: gridLines.length
+      });
+      
+      // Always draw all channels
+      const channelCount = config?.channels?.length || 4;
+      
+      // Track if any data was drawn
+      let totalPointsDrawn = 0;
+      
+      // Draw each channel - always draw all channels together
+      for (let ch = 0; ch < channelCount; ch++) {
+        if (!dataRef.current[ch]) continue;
+        const buffer = dataRef.current[ch];
         
-        // Draw grid
-        drawGrid({
-          points: gridLines,
-          color: [0.2, 0.2, 0.2, 0.8],
-          count: gridLines.length
-        });
+        const points = pointsArraysRef.current[ch];
         
-        // Always draw all channels
-        const channelCount = config?.channels?.length || 4;
+        // Get data points for this channel
+        const count = buffer.getData(points);
+        totalPointsDrawn += count;
         
-        // Track if any data was drawn
-        let totalPointsDrawn = 0;
-        
-        // Draw each channel - always draw all channels together
-        for (let ch = 0; ch < channelCount; ch++) {
-          if (!dataRef.current[ch]) continue;
-          const buffer = dataRef.current[ch];
-          
-          const points = pointsArraysRef.current[ch];
-          
-          // Get data points for this channel
-          const count = buffer.getData(points);
-          totalPointsDrawn += count;
-          
-          // Minimal logging in production
-          if (!isProduction && ch === 0 && debugInfo.packetsReceived > 0 && now - debugInfo.lastPacketTime > 2000) {
-            console.log(`Channel ${ch}: ${count} points`);
-          }
-          
-          // CRITICAL FIX: Always draw the channel data even if count is small
-          // This ensures we don't clear the graph when connection is temporarily lost
-          // Changed from count > 1 to count > 0 to maintain graph continuity during brief disconnections
-          if (count > 0) { // This change is critical - DO NOT revert to count > 1
-            // Use the same linear distribution as the grid lines
-            // This ensures consistent spacing between grid lines and EEG data
-            const yOffset = channelCount <= 1
-              ? 0
-              : -0.9 + (ch / (channelCount - 1)) * 1.8;
-            // Check if we might exceed buffer bounds and log warning
-            const pointsLength = points.length;
-            const neededLength = count * 2;
-            
-            // Use a safe count to prevent buffer overflow
-            let safeCount = count;
-            
-            if (neededLength > pointsLength) {
-              console.warn(`[EegRenderer] Buffer size issue: channel=${ch}, count=${count}, needed=${neededLength}, available=${pointsLength}`);
-              // Adjust count to prevent buffer overflow
-              safeCount = Math.floor(pointsLength / 2);
-            }
-            
-            // Draw the channel data
-            drawLines({
-              points: points.subarray(0, safeCount * 2),
-              count: safeCount,
-              color: getChannelColor(ch),
-              yOffset: yOffset,
-              yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor
-            });
-          }
+        // Minimal logging in production
+        if (!isProduction && ch === 0 && debugInfo.packetsReceived > 0 && now - debugInfo.lastPacketTime > 2000) {
+          console.log(`Channel ${ch}: ${count} points`);
         }
         
-        // Only reset the render flag if we actually drew something
-        // This ensures we keep trying to render if no data is available
-        if (totalPointsDrawn > 0) {
-          renderNeededRef.current = false;
-        }
-        
-        // Log data status every 2 seconds in development mode
-        if (!isProduction && now - debugInfo.lastPacketTime > 2000) {
-          console.log(`Points drawn: ${totalPointsDrawn}, Packets: ${debugInfo.packetsReceived}`);
-          debugInfo.lastPacketTime = now;
+        // Always draw the channel data if we have any points
+        if (count > 0) {
+          // Use the same linear distribution as the grid lines
+          // This ensures consistent spacing between grid lines and EEG data
+          const yOffset = channelCount <= 1
+            ? 0
+            : -0.9 + (ch / (channelCount - 1)) * 1.8;
+          // Check if we might exceed buffer bounds and log warning
+          const pointsLength = points.length;
+          const neededLength = count * 2;
+          
+          // Use a safe count to prevent buffer overflow
+          let safeCount = count;
+          
+          if (neededLength > pointsLength) {
+            console.warn(`[EegRenderer] Buffer size issue: channel=${ch}, count=${count}, needed=${neededLength}, available=${pointsLength}`);
+            // Adjust count to prevent buffer overflow
+            safeCount = Math.floor(pointsLength / 2);
+          }
+          
+          // Draw the channel data
+          drawLines({
+            points: points.subarray(0, safeCount * 2),
+            count: safeCount,
+            color: getChannelColor(ch),
+            yOffset: yOffset,
+            yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor
+          });
         }
       }
       
+      // Log data status every 2 seconds in development mode
+      if (!isProduction && now - debugInfo.lastPacketTime > 2000) {
+        console.log(`Points drawn: ${totalPointsDrawn}, Packets: ${debugInfo.packetsReceived}`);
+        debugInfo.lastPacketTime = now;
+      }
+      
+      // Request the next frame at a constant rate
       requestAnimationFrame(animate);
     };
     
@@ -320,7 +299,7 @@ export function EegRenderer({
       cancelAnimationFrame(animationId);
       regl.destroy();
     };
-  }, [canvasRef, config, dataRef, renderNeededRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);
+  }, [canvasRef, config, dataRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);
 
   return null;
 }
