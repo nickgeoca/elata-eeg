@@ -5,10 +5,14 @@
  *
  * This component handles rendering EEG data using WebGL for efficient visualization.
  *
- * This implementation uses a constant FPS rendering approach, which:
- * 1. Renders at a consistent frame rate regardless of data arrival
- * 2. Simplifies the rendering logic by removing conditional rendering
- * 3. Provides a smoother visual experience
+ * This implementation uses an Index-Based Rendering approach, which:
+ * 1. Assigns each sample a specific index position
+ * 2. Determines x-position based on the sample's index, not time
+ * 3. Shifts the graph by a consistent render offset each frame
+ * 4. Eliminates drift by decoupling animation from wall-clock time
+ *
+ * The render offset is expressed as a percentage of canvas width, allowing
+ * for smooth scrolling that's consistent regardless of screen dimensions.
  */
 
 import { useEffect, useRef } from 'react';
@@ -16,6 +20,7 @@ import REGL from 'regl';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
 import { getChannelColor } from '../utils/colorUtils';
 import { VOLTAGE_TICKS, TIME_TICKS, WINDOW_DURATION } from '../utils/eegConstants';
+import { FIXED_SAMPLE_RATE, TARGET_FRAME_RATE, RENDER_OFFSET_SHIFT_PER_FRAME } from '../components/EegConfig';
 
 interface EegRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
@@ -40,6 +45,7 @@ export function EegRenderer({
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
   const pointsArraysRef = useRef<Float32Array[]>([]);
+  const lastFrameTimeRef = useRef(Date.now());
   const isProduction = process.env.NODE_ENV === 'production';
 
   // Pre-allocate point arrays for each channel to avoid GC
@@ -79,6 +85,13 @@ export function EegRenderer({
     });
     
     reglRef.current = regl;
+    
+    // Get FPS from config or use default
+    const renderFps = config?.fps ?? (config?.sample_rate / config?.batch_size) ?? 60;
+    
+    if (!isProduction) {
+      console.log(`Setting render FPS to ${renderFps}`);
+    }
     
     // Create WebGL command for drawing the grid
     const drawGrid = regl({
@@ -200,10 +213,46 @@ export function EegRenderer({
       });
     }
     
-    // Constant FPS animation frame function
-    const animate = () => {
+    // Render function with consistent FPS
+    const render = () => {
       // Get current time for logging and other operations
       const now = Date.now();
+      
+      // Calculate delta time for frame rate tracking
+      const deltaTime = (now - lastFrameTimeRef.current) / 1000; // in seconds
+      lastFrameTimeRef.current = now;
+      
+      // Debug: Log render call
+      if (!isProduction && Math.random() < 0.01) {
+        console.log(`Render function called at ${new Date(now).toISOString()}`);
+      }
+      
+      // Get sample rate from config or use default
+      const sampleRate = config?.sample_rate || FIXED_SAMPLE_RATE;
+      
+      // Calculate index shift per frame based on sample rate and frame rate
+      // Following the equation: i_delta = S / F (where S = sample rate, F = frame rate)
+      const renderFps = config?.fps ?? TARGET_FRAME_RATE;
+      
+      // Apply a small scaling factor for smoother movement
+      // This ensures consistent leftward movement at a visually pleasing rate
+      const renderOffsetShiftPerFrame = (sampleRate / renderFps) * 0.5;
+      
+      // Update render offsets in all buffers to create smooth scrolling
+      // This shifts the graph left by a consistent amount each frame
+      // The renderOffset is maintained when new data arrives for smooth animation
+      const channelCount = config?.channels?.length || 4;
+      for (let ch = 0; ch < channelCount; ch++) {
+        if (dataRef.current[ch]) {
+          const oldRenderOffset = dataRef.current[ch].getRenderOffset();
+          dataRef.current[ch].updateRenderOffset(renderOffsetShiftPerFrame);
+          
+          // Log renderOffset updates occasionally
+          if (!isProduction && ch === 0 && Math.random() < 0.01) {
+            console.log(`Updated renderOffset for channel ${ch}: ${oldRenderOffset.toFixed(2)} -> ${dataRef.current[ch].getRenderOffset().toFixed(2)}, shift: ${renderOffsetShiftPerFrame.toFixed(4)}`);
+          }
+        }
+      }
       
       // Use a relative time window based on the latest data timestamp
       const latestTimestamp = latestTimestampRef.current;
@@ -214,6 +263,16 @@ export function EegRenderer({
       // Only log in development mode and very infrequently
       if (!isProduction && Math.random() < 0.01) {
         console.log(`Time window: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
+        console.log(`Render offset shift per frame: ${renderOffsetShiftPerFrame.toFixed(4)}`);
+        
+        // Log buffer and renderOffset status for each channel
+        for (let ch = 0; ch < channelCount; ch++) {
+          if (dataRef.current[ch]) {
+            const buffer = dataRef.current[ch];
+            const renderOffset = buffer.getRenderOffset();
+            console.log(`Channel ${ch}: renderOffset=${renderOffset.toFixed(2)}, bufferSize=${buffer.getSize()}, capacity=${buffer.getCapacity()}`);
+          }
+        }
       }
       
       // Clear the canvas
@@ -228,9 +287,6 @@ export function EegRenderer({
         color: [0.2, 0.2, 0.2, 0.8],
         count: gridLines.length
       });
-      
-      // Always draw all channels
-      const channelCount = config?.channels?.length || 4;
       
       // Track if any data was drawn
       let totalPointsDrawn = 0;
@@ -251,7 +307,11 @@ export function EegRenderer({
           console.log(`Channel ${ch}: ${count} points`);
         }
         
-        // Always draw the channel data if we have any points
+        // Get the render offset for logging
+        const renderOffset = buffer.getRenderOffset();
+        
+        // Always draw the channel data if we have points, regardless of render offset
+        // This ensures continuous rendering as long as there's data in the buffer
         if (count > 0) {
           // Use the same linear distribution as the grid lines
           // This ensures consistent spacing between grid lines and EEG data
@@ -279,6 +339,14 @@ export function EegRenderer({
             yOffset: yOffset,
             yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor
           });
+          
+          // Log rendering status in development mode
+          if (!isProduction && Math.random() < 0.005) {
+            console.log(`Rendering channel ${ch}: renderOffset=${renderOffset.toFixed(2)}, bufferSize=${buffer.getSize()}, count=${count}`);
+          }
+        } else if (count === 0 && !isProduction && Math.random() < 0.005) {
+          // Log when we're not rendering because there's no data
+          console.log(`No data to render for channel ${ch}: bufferSize=${buffer.getSize()}`);
         }
       }
       
@@ -288,15 +356,21 @@ export function EegRenderer({
         debugInfo.lastPacketTime = now;
       }
       
-      // Request the next frame at a constant rate
-      requestAnimationFrame(animate);
+      // Always log when no points were drawn (potential issue)
+      if (!isProduction && totalPointsDrawn === 0 && Math.random() < 0.05) {
+        console.warn(`No points drawn in this frame! Check if data is available.`);
+      }
     };
     
-    // Start animation
-    const animationId = requestAnimationFrame(animate);
+    // Set up rendering interval based on FPS
+    const frameInterval = 1000 / renderFps;
+    const renderIntervalId = setInterval(render, frameInterval);
+    
+    // Initial render
+    render();
     
     return () => {
-      cancelAnimationFrame(animationId);
+      clearInterval(renderIntervalId);
       regl.destroy();
     };
   }, [canvasRef, config, dataRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);

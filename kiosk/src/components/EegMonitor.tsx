@@ -43,6 +43,9 @@ export default function EegMonitorWebGL() {
     debugInfoRef,
     latestTimestampRef
   });
+  
+  // Use the FPS from config if available, otherwise use the calculated FPS
+  const displayFps = config?.fps ?? fps;
 
   return (
     <div className="p-4 bg-gray-900">
@@ -52,7 +55,7 @@ export default function EegMonitorWebGL() {
       <EegStatusBar
         status={status}
         dataReceived={dataReceived}
-        fps={fps}
+        fps={displayFps}
         packetsReceived={debugInfoRef.current.packetsReceived}
       />
       

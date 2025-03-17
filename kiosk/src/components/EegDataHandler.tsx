@@ -46,12 +46,12 @@ export function useEegDataHandler({
 
   // Calculate optimal throttle interval based on config
   const getThrottleInterval = useCallback(() => {
-    if (config && config.sample_rate && config.batch_size) {
-      // Calculate frame interval based on sample rate and batch size
+    if (config && config.fps) {
+      // Use the FPS from config to calculate the throttle interval
       // This gives us the time between frames in milliseconds
-      return Math.max(8, 1000 / (config.sample_rate / config.batch_size));
+      return Math.max(8, 1000 / config.fps);
     }
-    return 16; // Default to ~60fps
+    return 16; // Default to ~60fps if no config available
   }, [config]);
 
   // Ensure all buffers are initialized - but only when necessary
@@ -133,6 +133,14 @@ export function useEegDataHandler({
           debugInfo.packetsReceived++;
           debugInfo.samplesProcessed += samplesPerChannel * channelCount; // Use dynamic channel count
           
+          // Maintain render offset when new data arrives
+          // This ensures smooth scrolling by not resetting the offset
+          for (let ch = 0; ch < channelCount; ch++) {
+            if (dataRef.current[ch]) {
+              dataRef.current[ch].maintainRenderOffset();
+            }
+          }
+          
           // Set data received indicator
           onDataUpdate(true);
           
@@ -167,23 +175,34 @@ export function useEegDataHandler({
             // Process all samples for this channel in a single loop
             for (let i = 0; i < samplesPerChannel; i++) {
               const offset = channelBaseOffset + (i * 4);
-              const value = dataView.getFloat32(offset, true); // true for little-endian
               
-              // Fast path for valid values (most common case)
-              if (isFinite(value) && Math.abs(value) <= 10) {
-                dataRef.current[ch].push(value);
-                continue;
-              }
-              
-              // Handle edge cases
-              if (isNaN(value) || !isFinite(value)) {
-                if (!isProduction) {
-                  console.warn(`Invalid value for channel ${ch}: ${value}`);
+              // Add bounds checking to prevent "Offset is outside the bounds of the Dataview" error
+              if (offset + 4 <= event.data.byteLength) {
+                const value = dataView.getFloat32(offset, true); // true for little-endian
+                
+                // Fast path for valid values (most common case)
+                if (isFinite(value) && Math.abs(value) <= 10) {
+                  dataRef.current[ch].push(value);
+                  continue;
                 }
-                dataRef.current[ch].push(0);
+                
+                // Handle edge cases
+                if (isNaN(value) || !isFinite(value)) {
+                  if (!isProduction) {
+                    console.warn(`Invalid value for channel ${ch}: ${value}`);
+                  }
+                  dataRef.current[ch].push(0);
+                } else {
+                  // Clamp large values
+                  dataRef.current[ch].push(Math.max(-3, Math.min(3, value)));
+                }
               } else {
-                // Clamp large values
-                dataRef.current[ch].push(Math.max(-3, Math.min(3, value)));
+                // Handle out-of-bounds access
+                if (!isProduction) {
+                  console.warn(`Offset ${offset} outside bounds of DataView (size: ${event.data.byteLength})`);
+                }
+                // Push a default value to maintain continuity
+                dataRef.current[ch].push(0);
               }
             }
           }
@@ -209,6 +228,15 @@ export function useEegDataHandler({
               }
             }
           });
+          
+          // Maintain render offset when new data arrives
+          // This ensures smooth scrolling by not resetting the offset
+          const channelCount = config?.channels?.length || 4;
+          for (let ch = 0; ch < channelCount; ch++) {
+            if (dataRef.current[ch]) {
+              dataRef.current[ch].maintainRenderOffset();
+            }
+          }
         }
       } catch (error) {
         console.error('WebSocket error:', error);
@@ -378,8 +406,8 @@ export function useEegDataHandler({
     };
   }, []); // Empty dependency array ensures this only runs once on mount
 
-  // Calculate FPS from config
-  const fps = config ? (config.sample_rate / config.batch_size) : (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);
+  // Get FPS directly from config
+  const fps = config?.fps ?? (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);
 
   return { status, fps };
 }
