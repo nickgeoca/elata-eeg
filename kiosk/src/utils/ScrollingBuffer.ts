@@ -94,26 +94,16 @@ export class ScrollingBuffer {
   
   // Update the render offset based on actual elapsed time (in seconds)
   updateRenderOffsetWithTime(elapsedTimeSec: number) {
-    // Apply any pending resets
-    this.applyPendingReset();
+    // Handle reset first and skip accumulation for this frame
+    if (this.pendingReset) {
+      this.renderOffset = 0;
+      this.pendingReset = false;
+      return;
+    }
     
-    // Calculate samples to shift based on elapsed time and sample rate
-    // samples = sampleRate * time
+    // Only accumulate when not handling reset
     const samplesShift = this.sampleRate * elapsedTimeSec;
     this.renderOffset += samplesShift;
-    
-    // Log occasionally for debugging
-    if (Math.random() < 0.005) {
-      console.log(`[ScrollingBuffer] Time-based update: ${elapsedTimeSec.toFixed(4)}s, shift: ${samplesShift.toFixed(2)} samples, new offset: ${this.renderOffset.toFixed(2)}`);
-    }
-  }
-  
-  // Legacy method for compatibility - prefer using updateRenderOffsetWithTime
-  updateRenderOffset(delta: number) {
-    // Apply any pending reset before updating the offset
-    this.applyPendingReset();
-    
-    this.renderOffset += delta;
   }
   
   // Request a reset of render offset when new data arrives
@@ -122,11 +112,6 @@ export class ScrollingBuffer {
   maintainRenderOffset() {
     // Instead of immediately resetting, flag for reset on next frame
     this.pendingReset = true;
-    
-    // Log occasionally for debugging
-    if (Math.random() < 0.01) {
-      console.log(`[ScrollingBuffer] Requested renderOffset reset (will apply on next frame)`);
-    }
   }
   
   // Apply any pending reset before updating the render offset
@@ -149,14 +134,10 @@ export class ScrollingBuffer {
   
   // Get data for rendering without creating new arrays
   getData(points: Float32Array) {
-    // Apply any pending reset before rendering
-    this.applyPendingReset();
+    // No need to apply pending reset here anymore
+    // It's now handled in the update methods to prevent jumps
     
     if (this.size === 0) {
-      // Log a warning if the buffer is empty (only occasionally to avoid spam)
-      if (Math.random() < 0.01) {
-        console.warn(`[ScrollingBuffer] Buffer is empty! renderOffset=${this.renderOffset.toFixed(2)}`);
-      }
       return 0;
     }
     
