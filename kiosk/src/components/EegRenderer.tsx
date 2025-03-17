@@ -264,14 +264,10 @@ export const EegRenderer = React.memo(function EegRenderer({
             dataRef.current[ch].setSampleRate(sampleRate);
           }
           
-          const oldRenderOffset = dataRef.current[ch].getRenderOffset();
-          
-          // Use time-based update instead of fixed frame rate
-          dataRef.current[ch].updateRenderOffsetWithTime(deltaTime);
-          
-          // Log renderOffset updates more frequently for the first channel
+          // No need to update render offset here as it's calculated on-demand
+          // Log renderOffset occasionally for debugging
           if (!isProduction && ch === 0 && Math.random() < 0.05) {
-            console.log(`Updated renderOffset for channel ${ch}: ${oldRenderOffset.toFixed(2)} -> ${dataRef.current[ch].getRenderOffset().toFixed(2)}, dt=${deltaTime.toFixed(4)}s`);
+            console.log(`Current renderOffset for channel ${ch}: ${dataRef.current[ch].getRenderOffset().toFixed(2)}, dt=${deltaTime.toFixed(4)}s`);
           }
         }
       }

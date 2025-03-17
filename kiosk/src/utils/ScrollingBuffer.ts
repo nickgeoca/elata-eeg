@@ -5,25 +5,25 @@
  *
  * Optimized fixed-size buffer for real-time scrolling display of EEG data.
  *
- * ## Time-Based Rendering Approach
+ * ## Global Time Approach
  *
- * This implementation uses a Time-Based Rendering approach, which:
- * 1. Assigns each sample a specific index position in the buffer
- * 2. Determines x-position based on the sample's index, not time
- * 3. Shifts the graph based on actual elapsed time between frames
+ * This implementation uses a Global Time Approach, which:
+ * 1. Records a timestamp when each data chunk arrives
+ * 2. Calculates the render offset based on the time elapsed since that timestamp
+ * 3. Eliminates the need for resets by always computing the offset fresh from a stable reference point
  *
  * ## Mathematical Foundation
  *
  * The key equations that drive the smooth scrolling behavior:
  *
- * 1. Render offset shift based on elapsed time:
- *    offset_delta = S * dt
+ * 1. Render offset calculation based on time since last data chunk:
+ *    offset = S * dt
  *    Where:
  *    - S = sample rate (Hz)
- *    - dt = actual time elapsed since last frame (seconds)
+ *    - dt = time elapsed since last data chunk (seconds)
  *
- *    Example: With S=250Hz and dt=0.0167s (≈60fps):
- *    offset_delta = 250 * 0.0167 = 4.175 samples per frame
+ *    Example: With S=250Hz and dt=0.050s (50ms since last chunk):
+ *    offset = 250 * 0.050 = 12.5 samples
  *
  * 2. Sample position calculation:
  *    x_i = x_right - i * (W / N)
@@ -36,24 +36,25 @@
  *
  *    Example: With N=500 samples:
  *    - Each sample occupies 0.2% of screen width (100%/500)
- *    - A shift based on actual time ensures accurate scrolling regardless of frame timing
+ *    - A shift based on global time ensures consistent behavior without resets
  *
- * ## Render Offset Mechanism
+ * ## Advantages of Global Time Approach
  *
- * The renderOffset is used to create smooth scrolling between data arrivals:
- * - Incremented based on actual elapsed time to create consistent movement
- * - Represents the position offset in percentage of canvas width
- * - Reset to zero when new data arrives to maintain proper alignment
- *
- * IMPORTANT: Using actual elapsed time ensures smooth scrolling even when frame rates
- * fluctuate or don't exactly match the expected rate (e.g., 59.94Hz vs 60Hz).
+ * - Eliminates flickering by avoiding abrupt resets
+ * - Avoids floating-point accumulation errors
+ * - Provides more consistent and predictable behavior
+ * - Scales well with different sample rates or chunk sizes
  */
 export class ScrollingBuffer {
   private buffer: Float32Array;
   private size: number = 0;
-  private renderOffset: number = 0; // In percentage of canvas width
   private sampleRate: number = 250; // Default sample rate, can be updated
-  private pendingReset: boolean = false; // Flag to indicate a pending reset
+  
+  // New properties for Global Time Approach
+  private lastDataChunkTime: number = performance.now();
+  private chunkSize: number = 32; // Number of samples per chunk
+  
+  // We'll keep renderOffset as a computed value rather than a stored property
   
   constructor(private capacity: number, sampleRate?: number) {
     this.buffer = new Float32Array(capacity);
@@ -66,7 +67,7 @@ export class ScrollingBuffer {
   push(value: number) {
     // Log occasionally when data is pushed (for debugging)
     if (Math.random() < 0.001) {
-      console.log(`[ScrollingBuffer] Pushing value: ${value}, current size: ${this.size}, renderOffset: ${this.renderOffset.toFixed(2)}`);
+      console.log(`[ScrollingBuffer] Pushing value: ${value}, current size: ${this.size}`);
     }
     
     // If buffer is full, shift everything left
@@ -80,6 +81,12 @@ export class ScrollingBuffer {
       this.buffer[this.size] = value;
       this.size++;
     }
+    
+    // If this is the first sample in a new chunk, update the timestamp
+    // This assumes push() is called sequentially for each sample in the chunk
+    if (this.size % this.chunkSize === 1) {
+      this.updateDataChunkTime();
+    }
   }
   
   // Update the sample rate if needed
@@ -92,51 +99,52 @@ export class ScrollingBuffer {
     return this.sampleRate;
   }
   
-  // Update the render offset based on actual elapsed time (in seconds)
-  updateRenderOffsetWithTime(elapsedTimeSec: number) {
-    // Handle reset first and skip accumulation for this frame
-    if (this.pendingReset) {
-      this.renderOffset = 0;
-      this.pendingReset = false;
-      return;
+  // Set the chunk size (number of samples per data chunk)
+  setChunkSize(size: number) {
+    this.chunkSize = size;
+  }
+  
+  // Update the timestamp when a new data chunk arrives
+  updateDataChunkTime() {
+    this.lastDataChunkTime = performance.now();
+    
+    // Log occasionally for debugging
+    if (Math.random() < 0.01) {
+      console.log(`[ScrollingBuffer] Updated data chunk time: ${this.lastDataChunkTime}`);
+    }
+  }
+  
+  // This method replaces the previous maintainRenderOffset method
+  // It should be called when a new data chunk arrives
+  notifyNewDataChunk() {
+    this.updateDataChunkTime();
+  }
+  
+  // Calculate the current render offset based on time since last data chunk
+  // This replaces the previous updateRenderOffsetWithTime method
+  calculateRenderOffset(): number {
+    const now = performance.now();
+    const timeSinceLastChunk = (now - this.lastDataChunkTime) / 1000; // in seconds
+    
+    // Calculate offset based on time since last chunk and sample rate
+    // This gives a smooth, continuous movement
+    const samplesElapsed = timeSinceLastChunk * this.sampleRate;
+    
+    // Log occasionally for debugging
+    if (Math.random() < 0.005) {
+      console.log(`[ScrollingBuffer] Time since last chunk: ${timeSinceLastChunk.toFixed(4)}s, samples elapsed: ${samplesElapsed.toFixed(2)}`);
     }
     
-    // Only accumulate when not handling reset
-    const samplesShift = this.sampleRate * elapsedTimeSec;
-    this.renderOffset += samplesShift;
+    return samplesElapsed;
   }
   
-  // Request a reset of render offset when new data arrives
-  // This ensures the graph fits within the canvas when new data comes in
-  // but prevents visual jumps by applying the reset at the start of the next render cycle
-  maintainRenderOffset() {
-    // Instead of immediately resetting, flag for reset on next frame
-    this.pendingReset = true;
-  }
-  
-  // Apply any pending reset before updating the render offset
-  private applyPendingReset() {
-    if (this.pendingReset) {
-      this.renderOffset = 0;
-      this.pendingReset = false;
-      
-      // Log occasionally for debugging
-      if (Math.random() < 0.01) {
-        console.log(`[ScrollingBuffer] Applied renderOffset reset to zero`);
-      }
-    }
-  }
-  
-  // Get the current render offset (in percentage of canvas width)
+  // Get the current render offset (in samples)
   getRenderOffset(): number {
-    return this.renderOffset;
+    return this.calculateRenderOffset();
   }
   
   // Get data for rendering without creating new arrays
   getData(points: Float32Array) {
-    // No need to apply pending reset here anymore
-    // It's now handled in the update methods to prevent jumps
-    
     if (this.size === 0) {
       return 0;
     }
@@ -148,17 +156,17 @@ export class ScrollingBuffer {
       this.size = Math.floor(points.length / 2);
     }
     
+    // Calculate the current render offset
+    const renderOffset = this.calculateRenderOffset();
+    
     // Fill the points array with x,y pairs using index-based approach
     for (let i = 0; i < this.size; i++) {
       // For traditional EEG style (right-to-left):
       // Map newest points (higher indices) to higher x values (right side)
-      // This ensures consistent behavior between initial fill and steady state
       const relativeIndex = this.size - 1 - i;
       
-      // Apply renderOffset for smooth scrolling (in percentage of canvas width)
-      // Use the full render offset value to ensure continuous scrolling between data arrivals
-      // This creates a smooth leftward movement at the target frame rate
-      const adjustedIndex = relativeIndex + this.renderOffset;
+      // Apply renderOffset for smooth scrolling (in samples)
+      const adjustedIndex = relativeIndex + renderOffset;
       const normalizedX = adjustedIndex / (this.capacity - 1);
       
       points[i * 2] = normalizedX;

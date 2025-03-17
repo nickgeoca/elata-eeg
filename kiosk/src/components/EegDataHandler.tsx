@@ -133,11 +133,11 @@ export function useEegDataHandler({
           debugInfo.packetsReceived++;
           debugInfo.samplesProcessed += samplesPerChannel * channelCount; // Use dynamic channel count
           
-          // Maintain render offset when new data arrives
-          // This ensures smooth scrolling by not resetting the offset
+          // Notify the buffer that a new data chunk has arrived
+          // This updates the timestamp for calculating render offset
           for (let ch = 0; ch < channelCount; ch++) {
             if (dataRef.current[ch]) {
-              dataRef.current[ch].maintainRenderOffset();
+              dataRef.current[ch].notifyNewDataChunk();
             }
           }
           
@@ -229,12 +229,12 @@ export function useEegDataHandler({
             }
           });
           
-          // Maintain render offset when new data arrives
-          // This ensures smooth scrolling by not resetting the offset
+          // Notify the buffer that a new data chunk has arrived
+          // This updates the timestamp for calculating render offset
           const channelCount = config?.channels?.length || 4;
           for (let ch = 0; ch < channelCount; ch++) {
             if (dataRef.current[ch]) {
-              dataRef.current[ch].maintainRenderOffset();
+              dataRef.current[ch].notifyNewDataChunk();
             }
           }
         }
