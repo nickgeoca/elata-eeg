@@ -12,7 +12,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import throttle from 'lodash.throttle';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
-import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE } from '../utils/eegConstants';
+import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE, WINDOW_DURATION } from '../utils/eegConstants';
 
 interface EegDataHandlerProps {
   config: any;
@@ -43,16 +43,41 @@ export function useEegDataHandler({
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
+  const lastWindowSizeRef = useRef<number>(windowSizeRef.current);
 
   // Calculate optimal throttle interval based on config
   const getThrottleInterval = useCallback(() => {
-    if (config && config.fps) {
-      // Use the FPS from config to calculate the throttle interval
-      // This gives us the time between frames in milliseconds
-      return Math.max(8, 1000 / config.fps);
-    }
-    return 16; // Default to ~60fps if no config available
+    // Always use the FPS from config to calculate the throttle interval
+    // This gives us the time between frames in milliseconds
+    return Math.max(8, 1000 / (config?.fps || 0));
   }, [config]);
+
+  // Monitor changes to windowSizeRef and update buffer capacities
+  useEffect(() => {
+    // Check if window size has changed
+    if (windowSizeRef.current !== lastWindowSizeRef.current) {
+      const newSize = windowSizeRef.current;
+      
+      if (!isProduction) {
+        console.log(`Window size changed: ${lastWindowSizeRef.current} -> ${newSize}`);
+      }
+      
+      // Update existing buffers instead of recreating them
+      dataRef.current.forEach((buffer, index) => {
+        if (buffer) {
+          if (!isProduction) {
+            console.log(`Updating capacity for channel ${index}: ${buffer.getCapacity()} -> ${newSize}`);
+          }
+          buffer.updateCapacity(newSize);
+        }
+      });
+      
+      // Update last window size
+      lastWindowSizeRef.current = newSize;
+    }
+    
+    // This effect runs on every render, but only does work when windowSizeRef.current changes
+  });
 
   // Ensure all buffers are initialized - but only when necessary
   useEffect(() => {
@@ -62,8 +87,7 @@ export function useEegDataHandler({
     // Only reinitialize if channel count changed or buffers not initialized
     const needsReinitialization =
       dataRef.current.length !== channelCount ||
-      dataRef.current.length === 0 ||
-      (dataRef.current[0] && dataRef.current[0].getCapacity() !== windowSizeRef.current);
+      dataRef.current.length === 0;
     
     if (needsReinitialization) {
       dataRef.current = Array(channelCount).fill(null).map(() =>
@@ -73,6 +97,22 @@ export function useEegDataHandler({
       if (!isProduction) {
         console.log(`Initialized ${channelCount} channel buffers in useEffect`);
       }
+    } else {
+      // Update sample rate and capacity if needed
+      dataRef.current.forEach(buffer => {
+        if (buffer) {
+          // Update sample rate if needed
+          const sampleRate = config?.sample_rate || DEFAULT_SAMPLE_RATE;
+          if (buffer.getSampleRate() !== sampleRate) {
+            buffer.setSampleRate(sampleRate);
+          }
+          
+          // Update capacity if needed
+          if (buffer.getCapacity() !== windowSizeRef.current) {
+            buffer.updateCapacity(windowSizeRef.current);
+          }
+        }
+      });
     }
   }, [config, dataRef, windowSizeRef, isProduction]);
 
@@ -268,19 +308,40 @@ export function useEegDataHandler({
       
       // Add safeguard for sample rate as suggested in the code review
       const safeSampleRate = Math.max(1, config.sample_rate || DEFAULT_SAMPLE_RATE);
-      windowSizeRef.current = Math.ceil((safeSampleRate * 2000) / 1000); // 2000ms window
+      
+      // Note: windowSizeRef.current is now updated in EegMonitor.tsx based on screen width
+      // We don't need to update it here anymore
       
       // Get channel count from config
       const channelCount = config?.channels?.length || 4;
       
-      // Reinitialize buffers with new size and sample rate - always do this to ensure consistency
-      dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current, safeSampleRate)
-      );
-      
-      if (!isProduction) {
-        console.log(`Updated window size to ${windowSizeRef.current} based on sample rate ${safeSampleRate}Hz`);
-        console.log(`Reinitialized ${channelCount} channel buffers`);
+      // Check if we need to reinitialize buffers or just update them
+      if (dataRef.current.length !== channelCount) {
+        // Channel count changed, need to reinitialize
+        dataRef.current = Array(channelCount).fill(null).map(() =>
+          new ScrollingBuffer(windowSizeRef.current, safeSampleRate)
+        );
+        
+        if (!isProduction) {
+          console.log(`Reinitialized ${channelCount} channel buffers due to channel count change`);
+        }
+      } else {
+        // Just update existing buffers
+        dataRef.current.forEach(buffer => {
+          if (buffer) {
+            // Update sample rate
+            buffer.setSampleRate(safeSampleRate);
+            
+            // Update capacity if needed
+            if (buffer.getCapacity() !== windowSizeRef.current) {
+              buffer.updateCapacity(windowSizeRef.current);
+            }
+          }
+        });
+        
+        if (!isProduction) {
+          console.log(`Updated ${channelCount} channel buffers with sample rate ${safeSampleRate}Hz`);
+        }
       }
       
       // Recreate message handler with new throttle interval
@@ -406,8 +467,8 @@ export function useEegDataHandler({
     };
   }, []); // Empty dependency array ensures this only runs once on mount
 
-  // Get FPS directly from config
-  const fps = config?.fps ?? (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);
+  // Get FPS directly from config with no fallback
+  const fps = config?.fps || 0;
 
   return { status, fps };
 }

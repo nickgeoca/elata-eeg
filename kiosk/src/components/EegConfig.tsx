@@ -2,19 +2,16 @@
 
 import { useEffect, useState, createContext, useContext } from 'react';
 
-// Constants for Index-Based Rendering approach
-export const FIXED_SAMPLE_RATE = 250; // Hz
-export const TARGET_FRAME_RATE = 60; // fps
-export const RENDER_OFFSET_SHIFT_PER_FRAME = FIXED_SAMPLE_RATE / TARGET_FRAME_RATE; // ≈ 4.17
-
 // Define the EEG configuration interface
 export interface EegConfig {
+  // Defined from daemon
   sample_rate: number;
   channels: number[];
   gain: number;
   board_driver: string;
   batch_size: number;
-  fps: number; // No longer optional, always calculated
+  // Defined from config file
+  fps: number;
 }
 
 // Create a context to share the configuration across components
@@ -46,13 +43,12 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         const data = JSON.parse(event.data);
         
         // Calculate FPS client-side based on sample rate and batch size
-        // const calculatedFps = data.sample_rate / data.batch_size;
-        const calculatedFps = 60.0;
+        const FPS = 60.0;
         
         // Add the calculated FPS to the config
         const configWithFps = {
           ...data,
-          fps: calculatedFps
+          fps: FPS
         };
         
         setConfig(configWithFps);

@@ -20,8 +20,7 @@ import React, { useEffect, useRef } from 'react';
 import REGL from 'regl';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
 import { getChannelColor } from '../utils/colorUtils';
-import { VOLTAGE_TICKS, TIME_TICKS, WINDOW_DURATION } from '../utils/eegConstants';
-import { FIXED_SAMPLE_RATE, TARGET_FRAME_RATE, RENDER_OFFSET_SHIFT_PER_FRAME } from '../components/EegConfig';
+import { VOLTAGE_TICKS, TIME_TICKS, WINDOW_DURATION, DEFAULT_SAMPLE_RATE } from '../utils/eegConstants';
 
 interface EegRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
@@ -49,25 +48,73 @@ export const EegRenderer = React.memo(function EegRenderer({
   const lastFrameTimeRef = useRef(Date.now());
   const frameCountRef = useRef(0);
   const lastFpsLogTimeRef = useRef(Date.now());
+  const canvasDimensionsRef = useRef({ width: 0, height: 0 });
   const isProduction = process.env.NODE_ENV === 'production';
+
+  // Track canvas dimensions to detect changes
+  useEffect(() => {
+    if (!canvasRef.current) return;
+    
+    const updateDimensions = () => {
+      if (canvasRef.current) {
+        const { width, height } = canvasRef.current;
+        
+        // Only update if dimensions have changed
+        if (width !== canvasDimensionsRef.current.width || 
+            height !== canvasDimensionsRef.current.height) {
+          
+          canvasDimensionsRef.current = { width, height };
+          
+          if (!isProduction) {
+            console.log(`Canvas dimensions changed: ${width}x${height}`);
+          }
+        }
+      }
+    };
+    
+    // Initial update
+    updateDimensions();
+    
+    // Create observer to detect canvas resize
+    const observer = new ResizeObserver(() => {
+      updateDimensions();
+    });
+    
+    observer.observe(canvasRef.current);
+    
+    return () => {
+      if (canvasRef.current) {
+        observer.unobserve(canvasRef.current);
+      }
+      observer.disconnect();
+    };
+  }, [canvasRef, isProduction]);
 
   // Pre-allocate point arrays for each channel to avoid GC
   useEffect(() => {
     // Use channel count from config or default to 4
     const channelCount = config?.channels?.length || 4;
-    const windowSize = Math.ceil(((config?.sample_rate || 250) * WINDOW_DURATION) / 1000);
     
-    // Only recreate arrays if needed (channel count changed or not initialized)
-    if (pointsArraysRef.current.length !== channelCount) {
+    // Get buffer capacity from the first buffer or calculate from sample rate
+    const bufferCapacity = dataRef.current[0]?.getCapacity() || 
+                          Math.ceil(((config?.sample_rate || 250) * WINDOW_DURATION) / 1000);
+    
+    // Only recreate arrays if needed (channel count changed or not initialized or capacity changed)
+    const needsUpdate = 
+      pointsArraysRef.current.length !== channelCount ||
+      (pointsArraysRef.current.length > 0 && pointsArraysRef.current[0].length < bufferCapacity * 2);
+    
+    if (needsUpdate) {
+      // Allocate enough space for all points (x,y pairs)
       pointsArraysRef.current = Array(channelCount).fill(null).map(() =>
-        new Float32Array(windowSize * 2)
+        new Float32Array(bufferCapacity * 2)
       );
       
       if (!isProduction) {
-        console.log(`Initialized ${channelCount} point arrays with size ${windowSize}`);
+        console.log(`Initialized ${channelCount} point arrays with capacity ${bufferCapacity}`);
       }
     }
-  }, [config, isProduction]);
+  }, [config, dataRef, isProduction]);
 
   // WebGL setup
   useEffect(() => {
@@ -89,8 +136,8 @@ export const EegRenderer = React.memo(function EegRenderer({
     
     reglRef.current = regl;
     
-    // Get FPS from config or use default
-    const renderFps = config?.fps ?? (config?.sample_rate / config?.batch_size) ?? 60;
+    // Get FPS from config with no fallback
+    const renderFps = config?.fps || 0;
     
     if (!isProduction) {
       console.log(`Setting render FPS to ${renderFps}`);
@@ -181,40 +228,47 @@ export const EegRenderer = React.memo(function EegRenderer({
       depth: { enable: false }
     });
     
-    // Create grid lines
-    const gridLines: number[][] = [];
-    
-    // Vertical time lines
-    TIME_TICKS.forEach(time => {
-      const x = 1.0 - (time / (WINDOW_DURATION / 1000));
-      gridLines.push(
-        [x * 2 - 1, -1], // Bottom
-        [x * 2 - 1, 1]   // Top
-      );
-    });
-    
-    // Horizontal voltage lines for each channel
-    const channelCount = config?.channels?.length || 4;
-    for (let ch = 0; ch < channelCount; ch++) {
-      // Use a linear distribution from top to bottom
-      let chOffset = channelCount <= 1
-        ? 0
-        : -0.9 + (ch / (channelCount - 1)) * 1.8;
+    // Function to create grid lines
+    const createGridLines = () => {
+      const gridLines: number[][] = [];
       
-      VOLTAGE_TICKS.forEach(voltage => {
-        // Normalize voltage to [-1, 1] range within channel space
-        // Scale based on channel count to prevent overlap with many channels
-        const baseScaleFactor = Math.min(0.1, 0.3 / channelCount);
-        const scaleFactor = baseScaleFactor * voltageScaleFactor;
-        const normalizedVoltage = (voltage / 3) * scaleFactor;
-        const y = chOffset + normalizedVoltage;
-        
+      // Vertical time lines
+      TIME_TICKS.forEach(time => {
+        const x = 1.0 - (time / (WINDOW_DURATION / 1000));
         gridLines.push(
-          [-1, y], // Left
-          [1, y]   // Right
+          [x * 2 - 1, -1], // Bottom
+          [x * 2 - 1, 1]   // Top
         );
       });
-    }
+      
+      // Horizontal voltage lines for each channel
+      const channelCount = config?.channels?.length || 4;
+      for (let ch = 0; ch < channelCount; ch++) {
+        // Use a linear distribution from top to bottom
+        let chOffset = channelCount <= 1
+          ? 0
+          : -0.9 + (ch / (channelCount - 1)) * 1.8;
+        
+        VOLTAGE_TICKS.forEach(voltage => {
+          // Normalize voltage to [-1, 1] range within channel space
+          // Scale based on channel count to prevent overlap with many channels
+          const baseScaleFactor = Math.min(0.1, 0.3 / channelCount);
+          const scaleFactor = baseScaleFactor * voltageScaleFactor;
+          const normalizedVoltage = (voltage / 3) * scaleFactor;
+          const y = chOffset + normalizedVoltage;
+          
+          gridLines.push(
+            [-1, y], // Left
+            [1, y]   // Right
+          );
+        });
+      }
+      
+      return gridLines;
+    };
+    
+    // Create initial grid lines
+    const gridLines = createGridLines();
     
     // Render function with time-based scrolling
     const render = () => {
@@ -245,7 +299,7 @@ export const EegRenderer = React.memo(function EegRenderer({
       }
       
       // Get sample rate from config or use default
-      const sampleRate = config?.sample_rate || FIXED_SAMPLE_RATE;
+      const sampleRate = config?.sample_rate || DEFAULT_SAMPLE_RATE;
       
       // Update render offsets in all buffers using time-based approach
       // This shifts the graph left based on actual elapsed time
@@ -314,6 +368,16 @@ export const EegRenderer = React.memo(function EegRenderer({
         if (!dataRef.current[ch]) continue;
         const buffer = dataRef.current[ch];
         
+        // Ensure point arrays are large enough
+        if (ch >= pointsArraysRef.current.length || 
+            pointsArraysRef.current[ch].length < buffer.getCapacity() * 2) {
+          // Reallocate this channel's points array
+          pointsArraysRef.current[ch] = new Float32Array(buffer.getCapacity() * 2);
+          if (!isProduction) {
+            console.log(`Reallocated points array for channel ${ch} with capacity ${buffer.getCapacity()}`);
+          }
+        }
+        
         const points = pointsArraysRef.current[ch];
         
         // Get data points for this channel
@@ -379,11 +443,28 @@ export const EegRenderer = React.memo(function EegRenderer({
         console.warn(`No points drawn in this frame! Check if data is available.`);
       }
     };
-    // Set up rendering with requestAnimationFrame for better sync with browser refresh
+    // Set up rendering with FPS control
     let animationFrameId: number;
+    let lastRenderTime = 0;
     
-    const animationLoop = () => {
-      render();
+    const animationLoop = (timestamp: number) => {
+      // Calculate time since last render
+      const elapsed = timestamp - lastRenderTime;
+      
+      // Calculate frame interval based on desired FPS
+      const frameInterval = 1000 / (renderFps || 60); // Default to 60 FPS if not specified
+      
+      // Only render if enough time has elapsed
+      if (elapsed >= frameInterval) {
+        render();
+        lastRenderTime = timestamp - (elapsed % frameInterval); // Adjust for any remainder
+        
+        if (!isProduction && Math.random() < 0.05) {
+          console.log(`Rendering at interval: ${elapsed.toFixed(2)}ms (target: ${frameInterval.toFixed(2)}ms)`);
+        }
+      }
+      
+      // Schedule next frame
       animationFrameId = requestAnimationFrame(animationLoop);
     };
     

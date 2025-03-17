@@ -3,7 +3,7 @@
 /**
  * ScrollingBuffer.ts
  *
- * Optimized fixed-size buffer for real-time scrolling display of EEG data.
+ * Optimized dynamic-size buffer for real-time scrolling display of EEG data.
  *
  * ## Global Time Approach
  *
@@ -44,6 +44,15 @@
  * - Avoids floating-point accumulation errors
  * - Provides more consistent and predictable behavior
  * - Scales well with different sample rates or chunk sizes
+ * 
+ * ## Dynamic Buffer Size
+ * 
+ * The buffer size is now dynamically adjusted based on:
+ * - Screen width (pixels)
+ * - Sample rate (Hz)
+ * - Window duration (ms)
+ * 
+ * This ensures optimal memory usage and rendering performance across different screen sizes.
  */
 export class ScrollingBuffer {
   private buffer: Float32Array;
@@ -61,6 +70,9 @@ export class ScrollingBuffer {
     if (sampleRate) {
       this.sampleRate = sampleRate;
     }
+    
+    // Log buffer creation
+    console.log(`[ScrollingBuffer] Created new buffer with capacity: ${capacity}, sample rate: ${this.sampleRate}Hz`);
   }
   
   // Add a new value to the buffer
@@ -186,5 +198,41 @@ export class ScrollingBuffer {
   // Get the current size of the buffer (number of data points)
   getSize(): number {
     return this.size;
+  }
+  
+  // NEW: Update the capacity of the buffer
+  // This allows dynamic resizing based on screen width
+  updateCapacity(newCapacity: number): void {
+    if (newCapacity === this.capacity) {
+      return; // No change needed
+    }
+    
+    // Log capacity change
+    console.log(`[ScrollingBuffer] Updating capacity: ${this.capacity} -> ${newCapacity}`);
+    
+    // Create new buffer with updated capacity
+    const newBuffer = new Float32Array(newCapacity);
+    
+    // Copy existing data to new buffer
+    if (this.size > 0) {
+      // If new buffer is smaller, only copy what fits
+      const copySize = Math.min(this.size, newCapacity);
+      
+      if (this.size <= newCapacity) {
+        // If new buffer is larger or same size, copy all data
+        newBuffer.set(this.buffer.subarray(0, copySize));
+      } else {
+        // If new buffer is smaller, copy the most recent data
+        // (last 'newCapacity' elements from the current buffer)
+        newBuffer.set(this.buffer.subarray(this.size - newCapacity, this.size));
+      }
+      
+      // Update size
+      this.size = copySize;
+    }
+    
+    // Update buffer and capacity
+    this.buffer = newBuffer;
+    this.capacity = newCapacity;
   }
 }
