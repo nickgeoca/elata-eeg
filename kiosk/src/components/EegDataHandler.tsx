@@ -67,7 +67,7 @@ export function useEegDataHandler({
     
     if (needsReinitialization) {
       dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
+        new ScrollingBuffer(windowSizeRef.current, config?.sample_rate || DEFAULT_SAMPLE_RATE)
       );
       
       if (!isProduction) {
@@ -273,9 +273,9 @@ export function useEegDataHandler({
       // Get channel count from config
       const channelCount = config?.channels?.length || 4;
       
-      // Reinitialize buffers with new size - always do this to ensure consistency
+      // Reinitialize buffers with new size and sample rate - always do this to ensure consistency
       dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
+        new ScrollingBuffer(windowSizeRef.current, safeSampleRate)
       );
       
       if (!isProduction) {
@@ -299,7 +299,7 @@ export function useEegDataHandler({
     if (dataRef.current.length === 0) {
       const channelCount = config?.channels?.length || 4;
       dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
+        new ScrollingBuffer(windowSizeRef.current, config?.sample_rate || DEFAULT_SAMPLE_RATE)
       );
     }
     

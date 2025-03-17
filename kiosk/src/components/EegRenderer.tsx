@@ -5,14 +5,15 @@
  *
  * This component handles rendering EEG data using WebGL for efficient visualization.
  *
- * This implementation uses an Index-Based Rendering approach, which:
+ * This implementation uses a Time-Based Rendering approach, which:
  * 1. Assigns each sample a specific index position
  * 2. Determines x-position based on the sample's index, not time
- * 3. Shifts the graph by a consistent render offset each frame
- * 4. Eliminates drift by decoupling animation from wall-clock time
+ * 3. Shifts the graph based on actual elapsed time between frames
+ * 4. Eliminates drift by accounting for actual frame timing
  *
  * The render offset is expressed as a percentage of canvas width, allowing
- * for smooth scrolling that's consistent regardless of screen dimensions.
+ * for smooth scrolling that's consistent regardless of screen dimensions or
+ * frame rate fluctuations.
  */
 
 import { useEffect, useRef } from 'react';
@@ -46,6 +47,8 @@ export function EegRenderer({
   const reglRef = useRef<any>(null);
   const pointsArraysRef = useRef<Float32Array[]>([]);
   const lastFrameTimeRef = useRef(Date.now());
+  const frameCountRef = useRef(0);
+  const lastFpsLogTimeRef = useRef(Date.now());
   const isProduction = process.env.NODE_ENV === 'production';
 
   // Pre-allocate point arrays for each channel to avoid GC
@@ -213,43 +216,62 @@ export function EegRenderer({
       });
     }
     
-    // Render function with consistent FPS
+    // Render function with time-based scrolling
     const render = () => {
       // Get current time for logging and other operations
       const now = Date.now();
       
-      // Calculate delta time for frame rate tracking
+      // Calculate delta time for time-based scrolling
+      // This is the key to smooth scrolling - we use the actual elapsed time
+      // rather than assuming a fixed frame rate
       const deltaTime = (now - lastFrameTimeRef.current) / 1000; // in seconds
       lastFrameTimeRef.current = now;
       
-      // Debug: Log render call
-      if (!isProduction && Math.random() < 0.01) {
-        console.log(`Render function called at ${new Date(now).toISOString()}`);
+      // Increment frame counter for FPS calculation
+      frameCountRef.current++;
+      
+      // Calculate and log actual FPS every second
+      if (now - lastFpsLogTimeRef.current > 1000) {
+        const elapsedSec = (now - lastFpsLogTimeRef.current) / 1000;
+        const actualFps = frameCountRef.current / elapsedSec;
+        console.log(`Actual render FPS: ${actualFps.toFixed(2)} (${frameCountRef.current} frames in ${elapsedSec.toFixed(2)}s)`);
+        frameCountRef.current = 0;
+        lastFpsLogTimeRef.current = now;
+      }
+      
+      // Debug: Log render call more frequently during development
+      if (!isProduction && Math.random() < 0.05) {
+        console.log(`Render function called at ${new Date(now).toISOString()}, dt=${deltaTime.toFixed(4)}s`);
       }
       
       // Get sample rate from config or use default
       const sampleRate = config?.sample_rate || FIXED_SAMPLE_RATE;
       
-      // Calculate index shift per frame based on sample rate and frame rate
-      // Following the equation: i_delta = S / F (where S = sample rate, F = frame rate)
-      const renderFps = config?.fps ?? TARGET_FRAME_RATE;
-      
-      // Apply a small scaling factor for smoother movement
-      // This ensures consistent leftward movement at a visually pleasing rate
-      const renderOffsetShiftPerFrame = (sampleRate / renderFps) * 0.5;
-      
-      // Update render offsets in all buffers to create smooth scrolling
-      // This shifts the graph left by a consistent amount each frame
+      // Update render offsets in all buffers using time-based approach
+      // This shifts the graph left based on actual elapsed time
       // The renderOffset is maintained when new data arrives for smooth animation
       const channelCount = config?.channels?.length || 4;
+      
+      // Log the time-based approach more frequently during development
+      if (!isProduction && Math.random() < 0.1) {
+        console.log(`Time-based scrolling: dt=${deltaTime.toFixed(4)}s, expected samples shift: ${(sampleRate * deltaTime).toFixed(2)}`);
+      }
+      
       for (let ch = 0; ch < channelCount; ch++) {
         if (dataRef.current[ch]) {
-          const oldRenderOffset = dataRef.current[ch].getRenderOffset();
-          dataRef.current[ch].updateRenderOffset(renderOffsetShiftPerFrame);
+          // Update sample rate in buffer if needed
+          if (dataRef.current[ch].getSampleRate() !== sampleRate) {
+            dataRef.current[ch].setSampleRate(sampleRate);
+          }
           
-          // Log renderOffset updates occasionally
-          if (!isProduction && ch === 0 && Math.random() < 0.01) {
-            console.log(`Updated renderOffset for channel ${ch}: ${oldRenderOffset.toFixed(2)} -> ${dataRef.current[ch].getRenderOffset().toFixed(2)}, shift: ${renderOffsetShiftPerFrame.toFixed(4)}`);
+          const oldRenderOffset = dataRef.current[ch].getRenderOffset();
+          
+          // Use time-based update instead of fixed frame rate
+          dataRef.current[ch].updateRenderOffsetWithTime(deltaTime);
+          
+          // Log renderOffset updates more frequently for the first channel
+          if (!isProduction && ch === 0 && Math.random() < 0.05) {
+            console.log(`Updated renderOffset for channel ${ch}: ${oldRenderOffset.toFixed(2)} -> ${dataRef.current[ch].getRenderOffset().toFixed(2)}, dt=${deltaTime.toFixed(4)}s`);
           }
         }
       }
@@ -263,7 +285,7 @@ export function EegRenderer({
       // Only log in development mode and very infrequently
       if (!isProduction && Math.random() < 0.01) {
         console.log(`Time window: ${new Date(startTime).toISOString()} to ${new Date(endTime).toISOString()}`);
-        console.log(`Render offset shift per frame: ${renderOffsetShiftPerFrame.toFixed(4)}`);
+        console.log(`Sample rate: ${sampleRate} Hz, time-based scrolling active`);
         
         // Log buffer and renderOffset status for each channel
         for (let ch = 0; ch < channelCount; ch++) {
@@ -340,13 +362,13 @@ export function EegRenderer({
             yScale: Math.min(0.1, 0.3 / channelCount) * voltageScaleFactor // Scale based on channel count and user-defined scale factor
           });
           
-          // Log rendering status in development mode
-          if (!isProduction && Math.random() < 0.005) {
-            console.log(`Rendering channel ${ch}: renderOffset=${renderOffset.toFixed(2)}, bufferSize=${buffer.getSize()}, count=${count}`);
+          // Log rendering status in development mode more frequently
+          if (!isProduction && Math.random() < 0.02) {
+            console.log(`Rendering channel ${ch}: renderOffset=${renderOffset.toFixed(2)}, bufferSize=${buffer.getSize()}, count=${count}, using full offset for continuous scrolling`);
           }
-        } else if (count === 0 && !isProduction && Math.random() < 0.005) {
+        } else if (count === 0 && !isProduction && Math.random() < 0.02) {
           // Log when we're not rendering because there's no data
-          console.log(`No data to render for channel ${ch}: bufferSize=${buffer.getSize()}`);
+          console.log(`No data to render for channel ${ch}: bufferSize=${buffer.getSize()}, renderOffset=${renderOffset.toFixed(2)}`);
         }
       }
       

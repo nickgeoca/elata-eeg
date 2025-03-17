@@ -5,26 +5,60 @@
  *
  * Optimized fixed-size buffer for real-time scrolling display of EEG data.
  *
- * This implementation uses an Index-Based Rendering approach, which:
- * 1. Assigns each sample a specific index position
- * 2. Determines x-position based on the sample's index, not time
- * 3. Shifts the graph by a consistent amount each frame
+ * ## Time-Based Rendering Approach
  *
- * Key equations:
- * - Render offset shift per frame: offset_delta = S / F (where S = sample rate, F = frame rate)
- * - Sample position: x_i = x_right - i * (W / N) (where W = screen width, N = total samples)
+ * This implementation uses a Time-Based Rendering approach, which:
+ * 1. Assigns each sample a specific index position in the buffer
+ * 2. Determines x-position based on the sample's index, not time
+ * 3. Shifts the graph based on actual elapsed time between frames
+ *
+ * ## Mathematical Foundation
+ *
+ * The key equations that drive the smooth scrolling behavior:
+ *
+ * 1. Render offset shift based on elapsed time:
+ *    offset_delta = S * dt
+ *    Where:
+ *    - S = sample rate (Hz)
+ *    - dt = actual time elapsed since last frame (seconds)
+ *
+ *    Example: With S=250Hz and dt=0.0167s (≈60fps):
+ *    offset_delta = 250 * 0.0167 = 4.175 samples per frame
+ *
+ * 2. Sample position calculation:
+ *    x_i = x_right - i * (W / N)
+ *    Where:
+ *    - x_i = position of sample i
+ *    - x_right = right edge position (1.0 in normalized coordinates)
+ *    - i = sample index
+ *    - W = screen width (normalized to 1.0)
+ *    - N = total samples in buffer
+ *
+ *    Example: With N=500 samples:
+ *    - Each sample occupies 0.2% of screen width (100%/500)
+ *    - A shift based on actual time ensures accurate scrolling regardless of frame timing
+ *
+ * ## Render Offset Mechanism
  *
  * The renderOffset is used to create smooth scrolling between data arrivals:
- * - Incremented by offset_delta each frame to create consistent movement
+ * - Incremented based on actual elapsed time to create consistent movement
  * - Represents the position offset in percentage of canvas width
+ * - Reset to zero when new data arrives to maintain proper alignment
+ *
+ * IMPORTANT: Using actual elapsed time ensures smooth scrolling even when frame rates
+ * fluctuate or don't exactly match the expected rate (e.g., 59.94Hz vs 60Hz).
  */
 export class ScrollingBuffer {
   private buffer: Float32Array;
   private size: number = 0;
   private renderOffset: number = 0; // In percentage of canvas width
+  private sampleRate: number = 250; // Default sample rate, can be updated
   
-  constructor(private capacity: number) {
+  constructor(private capacity: number, sampleRate?: number) {
     this.buffer = new Float32Array(capacity);
+    if (sampleRate) {
+      this.sampleRate = sampleRate;
+    }
   }
   
   // Add a new value to the buffer
@@ -47,16 +81,44 @@ export class ScrollingBuffer {
     }
   }
   
-  // Update the render offset by the specified delta
+  // Update the sample rate if needed
+  setSampleRate(sampleRate: number) {
+    this.sampleRate = sampleRate;
+  }
+  
+  // Get the current sample rate
+  getSampleRate(): number {
+    return this.sampleRate;
+  }
+  
+  // Update the render offset based on actual elapsed time (in seconds)
+  updateRenderOffsetWithTime(elapsedTimeSec: number) {
+    // Calculate samples to shift based on elapsed time and sample rate
+    // samples = sampleRate * time
+    const samplesShift = this.sampleRate * elapsedTimeSec;
+    this.renderOffset += samplesShift;
+    
+    // Log occasionally for debugging
+    if (Math.random() < 0.005) {
+      console.log(`[ScrollingBuffer] Time-based update: ${elapsedTimeSec.toFixed(4)}s, shift: ${samplesShift.toFixed(2)} samples, new offset: ${this.renderOffset.toFixed(2)}`);
+    }
+  }
+  
+  // Legacy method for compatibility - prefer using updateRenderOffsetWithTime
   updateRenderOffset(delta: number) {
     this.renderOffset += delta;
   }
   
-  // Maintain render offset when new data arrives
-  // This ensures smooth scrolling by not resetting the offset
+  // Reset render offset when new data arrives
+  // This ensures the graph fits within the canvas when new data comes in
   maintainRenderOffset() {
-    // No reset, just continue with current renderOffset
-    // This method exists for API compatibility with the old reset behavior
+    // Reset renderOffset to zero when new data arrives
+    this.renderOffset = 0;
+    
+    // Log occasionally for debugging
+    if (Math.random() < 0.01) {
+      console.log(`[ScrollingBuffer] Reset renderOffset to zero`);
+    }
   }
   
   // Get the current render offset (in percentage of canvas width)
@@ -89,9 +151,9 @@ export class ScrollingBuffer {
       const relativeIndex = this.size - 1 - i;
       
       // Apply renderOffset for smooth scrolling (in percentage of canvas width)
-      // Use a fractional approach to ensure smooth leftward movement
-      // This prevents jumps when new data arrives since we maintain consistent renderOffset
-      const adjustedIndex = relativeIndex - (this.renderOffset % 1);
+      // Use the full render offset value to ensure continuous scrolling between data arrivals
+      // This creates a smooth leftward movement at the target frame rate
+      const adjustedIndex = relativeIndex + this.renderOffset;
       const normalizedX = adjustedIndex / (this.capacity - 1);
       
       points[i * 2] = normalizedX;
