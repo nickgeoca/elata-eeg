@@ -53,6 +53,7 @@ export class ScrollingBuffer {
   private size: number = 0;
   private renderOffset: number = 0; // In percentage of canvas width
   private sampleRate: number = 250; // Default sample rate, can be updated
+  private pendingReset: boolean = false; // Flag to indicate a pending reset
   
   constructor(private capacity: number, sampleRate?: number) {
     this.buffer = new Float32Array(capacity);
@@ -93,6 +94,9 @@ export class ScrollingBuffer {
   
   // Update the render offset based on actual elapsed time (in seconds)
   updateRenderOffsetWithTime(elapsedTimeSec: number) {
+    // Apply any pending resets
+    this.applyPendingReset();
+    
     // Calculate samples to shift based on elapsed time and sample rate
     // samples = sampleRate * time
     const samplesShift = this.sampleRate * elapsedTimeSec;
@@ -106,18 +110,35 @@ export class ScrollingBuffer {
   
   // Legacy method for compatibility - prefer using updateRenderOffsetWithTime
   updateRenderOffset(delta: number) {
+    // Apply any pending reset before updating the offset
+    this.applyPendingReset();
+    
     this.renderOffset += delta;
   }
   
-  // Reset render offset when new data arrives
+  // Request a reset of render offset when new data arrives
   // This ensures the graph fits within the canvas when new data comes in
+  // but prevents visual jumps by applying the reset at the start of the next render cycle
   maintainRenderOffset() {
-    // Reset renderOffset to zero when new data arrives
-    this.renderOffset = 0;
+    // Instead of immediately resetting, flag for reset on next frame
+    this.pendingReset = true;
     
     // Log occasionally for debugging
     if (Math.random() < 0.01) {
-      console.log(`[ScrollingBuffer] Reset renderOffset to zero`);
+      console.log(`[ScrollingBuffer] Requested renderOffset reset (will apply on next frame)`);
+    }
+  }
+  
+  // Apply any pending reset before updating the render offset
+  private applyPendingReset() {
+    if (this.pendingReset) {
+      this.renderOffset = 0;
+      this.pendingReset = false;
+      
+      // Log occasionally for debugging
+      if (Math.random() < 0.01) {
+        console.log(`[ScrollingBuffer] Applied renderOffset reset to zero`);
+      }
     }
   }
   
@@ -128,6 +149,9 @@ export class ScrollingBuffer {
   
   // Get data for rendering without creating new arrays
   getData(points: Float32Array) {
+    // Apply any pending reset before rendering
+    this.applyPendingReset();
+    
     if (this.size === 0) {
       // Log a warning if the buffer is empty (only occasionally to avoid spam)
       if (Math.random() < 0.01) {

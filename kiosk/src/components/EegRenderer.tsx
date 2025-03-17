@@ -16,7 +16,7 @@
  * frame rate fluctuations.
  */
 
-import { useEffect, useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import REGL from 'regl';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
 import { getChannelColor } from '../utils/colorUtils';
@@ -36,7 +36,7 @@ interface EegRendererProps {
   voltageScaleFactor?: number; // Default to 1.0 if not provided
 }
 
-export function EegRenderer({
+export const EegRenderer = React.memo(function EegRenderer({
   canvasRef,
   dataRef,
   config,
@@ -383,19 +383,23 @@ export function EegRenderer({
         console.warn(`No points drawn in this frame! Check if data is available.`);
       }
     };
+    // Set up rendering with requestAnimationFrame for better sync with browser refresh
+    let animationFrameId: number;
     
-    // Set up rendering interval based on FPS
-    const frameInterval = 1000 / renderFps;
-    const renderIntervalId = setInterval(render, frameInterval);
+    const animationLoop = () => {
+      render();
+      animationFrameId = requestAnimationFrame(animationLoop);
+    };
     
-    // Initial render
-    render();
+    // Start the animation
+    animationFrameId = requestAnimationFrame(animationLoop);
     
+    // Clean up
     return () => {
-      clearInterval(renderIntervalId);
+      cancelAnimationFrame(animationFrameId);
       regl.destroy();
     };
   }, [canvasRef, config, dataRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);
 
   return null;
-}
+});
