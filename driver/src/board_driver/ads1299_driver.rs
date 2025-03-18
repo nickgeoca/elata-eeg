@@ -277,7 +277,7 @@ impl Ads1299Driver {
                    batch_size, config.sample_rate);
             info!("Buffering {} samples before sending batches", batch_size);
             
-            // Send SDATAC command first to ensure we're not in continuous mode
+            // Make sure we're in SDATAC mode before starting
             if let Err(e) = send_command_to_spi(&mut spi, ADS1299_CMD_SDATAC) {
                 error!("Failed to send SDATAC command: {:?}", e);
                 return;
@@ -286,9 +286,16 @@ impl Ads1299Driver {
             // Small delay after sending command
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
             
-            // For testing, we'll use RDATA command for each sample instead of RDATAC
-            // This is more reliable for debugging
-            debug!("Starting acquisition loop using RDATA command for each sample");
+            // Enter continuous data mode (RDATAC)
+            if let Err(e) = send_command_to_spi(&mut spi, ADS1299_CMD_RDATAC) {
+                error!("Failed to send RDATAC command: {:?}", e);
+                return;
+            }
+            
+            // Small delay after sending command
+            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            
+            debug!("Starting acquisition loop using RDATAC (continuous data mode)");
             
             // Main acquisition loop
             let mut sample_buffer: Vec<AdcData> = Vec::with_capacity(batch_size);
@@ -413,8 +420,18 @@ impl Ads1299Driver {
             debug!("Signaled acquisition task to stop");
         }
         
-        // Stop conversion
-        if self.spi.is_some() {
+        // Exit continuous data mode and stop conversion
+        if let Some(spi) = self.spi.as_mut() {
+            // First exit RDATAC mode
+            if let Err(e) = send_command_to_spi(spi, ADS1299_CMD_SDATAC) {
+                warn!("Failed to send SDATAC command during stop_acquisition: {:?}", e);
+                // Continue anyway to try to stop conversion
+            }
+            
+            // Small delay after sending command
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            
+            // Then stop conversion
             self.stop_conversion()?;
         }
         
@@ -849,19 +866,16 @@ fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
     Ok(())
 }
 
-// Helper function to read data from SPI
+// Helper function to read data from SPI in continuous mode (RDATAC)
 fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
-    debug!("Reading data from ADS1299 via SPI for {} channels", num_channels);
+    debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
     
-    // Send RDATA command (0x12) to read data
-    send_command_to_spi(spi, ADS1299_CMD_RDATA)?;
+    // In continuous mode (RDATAC), we don't need to send RDATA command before each read
+    // We just read the data directly when DRDY goes low
     
-    // Small delay after sending command
-    std::thread::sleep(std::time::Duration::from_micros(10));
-    
-    // Calculate total bytes to read: 3 status bytes + (3 bytes per channel * num_channels)
-    let total_bytes = 3 + (3 * num_channels);
-    debug!("Reading {} total bytes (3 status + {} data bytes)", total_bytes, 3 * num_channels);
+    // Calculate total bytes to read: 1 status byte + (3 bytes per channel * num_channels)
+    let total_bytes = 1 + (3 * num_channels);
+    debug!("Reading {} total bytes (1 status + {} data bytes)", total_bytes, 3 * num_channels);
     
     // Prepare buffers for SPI transfer
     let mut read_buffer = vec![0u8; total_bytes];
@@ -882,11 +896,11 @@ fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, Dr
     // Log raw data for debugging
     debug!("Raw SPI data: {:02X?}", read_buffer);
     
-    // Parse the data (skip the first 3 status bytes)
+    // Parse the data (skip the first status byte)
     let mut samples = Vec::with_capacity(num_channels);
     
     for ch in 0..num_channels {
-        let start_idx = 3 + (ch * 3); // Skip 3 status bytes, then 3 bytes per channel
+        let start_idx = 1 + (ch * 3); // Skip 1 status byte, then 3 bytes per channel
         
         // Extract the 3 bytes for this channel
         let msb = read_buffer[start_idx] as i32;

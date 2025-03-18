@@ -5,15 +5,8 @@ use std::thread::sleep;
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let args: Vec<String> = std::env::args().collect();
-    
-    if args.len() > 1 && args[1] == "read_data" {
-        read_channel_data_test()
-    } else if args.len() > 1 && args[1] == "test_data" {
-        read_test_data()
-    } else {
-        id_register_test()
-    }
+    read_channel_data_test()
+    id_register_test()
 }
 
 
