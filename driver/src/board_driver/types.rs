@@ -133,20 +133,17 @@ pub async fn create_driver(config: AdcConfig)
     -> Result<(Box<dyn AdcDriver>, mpsc::Receiver<DriverEvent>), DriverError> {
     
     match config.board_driver {
-        // DriverType::Ads1299 => {
-        //     // Create the ADS1299 hardware driver
-        //     let (driver, events) = crate::adc::ads1299_driver::Ads1299Driver::new(config).map_err(|e| DriverError::Other(e.to_string()))?;
-            
-        //     // Check if the driver is in error state after creation
-        //     if driver.get_status() == DriverStatus::Error {
-        //         return Err(DriverError::HardwareNotFound("Failed to initialize ADS1299 hardware".to_string()));
-        //     }
-            
-        //     Ok((Box::new(driver), events))
-        // },
         DriverType::Ads1299 => {
-            panic!("no Ads1299 drver yet")
-        }
+            // Create the ADS1299 hardware driver
+            let (driver, events) = super::ads1299_driver::Ads1299Driver::new(config, 0)?;
+            
+            // Check if the driver is in error state after creation
+            if driver.get_status().await == DriverStatus::Error {
+                return Err(DriverError::HardwareNotFound("Failed to initialize ADS1299 hardware".to_string()));
+            }
+            
+            Ok((Box::new(driver), events))
+        },
         DriverType::Mock => {
             let (driver, events) = super::mock_driver::MockDriver::new(config, 0)?;
             Ok((Box::new(driver), events))

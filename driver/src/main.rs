@@ -28,10 +28,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Create a basic ADC configuration
     let config = AdcConfig {
         sample_rate: 250,
-        channels: vec![0, 1, 2, 3],
-        gain: 24.0,
-        board_driver: DriverType::Mock,
-        batch_size: 32,
+        channels: vec![0],
+        gain: 1.0,
+        board_driver: DriverType::Ads1299,
+        batch_size: 4,
         Vref: 4.5,
         dsp_high_pass_cutoff_hz: 0.1,  // Default high-pass filter cutoff (Hz)
         dsp_low_pass_cutoff_hz: 100.0, // Default low-pass filter cutoff (Hz)
