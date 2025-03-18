@@ -53,3 +53,5 @@ bash rebuild.sh
 - X11 (LDXE-pi) to Wayland (labwc) was rocky
 - After kiosk is solid, make sure all the files in install.sh (e.g. /home/elata/.config/labwc/autostart) mathc what we got working in the acutal files. 
 - Realtime hardware update? pros and cons
+- Firmware versioning in the filename to account for expirimenetal errors from firmware
+- We're losing 1 bit of precision using float32. 24bit ADC and float32 is 23bit

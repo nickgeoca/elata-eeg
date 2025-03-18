@@ -135,7 +135,8 @@ echo "📝 Creating systemd service for Rust daemon..."
 sudo tee /etc/systemd/system/daemon.service > /dev/null <<EOL
 [Unit]
 Description=Rust Daemon
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/eeg_daemon
@@ -167,7 +168,9 @@ echo "📝 Creating systemd service for Next.js..."
 sudo tee /etc/systemd/system/kiosk.service > /dev/null <<EOL
 [Unit]
 Description=Next.js Kiosk
-After=network.target
+After=network-online.target daemon.service
+Wants=network-online.target
+Requires=daemon.service
 
 [Service]
 ExecStart=/usr/bin/npm start --prefix $REPO_PATH/kiosk
@@ -255,10 +258,7 @@ BASH_PROFILE_CONTENT="if [ -z \"\$DISPLAY\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]
     startx
 fi
 [ -f \"\$HOME/.bashrc\" ] && source \"\$HOME/.bashrc\"
-echo \"bash_profile was sourced\"
-if [ -z \"\$DISPLAY\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then
-    startx
-fi"
+echo \"bash_profile was sourced\""
 
 # If file doesn't exist, create it with version comment
 if [ ! -f "$HOME/.bash_profile" ]; then

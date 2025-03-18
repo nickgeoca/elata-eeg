@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# temporary
+ENABLE_SLEEP=true; SLEEP_TIME=0.5; mysleep() { $ENABLE_SLEEP && sleep "${1:-$SLEEP_TIME}"; }
+
 echo "🚀 Starting Kiosk Mode..."
 
 # Add diagnostic information
@@ -17,13 +20,31 @@ echo "  TTY: $(tty)"
 echo "- LightDM Configuration:"
 echo "  $(grep -E 'greeter-session|user-session|autologin-session' /etc/lightdm/lightdm.conf 2>/dev/null || echo "  Could not read LightDM config")"
 
-# Enable and start services
+# Enable and start services with proper delays
 echo "🔄 Enabling and starting daemon and kiosk services..."
 sudo systemctl enable daemon
 sudo systemctl enable kiosk
+
+# Add delay before starting services
+echo "⏳ Waiting for system to stabilize..."
+mysleep
+
+# Start services with delay between them
 sudo systemctl start daemon
+mysleep  # Add delay between service starts
 sudo systemctl start kiosk
 echo "✅ Services enabled and started"
+
+# Wait for web service to be ready
+echo "⏳ Waiting for network and kiosk service..."
+for i in {1..10}; do
+    if curl -s http://localhost:3000 >/dev/null; then
+        echo "✅ Kiosk web service is responding"
+        break
+    fi
+    echo "⏳ Waiting for kiosk web service to respond ($i/10)..."
+    mysleep
+done
 
 # Remove the development mode flag if it exists
 if [ -f "$HOME/.kiosk_dev_mode" ]; then
@@ -31,43 +52,20 @@ if [ -f "$HOME/.kiosk_dev_mode" ]; then
     rm "$HOME/.kiosk_dev_mode"
 fi
 
-# Fix the autostart file for labwc
-echo "📝 Updating labwc autostart file configuration..."
+# Create a clean autostart file for labwc (complete replacement)
+echo "📝 Creating labwc autostart file for kiosk mode..."
 mkdir -p "/home/elata/.config/labwc"
 
-# Check if autostart file already exists
-if [ -f "/home/elata/.config/labwc/autostart" ]; then
-    # If it exists, check if our marker section is already there
-    if grep -q "BEGIN ELATA-EEG SECTION" "/home/elata/.config/labwc/autostart"; then
-        # Remove the existing section between markers
-        sed -i '/# BEGIN ELATA-EEG SECTION/,/# END ELATA-EEG SECTION/d' "/home/elata/.config/labwc/autostart"
-    fi
-    
-    # Append our section with markers
-    cat >> "/home/elata/.config/labwc/autostart" <<EOL
-
-# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
-# Start the Wayland desktop components
-/usr/bin/kanshi &
-
-# Start Chromium in kiosk mode with Wayland
-chromium-browser --ozone-platform=wayland --kiosk --disable-infobars --disable-session-crashed-bubble --incognito --disable-features=MediaDevices http://localhost:3000 &
-# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
-EOL
-else
-    # If it doesn't exist, create it with our section with markers
-    cat > "/home/elata/.config/labwc/autostart" <<EOL
+# Create a clean autostart file (no markers, complete replacement)
+cat > "/home/elata/.config/labwc/autostart" <<EOL
 #!/bin/sh
 
-# BEGIN ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 # Start the Wayland desktop components
 /usr/bin/kanshi &
 
 # Start Chromium in kiosk mode with Wayland
 chromium-browser --ozone-platform=wayland --kiosk --disable-infobars --disable-session-crashed-bubble --incognito --disable-features=MediaDevices http://localhost:3000 &
-# END ELATA-EEG SECTION - DO NOT MODIFY THIS LINE
 EOL
-fi
 
 # Make the autostart file executable
 chmod +x "/home/elata/.config/labwc/autostart"
@@ -80,7 +78,7 @@ if [ "$PANEL_COUNT" -gt 1 ]; then
     
     # Kill all panel instances
     pkill -9 -f wf-panel-pi || true
-    sleep 1  # Give it time to terminate
+    mysleep 1
     
     # Start a single panel instance
     /usr/bin/wf-panel-pi &
@@ -93,7 +91,12 @@ fi
 # Kill Chromium if it's running
 echo "🔄 Restarting Chromium..."
 pkill -f chromium-browser || true
-sleep 1
+mysleep
+
+# Stop any existing Wayland compositor before restarting LightDM
+echo "🔄 Stopping any existing Wayland compositor..."
+pkill -9 -f labwc || true
+mysleep 2
 
 # Restart LightDM to apply the new configuration
 echo "🔄 Restarting LightDM to apply Wayland configuration..."
@@ -107,7 +110,7 @@ fi
 
 # Wait for Wayland to start
 echo "⏳ Waiting for Wayland session to start..."
-sleep 5
+mysleep 5
 
 # Check if Wayland is running after wait
 if [ -n "$WAYLAND_DISPLAY" ]; then
@@ -145,7 +148,7 @@ else
 fi
 
 # Check if Chromium is actually running after a short delay
-sleep 2
+mysleep 2
 if ps -p $CHROMIUM_PID > /dev/null; then
     echo "✅ Chromium process is running"
 else

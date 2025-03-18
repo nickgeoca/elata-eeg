@@ -5,18 +5,14 @@
  *
  * This component handles WebSocket connections to the EEG data server and processes incoming data.
  *
- * IMPORTANT: This file contains critical fixes for WebSocket disconnection issues:
- * 1. Automatic reconnection with exponential backoff (lines ~315-343)
- * 2. Data buffer preservation on reconnection (lines ~266-278)
- * 3. Optimized React lifecycle to prevent unnecessary reconnections (lines ~355-379)
- *
- * DO NOT REVERT these changes as they prevent the graph from clearing during disconnections.
+ * This implementation uses a constant FPS rendering approach, removing the need for
+ * render flags and simplifying the overall rendering process.
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
 import throttle from 'lodash.throttle';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
-import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE } from '../utils/eegConstants';
+import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE, WINDOW_DURATION } from '../utils/eegConstants';
 
 interface EegDataHandlerProps {
   config: any;
@@ -28,7 +24,6 @@ interface EegDataHandlerProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
-  renderNeededRef: React.MutableRefObject<boolean>;
   latestTimestampRef: React.MutableRefObject<number>;
 }
 
@@ -38,7 +33,6 @@ export function useEegDataHandler({
   dataRef,
   windowSizeRef,
   debugInfoRef,
-  renderNeededRef,
   latestTimestampRef
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
@@ -49,16 +43,41 @@ export function useEegDataHandler({
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
+  const lastWindowSizeRef = useRef<number>(windowSizeRef.current);
 
   // Calculate optimal throttle interval based on config
   const getThrottleInterval = useCallback(() => {
-    if (config && config.sample_rate && config.batch_size) {
-      // Calculate frame interval based on sample rate and batch size
-      // This gives us the time between frames in milliseconds
-      return Math.max(8, 1000 / (config.sample_rate / config.batch_size));
-    }
-    return 16; // Default to ~60fps
+    // Always use the FPS from config to calculate the throttle interval
+    // This gives us the time between frames in milliseconds
+    return Math.max(8, 1000 / (config?.fps || 0));
   }, [config]);
+
+  // Monitor changes to windowSizeRef and update buffer capacities
+  useEffect(() => {
+    // Check if window size has changed
+    if (windowSizeRef.current !== lastWindowSizeRef.current) {
+      const newSize = windowSizeRef.current;
+      
+      if (!isProduction) {
+        console.log(`Window size changed: ${lastWindowSizeRef.current} -> ${newSize}`);
+      }
+      
+      // Update existing buffers instead of recreating them
+      dataRef.current.forEach((buffer, index) => {
+        if (buffer) {
+          if (!isProduction) {
+            console.log(`Updating capacity for channel ${index}: ${buffer.getCapacity()} -> ${newSize}`);
+          }
+          buffer.updateCapacity(newSize);
+        }
+      });
+      
+      // Update last window size
+      lastWindowSizeRef.current = newSize;
+    }
+    
+    // This effect runs on every render, but only does work when windowSizeRef.current changes
+  });
 
   // Ensure all buffers are initialized - but only when necessary
   useEffect(() => {
@@ -68,22 +87,34 @@ export function useEegDataHandler({
     // Only reinitialize if channel count changed or buffers not initialized
     const needsReinitialization =
       dataRef.current.length !== channelCount ||
-      dataRef.current.length === 0 ||
-      (dataRef.current[0] && dataRef.current[0].getCapacity() !== windowSizeRef.current);
+      dataRef.current.length === 0;
     
     if (needsReinitialization) {
       dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
+        new ScrollingBuffer(windowSizeRef.current, config?.sample_rate || DEFAULT_SAMPLE_RATE)
       );
-      
-      // Set render needed flag to ensure all channels are drawn
-      renderNeededRef.current = true;
       
       if (!isProduction) {
         console.log(`Initialized ${channelCount} channel buffers in useEffect`);
       }
+    } else {
+      // Update sample rate and capacity if needed
+      dataRef.current.forEach(buffer => {
+        if (buffer) {
+          // Update sample rate if needed
+          const sampleRate = config?.sample_rate || DEFAULT_SAMPLE_RATE;
+          if (buffer.getSampleRate() !== sampleRate) {
+            buffer.setSampleRate(sampleRate);
+          }
+          
+          // Update capacity if needed
+          if (buffer.getCapacity() !== windowSizeRef.current) {
+            buffer.updateCapacity(windowSizeRef.current);
+          }
+        }
+      });
     }
-  }, [config, dataRef, windowSizeRef, renderNeededRef, isProduction]);
+  }, [config, dataRef, windowSizeRef, isProduction]);
 
   // Create message handler function with stabilized dependencies
   const createMessageHandler = useCallback(() => {
@@ -142,6 +173,14 @@ export function useEegDataHandler({
           debugInfo.packetsReceived++;
           debugInfo.samplesProcessed += samplesPerChannel * channelCount; // Use dynamic channel count
           
+          // Notify the buffer that a new data chunk has arrived
+          // This updates the timestamp for calculating render offset
+          for (let ch = 0; ch < channelCount; ch++) {
+            if (dataRef.current[ch]) {
+              dataRef.current[ch].notifyNewDataChunk();
+            }
+          }
+          
           // Set data received indicator
           onDataUpdate(true);
           
@@ -154,9 +193,6 @@ export function useEegDataHandler({
           dataReceivedTimeoutRef.current = setTimeout(() => {
             onDataUpdate(false);
           }, 500);
-          
-          // Set flag to indicate rendering is needed
-          renderNeededRef.current = true;
           
           // Process each channel - optimized for performance
           // Use the channelCount already defined above
@@ -179,23 +215,34 @@ export function useEegDataHandler({
             // Process all samples for this channel in a single loop
             for (let i = 0; i < samplesPerChannel; i++) {
               const offset = channelBaseOffset + (i * 4);
-              const value = dataView.getFloat32(offset, true); // true for little-endian
               
-              // Fast path for valid values (most common case)
-              if (isFinite(value) && Math.abs(value) <= 10) {
-                dataRef.current[ch].push(value);
-                continue;
-              }
-              
-              // Handle edge cases
-              if (isNaN(value) || !isFinite(value)) {
-                if (!isProduction) {
-                  console.warn(`Invalid value for channel ${ch}: ${value}`);
+              // Add bounds checking to prevent "Offset is outside the bounds of the Dataview" error
+              if (offset + 4 <= event.data.byteLength) {
+                const value = dataView.getFloat32(offset, true); // true for little-endian
+                
+                // Fast path for valid values (most common case)
+                if (isFinite(value) && Math.abs(value) <= 10) {
+                  dataRef.current[ch].push(value);
+                  continue;
                 }
-                dataRef.current[ch].push(0);
+                
+                // Handle edge cases
+                if (isNaN(value) || !isFinite(value)) {
+                  if (!isProduction) {
+                    console.warn(`Invalid value for channel ${ch}: ${value}`);
+                  }
+                  dataRef.current[ch].push(0);
+                } else {
+                  // Clamp large values
+                  dataRef.current[ch].push(Math.max(-3, Math.min(3, value)));
+                }
               } else {
-                // Clamp large values
-                dataRef.current[ch].push(Math.max(-3, Math.min(3, value)));
+                // Handle out-of-bounds access
+                if (!isProduction) {
+                  console.warn(`Offset ${offset} outside bounds of DataView (size: ${event.data.byteLength})`);
+                }
+                // Push a default value to maintain continuity
+                dataRef.current[ch].push(0);
               }
             }
           }
@@ -222,8 +269,14 @@ export function useEegDataHandler({
             }
           });
           
-          // Set flag to indicate rendering is needed
-          renderNeededRef.current = true;
+          // Notify the buffer that a new data chunk has arrived
+          // This updates the timestamp for calculating render offset
+          const channelCount = config?.channels?.length || 4;
+          for (let ch = 0; ch < channelCount; ch++) {
+            if (dataRef.current[ch]) {
+              dataRef.current[ch].notifyNewDataChunk();
+            }
+          }
         }
       } catch (error) {
         console.error('WebSocket error:', error);
@@ -255,22 +308,40 @@ export function useEegDataHandler({
       
       // Add safeguard for sample rate as suggested in the code review
       const safeSampleRate = Math.max(1, config.sample_rate || DEFAULT_SAMPLE_RATE);
-      windowSizeRef.current = Math.ceil((safeSampleRate * 2000) / 1000); // 2000ms window
+      
+      // Note: windowSizeRef.current is now updated in EegMonitor.tsx based on screen width
+      // We don't need to update it here anymore
       
       // Get channel count from config
       const channelCount = config?.channels?.length || 4;
       
-      // Reinitialize buffers with new size - always do this to ensure consistency
-      dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
-      );
-      
-      // Set render needed flag to ensure all channels are drawn
-      renderNeededRef.current = true;
-      
-      if (!isProduction) {
-        console.log(`Updated window size to ${windowSizeRef.current} based on sample rate ${safeSampleRate}Hz`);
-        console.log(`Reinitialized ${channelCount} channel buffers`);
+      // Check if we need to reinitialize buffers or just update them
+      if (dataRef.current.length !== channelCount) {
+        // Channel count changed, need to reinitialize
+        dataRef.current = Array(channelCount).fill(null).map(() =>
+          new ScrollingBuffer(windowSizeRef.current, safeSampleRate)
+        );
+        
+        if (!isProduction) {
+          console.log(`Reinitialized ${channelCount} channel buffers due to channel count change`);
+        }
+      } else {
+        // Just update existing buffers
+        dataRef.current.forEach(buffer => {
+          if (buffer) {
+            // Update sample rate
+            buffer.setSampleRate(safeSampleRate);
+            
+            // Update capacity if needed
+            if (buffer.getCapacity() !== windowSizeRef.current) {
+              buffer.updateCapacity(windowSizeRef.current);
+            }
+          }
+        });
+        
+        if (!isProduction) {
+          console.log(`Updated ${channelCount} channel buffers with sample rate ${safeSampleRate}Hz`);
+        }
       }
       
       // Recreate message handler with new throttle interval
@@ -283,26 +354,14 @@ export function useEegDataHandler({
 
   /**
    * Function to establish WebSocket connection with automatic reconnection
-   *
-   * CRITICAL FIX: This implementation includes several important features:
-   * 1. Data buffer preservation - existing data is kept on reconnection to prevent graph clearing
-   * 2. Exponential backoff - prevents rapid reconnection attempts that could overwhelm the server
-   * 3. Reduced dependencies - prevents unnecessary reconnections due to React's dependency chain
-   *
-   * DO NOT MODIFY these features without careful consideration as they are essential
-   * for maintaining graph continuity during connection issues.
    */
   const connectWebSocket = useCallback(() => {
-    // IMPORTANT: Don't initialize buffers here - we want to preserve existing data on reconnect
-    // Only initialize if they don't exist yet
+    // Only initialize if buffers don't exist yet
     if (dataRef.current.length === 0) {
       const channelCount = config?.channels?.length || 4;
       dataRef.current = Array(channelCount).fill(null).map(() =>
-        new ScrollingBuffer(windowSizeRef.current)
+        new ScrollingBuffer(windowSizeRef.current, config?.sample_rate || DEFAULT_SAMPLE_RATE)
       );
-      
-      // Set render needed flag to ensure all channels are drawn on initial setup
-      renderNeededRef.current = true;
     }
     
     // Clear any existing reconnect timeout
@@ -347,8 +406,7 @@ export function useEegDataHandler({
       
       setStatus('Disconnected');
       
-      // CRITICAL FIX: Implement exponential backoff for reconnection
-      // This prevents rapid reconnection attempts that could overwhelm the server
+      // Implement exponential backoff for reconnection
       const maxReconnectDelay = 5000; // Maximum delay of 5 seconds
       const baseDelay = 500; // Start with 500ms delay
       const reconnectDelay = Math.min(
@@ -379,14 +437,10 @@ export function useEegDataHandler({
       // Don't reconnect here - the onclose handler will be called after an error
     };
     
-  }, [createMessageHandler, isProduction]); // CRITICAL: Reduced dependencies to prevent unnecessary reconnections
+  }, [createMessageHandler, isProduction]); // Reduced dependencies to prevent unnecessary reconnections
   
   /**
    * Set up WebSocket connection with stable lifecycle
-   *
-   * CRITICAL FIX: This effect uses an empty dependency array to ensure it only runs once on mount.
-   * This prevents React's dependency chain from causing unnecessary reconnections that would
-   * clear the graph. DO NOT add dependencies to this effect unless absolutely necessary.
    */
   useEffect(() => {
     // Only connect once on initial mount
@@ -411,10 +465,10 @@ export function useEegDataHandler({
         wsRef.current = null;
       }
     };
-  }, []); // CRITICAL: Empty dependency array ensures this only runs once on mount
+  }, []); // Empty dependency array ensures this only runs once on mount
 
-  // Calculate FPS from config
-  const fps = config ? (config.sample_rate / config.batch_size) : (DEFAULT_SAMPLE_RATE / DEFAULT_BATCH_SIZE);
+  // Get FPS directly from config with no fallback
+  const fps = config?.fps || 0;
 
   return { status, fps };
 }
