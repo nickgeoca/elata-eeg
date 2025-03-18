@@ -628,18 +628,25 @@ impl Ads1299Driver {
         for &channel in &channels {
             if channel < 8 {
                 // Set CHnSET register (0x05 + channel)
-                // For testing, use 0x61 (gain=1, input shorted)
-                // In normal operation, use gain_code << 4 for normal electrode input
-                self.write_register(0x05 + channel as u8, 0x61)?;
+                // Use 0x15 (gain=1, SRB2 enabled, test signal)
+                // The value 0x15 means:
+                // - Bit 7 (PD) = 0: Channel powered up
+                // - Bits 6-4 (GAIN) = 001: Gain = 1
+                // - Bit 3 (SRB2) = 1: SRB2 connected to negative input
+                // - Bits 2-0 (MUX) = 101: Test signal
+                self.write_register(0x05 + channel as u8, 0x15)?;
+                debug!("Configured channel {} with CHnSET=0x15 (gain=1, SRB2 enabled, test signal)", channel);
             }
         }
         
         // Set CONFIG3 register (0x03)
+        // 0x66 = 0110 0110 (PD_REFBUF=0, Bit6=1, Bit5=1, BIAS_MEAS=0, BIASREF_INT=0, PD_BIAS=1, BIAS_LOFF_SENS=1, BIAS_STAT=0)
         // Bit 7 (PD_REFBUF) = 0: Reference buffer powered up
         // Bit 6-5 = 11: Not specified in datasheet
-        // Bit 2 (BIASREF_INT) = 1: Use internal reference for bias
-        // Bit 1 (PD_BIAS) = 1: Bias buffer powered up
-        self.write_register(ADS1299_REG_CONFIG3, 0x60)?;
+        // Bit 2 (PD_BIAS) = 1: Bias buffer powered up
+        // Bit 1 (BIAS_LOFF_SENS) = 1: Bias drive connected to LOFF sense
+        self.write_register(ADS1299_REG_CONFIG3, 0x66)?;
+        debug!("Configured CONFIG3=0x66 (bias buffer enabled, LOFF sense enabled)");
         
         Ok(())
     }
@@ -730,26 +737,31 @@ impl Ads1299Driver {
         
         // Set CONFIG2 register (0x02)
         // Bits 7-6 = 11: Internal reference enabled
-        // Bits 5-0 = 000000: Other settings at default values
-        self.write_register(ADS1299_REG_CONFIG2, 0xC0)?;
+        // Bit 5 = 1: Test signal amplitude = 1 × –(VREFP – VREFN) / 2400
+        // Bits 4-3 = 00: Not used
+        // Bit 2-0 = 001: Test signal frequency = fCLK / 2^21
+        self.write_register(ADS1299_REG_CONFIG2, 0xD1)?;
         
         // Verify CONFIG2 was set correctly
         let config2 = self.read_register(ADS1299_REG_CONFIG2)?;
-        if config2 != 0xC0 {
-            warn!("CONFIG2 register verification failed: expected 0xC0, got 0x{:02X}", config2);
+        if config2 != 0xD1 {
+            warn!("CONFIG2 register verification failed: expected 0xD1, got 0x{:02X}", config2);
         }
         
         // Set CONFIG3 register (0x03)
+        // 0x66 = 0110 0110 (PD_REFBUF=0, Bit6=1, Bit5=1, BIAS_MEAS=0, BIASREF_INT=0, PD_BIAS=1, BIAS_LOFF_SENS=1, BIAS_STAT=0)
         // Bit 7 (PD_REFBUF) = 0: Reference buffer powered up
         // Bit 6-5 = 11: Not specified in datasheet
-        // Bit 2 (BIASREF_INT) = 1: Use internal reference for bias
-        // Bit 1 (PD_BIAS) = 1: Bias buffer powered up
-        self.write_register(ADS1299_REG_CONFIG3, 0x60)?;
+        // Bit 2 (PD_BIAS) = 1: Bias buffer powered up
+        // Bit 1 (BIAS_LOFF_SENS) = 1: Bias drive connected to LOFF sense
+        self.write_register(ADS1299_REG_CONFIG3, 0x66)?;
         
         // Verify CONFIG3 was set correctly
         let config3 = self.read_register(ADS1299_REG_CONFIG3)?;
-        if config3 != 0x60 {
-            warn!("CONFIG3 register verification failed: expected 0x60, got 0x{:02X}", config3);
+        if config3 != 0x66 {
+            warn!("CONFIG3 register verification failed: expected 0x66, got 0x{:02X}", config3);
+        } else {
+            debug!("CONFIG3 register verified: 0x66 (bias buffer enabled, LOFF sense enabled)");
         }
         
         // Set MISC1 register (0x15)
@@ -765,15 +777,19 @@ impl Ads1299Driver {
         // Configure channels
         for &channel in &config.channels {
             if channel < 8 {
-                // For testing, set CHnSET to 0x61 (gain=1, input shorted)
+                // Set CHnSET to 0x15 (gain=1, SRB2 enabled, test signal)
+                // 0x15 = 0001 0101 (PD=0, GAIN=001 (gain=1), SRB2=1, MUX=101 (test signal))
                 let reg_addr = 0x05 + channel as u8;
-                self.write_register(reg_addr, 0x61)?;
+                self.write_register(reg_addr, 0x15)?;
                 
                 // Verify channel setting was set correctly
                 let ch_value = self.read_register(reg_addr)?;
-                if ch_value != 0x61 {
-                    warn!("Channel {} register verification failed: expected 0x61, got 0x{:02X}",
+                if ch_value != 0x15 {
+                    warn!("Channel {} register verification failed: expected 0x15, got 0x{:02X}",
                           channel, ch_value);
+                } else {
+                    debug!("Channel {} configured successfully with value 0x15 (gain=1, SRB2 enabled, test signal)",
+                           channel);
                 }
             }
         }
@@ -835,75 +851,58 @@ fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
 
 // Helper function to read data from SPI
 fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
-    // Calculate number of bytes to read based on enabled channels
-    // 3 bytes per channel (24-bit) + 3 bytes for status
-    let bytes_to_read = 3 + (num_channels * 3);
+    debug!("Reading data from ADS1299 via SPI for {} channels", num_channels);
     
-    // For RDATA command, we need to send a command byte first
-    // Then read the data bytes
-    let command = ADS1299_CMD_RDATA;
-    spi.write(&[command]).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write command error: {}", e)
-    )))?;
+    // Send RDATA command (0x12) to read data
+    send_command_to_spi(spi, ADS1299_CMD_RDATA)?;
     
     // Small delay after sending command
-    std::thread::sleep(std::time::Duration::from_micros(5));
+    std::thread::sleep(std::time::Duration::from_micros(10));
     
-    // Read data - use transfer instead of read to maintain CS active
-    let mut buffer = vec![0u8; bytes_to_read];
-    let mut dummy = vec![0u8; bytes_to_read]; // Dummy data to send during transfer
+    // Calculate total bytes to read: 3 status bytes + (3 bytes per channel * num_channels)
+    let total_bytes = 3 + (3 * num_channels);
+    debug!("Reading {} total bytes (3 status + {} data bytes)", total_bytes, 3 * num_channels);
     
-    // Measure SPI transfer timing
-    let spi_start = std::time::Instant::now();
+    // Prepare buffers for SPI transfer
+    let mut read_buffer = vec![0u8; total_bytes];
+    let write_buffer = vec![0u8; total_bytes];
     
-    let result = spi.transfer(&mut buffer, &dummy).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI transfer error: {}", e)
-    )));
-    
-    let spi_duration = spi_start.elapsed();
-    debug!("SPI transfer timing: {:?} for {} bytes", spi_duration, bytes_to_read);
-    
-    // Check result
-    result?;
-    
-    // Debug the raw bytes
-    debug!("Raw data bytes: {:02X?}", buffer);
-    
-    // Check status bytes (first 3 bytes)
-    let status_byte1 = buffer[0];
-    let status_byte2 = buffer[1];
-    let status_byte3 = buffer[2];
-    
-    // Log status bytes for debugging
-    debug!("Status bytes: 0x{:02X} 0x{:02X} 0x{:02X}", status_byte1, status_byte2, status_byte3);
-    
-    // Check if any error bits are set in status
-    if (status_byte1 & 0x80) != 0 {
-        warn!("ADS1299 status indicates an error condition: 0x{:02X}", status_byte1);
+    // Perform SPI transfer
+    match spi.transfer(&mut read_buffer, &write_buffer) {
+        Ok(_) => debug!("SPI transfer successful, read {} bytes", read_buffer.len()),
+        Err(e) => {
+            error!("SPI transfer error: {}", e);
+            return Err(DriverError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("SPI transfer error: {}", e)
+            )));
+        }
     }
     
-    // Convert bytes to i32 samples (24-bit signed values)
+    // Log raw data for debugging
+    debug!("Raw SPI data: {:02X?}", read_buffer);
+    
+    // Parse the data (skip the first 3 status bytes)
     let mut samples = Vec::with_capacity(num_channels);
     
-    // Skip first 3 bytes (status)
-    for i in 0..num_channels {
-        let start_idx = 3 + (i * 3);
+    for ch in 0..num_channels {
+        let start_idx = 3 + (ch * 3); // Skip 3 status bytes, then 3 bytes per channel
         
-        // Convert 3 bytes to i32 (24-bit signed)
-        let msb = buffer[start_idx] as i32;
-        let mid = buffer[start_idx + 1] as i32;
-        let lsb = buffer[start_idx + 2] as i32;
+        // Extract the 3 bytes for this channel
+        let msb = read_buffer[start_idx] as i32;
+        let mid = read_buffer[start_idx + 1] as i32;
+        let lsb = read_buffer[start_idx + 2] as i32;
         
-        // Combine bytes and sign-extend
+        // Combine bytes into a 24-bit signed integer
         let mut value = (msb << 16) | (mid << 8) | lsb;
         
-        // Sign extension for 24-bit to 32-bit
+        // Sign extension for negative values
         if (value & 0x800000) != 0 {
-            // Cast to u32 for the bitwise OR with 0xFF000000, then back to i32
-            value = ((value as u32) | 0xFF000000) as i32;
+            value |= -16777216; // 0xFF000000 as signed
         }
+        
+        debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}] = {}",
+               ch, read_buffer[start_idx], read_buffer[start_idx + 1], read_buffer[start_idx + 2], value);
         
         samples.push(value);
     }
@@ -923,6 +922,8 @@ fn current_timestamp_micros() -> Result<u64, DriverError> {
 fn convert_to_voltage(sample: i32, gain: f32, vref: f32) -> f32 {
     // Formula: voltage = (sample * vref) / (gain * 2^23)
     let result = (sample as f64 * vref as f64) / (gain as f64 * 8388608.0);
+    info!("Converting raw sample {} to voltage: {} (gain={}, vref={})",
+          sample, result, gain, vref);
     result as f32
 }
 
