@@ -371,7 +371,7 @@ impl Ads1299Driver {
                 // Create AdcData
                 let data = AdcData {
                     timestamp,
-                    raw_samples: raw_samples.iter().map(|&s| vec![s]).collect(),
+                    raw_samples: raw_samples.iter().map(|&s| vec![s as i32]).collect(),
                     voltage_samples,
                 };
                 
@@ -508,31 +508,70 @@ impl Ads1299Driver {
         // Use SPI0 with CS0 at 500kHz (matching the working Python script)
         // ADS1299 datasheet specifies CPOL=0, CPHA=1 (Mode 1)
         let spi_speed = 500_000; // 500kHz - confirmed working with Python script
-        debug!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
+        info!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
         
-        Spi::new(
+        // For debugging, try to create a mock SPI device if the real one fails
+        match Spi::new(
             Bus::Spi0,
             SlaveSelect::Ss0,
             spi_speed,
             Mode::Mode1,  // CPOL=0, CPHA=1 for ADS1299
-        ).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI initialization error: {}", e)
-        )))
+        ) {
+            Ok(spi) => {
+                info!("SPI initialization successful");
+                Ok(spi)
+            },
+            Err(e) => {
+                error!("SPI initialization error: {}", e);
+                error!("This could be because the SPI device is not available or the user doesn't have permission to access it.");
+                error!("Make sure the SPI interface is enabled and the user has permission to access it.");
+                
+                // Return the error
+                Err(DriverError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("SPI initialization error: {}", e)
+                )))
+            }
+        }
     }
 
     /// Initialize the DRDY pin for detecting when new data is available.
     fn init_drdy_pin() -> Result<InputPin, DriverError> {
-        let gpio = Gpio::new().map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("GPIO initialization error: {}", e)
-        )))?;
+        info!("Initializing GPIO for DRDY pin (GPIO25)");
         
-        // GPIO25 (Pin 22) is used for DRDY
-        Ok(gpio.get(25).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("GPIO pin error: {}", e)
-        )))?.into_input_pullup())
+        match Gpio::new() {
+            Ok(gpio) => {
+                info!("GPIO initialization successful");
+                
+                // GPIO25 (Pin 22) is used for DRDY
+                match gpio.get(25) {
+                    Ok(pin) => {
+                        info!("GPIO pin 25 acquired successfully");
+                        Ok(pin.into_input_pullup())
+                    },
+                    Err(e) => {
+                        error!("GPIO pin 25 error: {}", e);
+                        error!("This could be because the GPIO pin is already in use or the user doesn't have permission to access it.");
+                        error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
+                        
+                        Err(DriverError::IoError(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            format!("GPIO pin error: {}", e)
+                        )))
+                    }
+                }
+            },
+            Err(e) => {
+                error!("GPIO initialization error: {}", e);
+                error!("This could be because the GPIO interface is not available or the user doesn't have permission to access it.");
+                error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
+                
+                Err(DriverError::IoError(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("GPIO initialization error: {}", e)
+                )))
+            }
+        }
     }
 
     /// Send a command to the ADS1299.
@@ -589,7 +628,7 @@ impl Ads1299Driver {
     }
 
     /// Read data from the ADS1299.
-    fn read_data(&mut self) -> Result<Vec<i32>, DriverError> {
+    fn read_data(&mut self) -> Result<Vec<u32>, DriverError> {
         // Get the number of channels
         let num_channels = {
             let inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
@@ -629,8 +668,8 @@ impl Ads1299Driver {
     /// Configure the ADS1299 for single-ended operation.
     fn configure_single_ended(&mut self) -> Result<(), DriverError> {
         // Set MISC1 register (0x15)
-        // Bit 5 (SRB1) = 0: SRB1 is disconnected from all negative inputs
-        self.write_register(ADS1299_REG_MISC1, 0x00)?;
+        // Bit 5 (SRB1) = 1: SRB1 is connected to all negative inputs
+        self.write_register(ADS1299_REG_MISC1, 0x20)?;
         
         // Get configuration data we need
         let (gain, channels) = {
@@ -644,15 +683,16 @@ impl Ads1299Driver {
         // Configure channels
         for &channel in &channels {
             if channel < 8 {
-                // Set CHnSET register (0x05 + channel)
-                // Use 0x15 (gain=1, SRB2 enabled, test signal)
-                // The value 0x15 means:
-                // - Bit 7 (PD) = 0: Channel powered up
-                // - Bits 6-4 (GAIN) = 001: Gain = 1
-                // - Bit 3 (SRB2) = 1: SRB2 connected to negative input
-                // - Bits 2-0 (MUX) = 101: Test signal
-                self.write_register(0x05 + channel as u8, 0x15)?;
-                debug!("Configured channel {} with CHnSET=0x15 (gain=1, SRB2 enabled, test signal)", channel);
+                // Construct the channel setting register value
+                // Bit 7 (PD) = 0: Channel powered up
+                // Bits 6-4 (GAIN) = from gain_code
+                // Bit 3 (SRB2) = 1: SRB2 connected to negative input
+                // Bits 2-0 (MUX) = 000: Normal electrode input
+                // Bit 3 (SRB2) = 0: SRB2 not connected to negative input
+                let ch_value = ((gain_code & 0x07) << 4) | 0x08;
+                self.write_register(0x05 + channel as u8, ch_value)?;
+                debug!("Configured channel {} with CHnSET=0x{:02X} (gain={}, SRB2 disabled, normal electrode input)",
+                       channel, ch_value, gain);
             }
         }
         
@@ -782,8 +822,8 @@ impl Ads1299Driver {
         }
         
         // Set MISC1 register (0x15)
-        // Bit 5 (SRB1) = 0: SRB1 disconnected from all negative inputs
-        self.write_register(ADS1299_REG_MISC1, 0x00)?;
+        // Bit 5 (SRB1) = 1: SRB1 connected to all negative inputs
+        self.write_register(ADS1299_REG_MISC1, 0x20)?;
         
         // Verify MISC1 was set correctly
         let misc1 = self.read_register(ADS1299_REG_MISC1)?;
@@ -791,22 +831,29 @@ impl Ads1299Driver {
             warn!("MISC1 register verification failed: expected 0x00, got 0x{:02X}", misc1);
         }
         
+        // Get gain code
+        let gain_code = self.gain_to_register_value(config.gain)?;
+        
         // Configure channels
         for &channel in &config.channels {
             if channel < 8 {
-                // Set CHnSET to 0x15 (gain=1, SRB2 enabled, test signal)
-                // 0x15 = 0001 0101 (PD=0, GAIN=001 (gain=1), SRB2=1, MUX=101 (test signal))
+                // Construct the channel setting register value
+                // Bit 7 (PD) = 0: Channel powered up
+                // Bits 6-4 (GAIN) = from gain_code
+                // Bit 3 (SRB2) = 1: SRB2 connected to negative input
+                // Bits 2-0 (MUX) = 101: Test signal
+                let ch_value = ((gain_code & 0x07) << 4) | 0x05;
                 let reg_addr = 0x05 + channel as u8;
-                self.write_register(reg_addr, 0x15)?;
+                self.write_register(reg_addr, ch_value)?;
                 
                 // Verify channel setting was set correctly
-                let ch_value = self.read_register(reg_addr)?;
-                if ch_value != 0x15 {
-                    warn!("Channel {} register verification failed: expected 0x15, got 0x{:02X}",
-                          channel, ch_value);
+                let actual_value = self.read_register(reg_addr)?;
+                if actual_value != ch_value {
+                    warn!("Channel {} register verification failed: expected 0x{:02X}, got 0x{:02X}",
+                          channel, ch_value, actual_value);
                 } else {
-                    debug!("Channel {} configured successfully with value 0x15 (gain=1, SRB2 enabled, test signal)",
-                           channel);
+                    debug!("Channel {} configured successfully with value 0x{:02X} (gain={}, SRB2 enabled, test signal)",
+                           channel, ch_value, config.gain);
                 }
             }
         }
@@ -866,16 +913,22 @@ fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
     Ok(())
 }
 
+// Helper function to convert 3 bytes of SPI data to u32 for unipolar supply
+fn ch_spi_data_to_u32(msb: u8, mid: u8, lsb: u8) -> u32 {
+    // Combine the 3 bytes into a 24-bit unsigned value
+    (msb as u32) << 16 | (mid as u32) << 8 | (lsb as u32)
+}
+
 // Helper function to read data from SPI in continuous mode (RDATAC)
-fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
+fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<u32>, DriverError> {
     debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
     
     // In continuous mode (RDATAC), we don't need to send RDATA command before each read
     // We just read the data directly when DRDY goes low
     
-    // Calculate total bytes to read: 1 status byte + (3 bytes per channel * num_channels)
-    let total_bytes = 1 + (3 * num_channels);
-    debug!("Reading {} total bytes (1 status + {} data bytes)", total_bytes, 3 * num_channels);
+    // Calculate total bytes to read: 3 status bytes + (3 bytes per channel * num_channels)
+    let total_bytes = 3 + (3 * num_channels);
+    debug!("Reading {} total bytes (3 status + {} data bytes)", total_bytes, 3 * num_channels);
     
     // Prepare buffers for SPI transfer
     let mut read_buffer = vec![0u8; total_bytes];
@@ -896,27 +949,26 @@ fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, Dr
     // Log raw data for debugging
     debug!("Raw SPI data: {:02X?}", read_buffer);
     
-    // Parse the data (skip the first status byte)
+    // Log status bytes
+    debug!("Status bytes: [{:02X} {:02X} {:02X}]",
+           read_buffer[0], read_buffer[1], read_buffer[2]);
+    
+    // Parse the data (skip the first 3 status bytes)
     let mut samples = Vec::with_capacity(num_channels);
     
     for ch in 0..num_channels {
-        let start_idx = 1 + (ch * 3); // Skip 1 status byte, then 3 bytes per channel
+        let start_idx = 3 + (ch * 3); // Skip 3 status bytes, then 3 bytes per channel
         
         // Extract the 3 bytes for this channel
-        let msb = read_buffer[start_idx] as i32;
-        let mid = read_buffer[start_idx + 1] as i32;
-        let lsb = read_buffer[start_idx + 2] as i32;
+        let msb = read_buffer[start_idx];
+        let mid = read_buffer[start_idx + 1];
+        let lsb = read_buffer[start_idx + 2];
         
-        // Combine bytes into a 24-bit signed integer
-        let mut value = (msb << 16) | (mid << 8) | lsb;
-        
-        // Sign extension for negative values
-        if (value & 0x800000) != 0 {
-            value |= -16777216; // 0xFF000000 as signed
-        }
+        // Convert to u32 using the helper function
+        let value = ch_spi_data_to_u32(msb, mid, lsb);
         
         debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}] = {}",
-               ch, read_buffer[start_idx], read_buffer[start_idx + 1], read_buffer[start_idx + 2], value);
+               ch, msb, mid, lsb, value);
         
         samples.push(value);
     }
@@ -933,7 +985,7 @@ fn current_timestamp_micros() -> Result<u64, DriverError> {
 }
 
 // Helper function to convert raw sample to voltage
-fn convert_to_voltage(sample: i32, gain: f32, vref: f32) -> f32 {
+fn convert_to_voltage(sample: u32, gain: f32, vref: f32) -> f32 {
     // Formula: voltage = (sample * vref) / (gain * 2^23)
     let result = (sample as f64 * vref as f64) / (gain as f64 * 8388608.0);
     info!("Converting raw sample {} to voltage: {} (gain={}, vref={})",

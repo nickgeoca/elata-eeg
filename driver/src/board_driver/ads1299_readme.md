@@ -4,7 +4,14 @@ This document provides information on setting up and using the ADS1299EEG_FE boa
 
 ## Hardware Setup
 
-
+    /*
+DEBUGGING
+    P71
+    - avdd, avdd1 = 5v
+    - dvdd = 3v
+    - avss = gnd?
+    - gnd
+    */
 ### Connections
 
 The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the following pinout:

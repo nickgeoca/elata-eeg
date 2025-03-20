@@ -4,12 +4,137 @@ use std::error::Error;
 use std::thread::sleep;
 use std::time::Duration;
 
-fn main() -> Result<(), Box<dyn Error>> {
-    read_channel_data_test()
-    id_register_test()
+// Register addresses
+const ID_REG_ADDR: u8 = 0x00;
+const CONFIG1_ADDR: u8 = 0x01;
+const CONFIG2_ADDR: u8 = 0x02;
+const CONFIG3_ADDR: u8 = 0x03;
+const CONFIG4_ADDR: u8 = 0x04;
+const CH1SET_ADDR: u8 = 0x05;
+const CH2SET_ADDR: u8 = 0x06;
+const LOFF_SENSP_ADDR: u8 = 0x0F;
+const MISC1_ADDR: u8 = 0x15;
+
+// Register base values
+const CONFIG1: u8 = 0x90;        // Base configuration
+const DR_250SPS: u8 = 0x06;      // 250 SPS data rate
+const CONFIG2: u8 = 0xD3;        // Internal reference, test signal enabled
+const CONFIG3: u8 = 0x60;        // Required base value
+const CONFIG4: u8 = 0x00;        // Disable lead-off comparators
+const MISC1: u8 = 0x00;          // Base value
+const LOFF_SENSP: u8 = 0x0;
+
+// Channel settings
+const CHNSET: u8 = 0;
+const POWER_DOWN: u8 = 1 << 7;
+const GAIN_1: u8 = 0 << 4;
+const GAIN_8: u8 = 4 << 4;
+const MUX_NORMAL: u8 = 0;        // Normal electrode input
+const MUX_INPUT_SHORTED: u8 = 1; // Debugging
+const MUX_BIAS_MEASURE: u8 = 2;  // BIAS measurements
+const MUX_MVDD_SUPPLY: u8 = 3;   // Debugging
+const MUX_TEMP_SENSOR: u8 = 4;   // Debugging
+const MUX_TEST_SIGNAL: u8 = 5;   // Debugging
+const MUX_BIAS_DRP: u8 = 6;      // BIAS_DRP (positive electrode is the driver)
+const MUX_BIAS_DRN: u8 = 7;      // BIAS_DRN (negative electrode is the driver)
+
+// Bias settings
+const PD_REFBUF_ON: u8 = 1 << 7;  // bit 7
+const BIAS_MEAS_ON: u8 = 1 << 4;
+const BIASREF_INT_ON: u8 = 1 << 3;
+const PD_BIAS_ON: u8 = 1 << 2;
+const BIAS_LOFF_SENS_ON: u8 = 1 << 1;
+const BIASSTAT_ON: u8 = 1 << 0;
+const SRB1_ON: u8 = 1 << 5;
+
+// SPI commands
+const RREG_CMD: u8 = 0x20;    // Read register command
+const WREG_CMD: u8 = 0x40;    // Write register command
+const RESET_CMD: u8 = 0x06;   // Reset command
+const SDATAC_CMD: u8 = 0x11;  // Stop data continuous mode
+const START_CMD: u8 = 0x08;   // Start conversion
+const RDATAC_CMD: u8 = 0x10;  // Read data continuous mode
+const STOP_CMD: u8 = 0x0A;    // Stop conversion
+
+// Status byte bits (first byte in data frame)
+const STATUS_BYTE_DRDY_ALL: u8 = 0x80;  // DRDY bit for all channels (1 = not ready, 0 = data ready)
+const STATUS_BYTE_LOFF_STATP: u8 = 0x00; // Lead-off detection positive side status (disabled)
+const STATUS_BYTE_LOFF_STATN: u8 = 0x20; // Lead-off detection negative side status
+const STATUS_BYTE_GPIO_BITS: u8 = 0x0F;  // GPIO data bits [3:0]
+
+// Computed register values
+const CH1_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
+const CH2_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
+const POWER_DOWN_CHANNEL: u8 = CHNSET | POWER_DOWN;
+const CONFIG1_REG: u8 = CONFIG1 | DR_250SPS;
+const CONFIG2_REG: u8 = CONFIG2;  // Already contains all needed bits
+const CONFIG3_REG: u8 = CONFIG3 | PD_REFBUF_ON | PD_BIAS_ON | BIASREF_INT_ON;//CONFIG3 | BIAS_MEAS_ON | BIASREF_INT_ON;
+const CONFIG4_REG: u8 = CONFIG4;  // Already contains all needed bits
+const MISC1_REG: u8 = MISC1 | SRB1_ON;
+const LOFF_SENSP_REG: u8 = LOFF_SENSP & 0x0;
+
+/// Converts three bytes from ADS1299 SPI data to a signed 32-bit integer
+///
+/// For bipolar mode, the ADS1299 provides 24 bits of data in signed format (two's complement).
+/// - msb: Most significant byte
+/// - mid: Middle byte
+/// - lsb: Least significant byte
+///
+/// To convert to voltage: voltage = (raw_value * (VREF / Gain)) / 2^23
+/// Where VREF is the reference voltage and Gain is the PGA gain setting
+#[inline]
+fn ch_spi_data_to_i32(msb: u8, mid: u8, lsb: u8) -> f32 {
+    // Combine bytes into a 24-bit value
+    let raw_value = ((msb as u32) << 16) | ((mid as u32) << 8) | (lsb as u32);
+
+    // Convert to signed 32-bit integer (sign-extend from 24 bits)
+    let signed = if raw_value & 0x800000 != 0 {
+        (raw_value | 0xFF000000) as i32
+    } else {
+        raw_value as i32
+    };
+
+    // Map from signed range (-8,388,608 to 8,388,607) to voltage range (0V to 5V)
+    const MIN_VALUE: i32 = -8_388_608;
+    const MAX_VALUE: i32 = 8_388_607;
+    const VOLTAGE_RANGE: f32 = 5.0;
+    println!("{}",(MAX_VALUE as f32 - MIN_VALUE as f32) / (MAX_VALUE as f32 - MIN_VALUE as f32) * VOLTAGE_RANGE);
+    let voltage = ((signed - MIN_VALUE) as f32) / ((MAX_VALUE - MIN_VALUE) as f32) * VOLTAGE_RANGE;
+
+    println!("Measured voltage = {:.3}V, raw = {}", voltage, signed);
+
+    voltage
 }
 
 
+fn main() -> Result<(), Box<dyn Error>> {
+    read_channel_data_test()?;
+    id_register_test()
+}
+
+/// Helper function to write to a register
+fn write_register(spi: &mut Spi, reg_addr: u8, val: u8) -> Result<(), Box<dyn Error>> {
+    spi.write(&[WREG_CMD | reg_addr, 0x00, val])?;
+    Ok(())
+}
+
+/// Helper function to read from a register
+fn read_register(spi: &mut Spi, reg_addr: u8) -> Result<u8, Box<dyn Error>> {
+    let mut buffer = [0u8];
+    spi.write(&[RREG_CMD | reg_addr, 0x00])?;
+    spi.transfer(&mut buffer, &[0u8])?;
+    Ok(buffer[0])
+}
+
+fn verify_register(spi: &mut Spi, name: &str, reg_addr: u8, exp: u8) -> Result<(), Box<dyn Error>>  {
+    let act = read_register(spi, reg_addr)?;
+    if (act != exp) {
+        println!("!!!!REGISTER MISMATCH: {}=0x{:02X}, expected 0x{:02X}", name, act, exp);
+    }
+    Ok(())
+}
+
+/// Test to verify the ADS1299 ID register
 fn id_register_test() -> Result<(), Box<dyn Error>> {
     println!("Starting minimal ADS1299 ID register test...");
     
@@ -23,39 +148,34 @@ fn id_register_test() -> Result<(), Box<dyn Error>> {
     
     println!("SPI initialized");
     
-    // Send RESET command (0x06)
-    spi.write(&[0x06])?;
+    // Send RESET command
+    spi.write(&[RESET_CMD])?;
     println!("RESET command sent");
     
     // Send zeros (as in the Python script)
     spi.write(&[0x00, 0x00, 0x00])?;
     println!("Zeros sent");
     
-    // Send SDATAC command (0x11)
-    spi.write(&[0x11])?;
+    // Send SDATAC command
+    spi.write(&[SDATAC_CMD])?;
     println!("SDATAC command sent");
     
-    // Send RREG command for ID register (0x20, 0x00)
-    spi.write(&[0x20, 0x00])?;
-    println!("RREG command sent");
+    // Read ID register
+    let id_value = read_register(&mut spi, ID_REG_ADDR)?;
+    println!("ID register value: 0x{:02X}", id_value);
     
-    // Read the result
-    let mut buffer = [0u8];
-    spi.transfer(&mut buffer, &[0u8])?;
-    
-    println!("ID register value: 0x{:02x}", buffer[0]);
-    
-    if buffer[0] == 0x3E {
+    if id_value == 0x3E {
         println!("SUCCESS: Correct ID value (0x3E) read from ADS1299!");
     } else {
-        println!("ERROR: Incorrect ID value. Expected 0x3E, got 0x{:02x}", buffer[0]);
+        println!("ERROR: Incorrect ID value. Expected 0x3E, got 0x{:02X}", id_value);
     }
     
     Ok(())
 }
 
+/// Test to read channel data from the ADS1299
 fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
-    println!("Starting ADS1299 channel 0 data reading test...");
+    println!("Starting ADS1299 channel data reading test...");
     
     // Initialize SPI
     let mut spi = Spi::new(
@@ -73,7 +193,7 @@ fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
     
     // Power-up sequence
     // 1. Send RESET command
-    spi.write(&[0x06])?;
+    spi.write(&[RESET_CMD])?;
     sleep(Duration::from_millis(10));
     
     // 2. Send zeros
@@ -81,96 +201,73 @@ fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
     sleep(Duration::from_millis(10));
     
     // 3. Send SDATAC command
-    spi.write(&[0x11])?;
+    spi.write(&[SDATAC_CMD])?;
     sleep(Duration::from_millis(10));
     
     // 4. Check device ID
-    spi.write(&[0x20, 0x00])?;
-    let mut buffer = [0u8];
-    spi.transfer(&mut buffer, &[0u8])?;
+    let id_value = read_register(&mut spi, ID_REG_ADDR)?;
     
-    if buffer[0] != 0x3E {
-        return Err(format!("Invalid device ID: 0x{:02X}, expected 0x3E", buffer[0]).into());
+    if id_value != 0x3E {
+        return Err(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id_value).into());
     }
-    println!("Device ID verified: 0x{:02X}", buffer[0]);
+    println!("Device ID verified: 0x3E");
     
     // 5. Configure registers
+    sleep(Duration::from_millis(100));
+
     println!("Configuring ADS1299 registers...");
-    
-    // CONFIG1: Set sample rate to 250 SPS
-    spi.write(&[0x41, 0x00, 0x96])?;
-    
-    // Verify CONFIG1 was set correctly
-    spi.write(&[0x21, 0x00])?; // RREG command for CONFIG1
-    let mut buffer = [0u8];
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CONFIG1 value after setting: 0x{:02X} (expected 0x96)", buffer[0]);
-    
-    // CONFIG2: Enable internal reference and test signal with larger amplitude
-    // 0xD3 = 1101 0011 (Bit7-6=11: Internal reference, Bit5=0, Bit4=1: Test signal enabled,
-    // Bit3-2=00, Bit1-0=11: Test signal frequency = fCLK / 2^19)
-    spi.write(&[0x42, 0x00, 0xD3])?;
-    
-    // Verify CONFIG2 was set correctly
-    spi.write(&[0x22, 0x00])?; // RREG command for CONFIG2
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CONFIG2 value after setting: 0x{:02X} (expected 0xD3)", buffer[0]);
-    
-    // CONFIG3: Enable bias buffer and internal reference for bias
-    // 0x66 = 0110 0110 (PD_REFBUF=0, Bit6=1, Bit5=1, BIAS_MEAS=0, BIASREF_INT=0, PD_BIAS=1, BIAS_LOFF_SENS=1, BIAS_STAT=0)
-    spi.write(&[0x43, 0x00, 0x66])?;
-    
-    // Verify CONFIG3 was set correctly
-    spi.write(&[0x23, 0x00])?; // RREG command for CONFIG3
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CONFIG3 value after setting: 0x{:02X} (expected 0x66)", buffer[0]);
-    
-    // CH1SET: Configure channel 0 for test signal with gain=24 and SRB2 disabled
-    // 0x05 = 0000 0101 (PD=0, GAIN=000 (gain=6), SRB2=0, MUX=101 (test signal))
-    spi.write(&[0x45, 0x00, 0x05])?;
-    
-    // Verify CH1SET was set correctly
-    spi.write(&[0x25, 0x00])?; // RREG command for CH1SET
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CH1SET value after setting: 0x{:02X} (expected 0x05)", buffer[0]);
-    
-    // Also configure CH2SET to test signal to see if we get data on another channel
-    spi.write(&[0x46, 0x00, 0x05])?;
-    
-    // Verify CH2SET was set correctly
-    spi.write(&[0x26, 0x00])?; // RREG command for CH2SET
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CH2SET value after setting: 0x{:02X} (expected 0x05)", buffer[0]);
-    
-    // CONFIG4: Disable lead-off comparators
-    spi.write(&[0x57, 0x00, 0x00])?;
-    
-    // Verify CONFIG4 was set correctly
-    spi.write(&[0x37, 0x00])?; // RREG command for CONFIG4
-    spi.transfer(&mut buffer, &[0u8])?;
-    println!("CONFIG4 value after setting: 0x{:02X} (expected 0x00)", buffer[0]);
-    
+    write_register(&mut spi, CONFIG1_ADDR, CONFIG1_REG)?;
+    write_register(&mut spi, CONFIG2_ADDR, CONFIG2_REG)?;
+    write_register(&mut spi, CONFIG3_ADDR, CONFIG3_REG)?;
+    write_register(&mut spi, CONFIG4_ADDR, CONFIG4_REG)?;
+    write_register(&mut spi, LOFF_SENSP_ADDR, LOFF_SENSP_REG)?;
+    write_register(&mut spi, MISC1_ADDR, MISC1_REG)?;
+    write_register(&mut spi, CH1SET_ADDR, CH1_REG)?;
+    write_register(&mut spi, CH2SET_ADDR, CH2_REG)?;
+    for ch in 3..=8 {
+        write_register(&mut spi, CH1SET_ADDR + (ch - 1), POWER_DOWN_CHANNEL)?;
+    }
+    const BIAS_SENSP_ADDR: u8 = 0xd;
+    const BIAS_SENSN_ADDR: u8 = 0xe;
+    write_register(&mut spi, BIAS_SENSP_ADDR, 3);
+    write_register(&mut spi, BIAS_SENSN_ADDR, 3);
+
+    verify_register(&mut spi, "CONFIG1", CONFIG1_ADDR, CONFIG1_REG);
+    verify_register(&mut spi, "CONFIG2", CONFIG2_ADDR, CONFIG2_REG);
+    verify_register(&mut spi, "CONFIG3", CONFIG3_ADDR, CONFIG3_REG);
+    verify_register(&mut spi, "CH1", CH1SET_ADDR, CH1_REG);
+    verify_register(&mut spi, "CH2", CH2SET_ADDR, CH2_REG);
+    verify_register(&mut spi, "CONFIG4", CONFIG4_ADDR, CONFIG4_REG);
+    verify_register(&mut spi, "MISC1", MISC1_ADDR, MISC1_REG);
+
+
+    println!("----Register Dump----");
+    let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
+    for reg in 0..=0x17 {println!("0x{:02X} - 0x{:02X} {}", reg, read_register(&mut spi, reg as u8)?, names[reg]);}
+    println!("----Register Dump----");
+
     // Add a longer delay after configuration
     println!("Waiting for configuration to settle...");
     sleep(Duration::from_millis(100));
     
     // Make sure we're in SDATAC mode before starting
-    spi.write(&[0x11])?;
+    spi.write(&[SDATAC_CMD])?;
     sleep(Duration::from_millis(10));
     
     // 6. Start data conversion
-    spi.write(&[0x08])?;
+    spi.write(&[START_CMD])?;
     sleep(Duration::from_millis(10));
     
     // 7. Enter continuous data mode (RDATAC)
-    spi.write(&[0x10])?;
+    spi.write(&[RDATAC_CMD])?;
     sleep(Duration::from_millis(10));
+    // sleep(Duration::from_millis(10*1000));
     
     println!("Data conversion started in continuous mode");
     
     // 8. Read data samples
-    println!("Reading 10 samples from channel 0...");
-    for i in 0..10 {
+    println!("Reading 20 samples from channels...");
+    for i in 0..3 {
         // Wait for DRDY to go low
         let mut timeout = 1000;
         let drdy_start = std::time::Instant::now();
@@ -207,46 +304,30 @@ fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
                  read_buffer[3], read_buffer[4], read_buffer[5],
                  read_buffer[6], read_buffer[7], read_buffer[8]);
         
+        // Status byte interpretation:
+        // For example, if status byte is 0xC0 = 1100 0000 in binary, which means:
+        // - Bit 7 (0x80) is set: DRDY_ALL = 1, indicating not all channels are ready
+        // - Bit 6 (0x40) is set: LOFF_STATP = 1, indicating lead-off detected on positive side
+        // - Bits 5-0 are clear: No other status flags are active
         println!("Status byte: 0x{:02X}", read_buffer[0]);
         
-        // Parse channel 1 data (skip the first status byte)
-        let ch1_msb = read_buffer[1] as i32;
-        let ch1_mid = read_buffer[2] as i32;
-        let ch1_lsb = read_buffer[3] as i32;
-        
-        // Combine bytes into a 24-bit signed integer
-        let mut ch1_value = (ch1_msb << 16) | (ch1_mid << 8) | ch1_lsb;
-        
-        // Sign extension for negative values
-        if (ch1_value & 0x800000) != 0 {
-            ch1_value |= -16777216; // 0xFF000000 as signed
-        }
-        
-        // Parse channel 2 data
-        let ch2_msb = read_buffer[4] as i32;
-        let ch2_mid = read_buffer[5] as i32;
-        let ch2_lsb = read_buffer[6] as i32;
-        
-        // Combine bytes into a 24-bit signed integer
-        let mut ch2_value = (ch2_msb << 16) | (ch2_mid << 8) | ch2_lsb;
-        
-        // Sign extension for negative values
-        if (ch2_value & 0x800000) != 0 {
-            ch2_value |= -16777216; // 0xFF000000 as signed
-        }
+        // First 3 are status bytes
+        let ch1_value = ch_spi_data_to_i32(read_buffer[3], read_buffer[4], read_buffer[5]);
+        // let ch2_value = ch_spi_data_to_i32(read_buffer[6], read_buffer[7], read_buffer[8]);
         
         println!("Sample {}: Channel 1 raw bytes [{:02X} {:02X} {:02X}] = {}",
-                 i, read_buffer[1], read_buffer[2], read_buffer[3], ch1_value);
-        println!("Sample {}: Channel 2 raw bytes [{:02X} {:02X} {:02X}] = {}",
-                 i, read_buffer[4], read_buffer[5], read_buffer[6], ch2_value);
+                 i, read_buffer[3], read_buffer[4], read_buffer[5], ch1_value);
+        // println!("Sample {}: Channel 2 raw bytes [{:02X} {:02X} {:02X}] = {}",
+        //          i, read_buffer[6], read_buffer[7], read_buffer[8], ch2_value);
+
     }
     
     // 9. Exit continuous data mode (SDATAC)
-    spi.write(&[0x11])?;
+    spi.write(&[SDATAC_CMD])?;
     sleep(Duration::from_millis(10));
     
     // 10. Stop data conversion
-    spi.write(&[0x0A])?;
+    spi.write(&[STOP_CMD])?;
     println!("Data conversion stopped");
     
     Ok(())

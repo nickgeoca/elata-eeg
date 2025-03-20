@@ -26,7 +26,8 @@
 
 - The ADS1299 has a 24-bit ADC, so each sample is 3 bytes
   - We need to convert these to i32 values
-  - We need to handle sign extension for negative values
+  - For bipolar mode, we need to handle sign extension for negative values
+  - For unipolar mode, we should treat the 24-bit value as unsigned (0x000000 to 0xFFFFFF)
 
 - The ADS1299 can operate in continuous or single-shot mode
   - We use continuous mode for EEG applications
