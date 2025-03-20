@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let config = AdcConfig {
         sample_rate: 250,
         channels: vec![0],
-        gain: 24.0,
+        gain: 1.0,
         board_driver: if args.mock { DriverType::Mock } else { DriverType::Ads1299 },
         batch_size: 4,
         Vref: 4.5,

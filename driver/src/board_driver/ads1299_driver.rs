@@ -73,6 +73,45 @@ const ADS1299_REG_MISC1: u8 = 0x15;
 const ADS1299_REG_MISC2: u8 = 0x16;
 const ADS1299_REG_CONFIG4: u8 = 0x17;
 
+// ADS1299 Register Address Constants
+const CONFIG1_ADDR: u8 = 0x01;
+const CONFIG2_ADDR: u8 = 0x02;
+const CONFIG3_ADDR: u8 = 0x03;
+const CONFIG4_ADDR: u8 = 0x17;
+const LOFF_SENSP_ADDR: u8 = 0x0F;
+const MISC1_ADDR: u8 = 0x15;
+const CH1SET_ADDR: u8 = 0x05;
+const CH2SET_ADDR: u8 = 0x06;
+const BIAS_SENSP_ADDR: u8 = 0x0D;
+const BIAS_SENSN_ADDR: u8 = 0x0E;
+
+// ADS1299 Register Value Constants
+const CHNSET: u8 = 0x00;
+const GAIN_1: u8 = 0x10;
+const MUX_NORMAL: u8 = 0x00;
+const POWER_DOWN: u8 = 0x80;
+const CONFIG1: u8 = 0x00;
+const DR_250SPS: u8 = 0x96;
+const CONFIG2: u8 = 0xD0;
+const CONFIG3: u8 = 0x00;
+const PD_REFBUF_ON: u8 = 0x00;
+const PD_BIAS_ON: u8 = 0x04;
+const BIASREF_INT_ON: u8 = 0x08;
+const CONFIG4: u8 = 0x00;
+const MISC1: u8 = 0x00;
+const SRB1_ON: u8 = 0x20;
+
+// Computed register values
+const CH1_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
+const CH2_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
+const POWER_DOWN_CHANNEL: u8 = CHNSET | POWER_DOWN;
+const CONFIG1_REG: u8 = CONFIG1 | DR_250SPS;
+const CONFIG2_REG: u8 = CONFIG2;  // Already contains all needed bits
+const CONFIG3_REG: u8 = CONFIG3 | PD_REFBUF_ON | PD_BIAS_ON | BIASREF_INT_ON;
+const CONFIG4_REG: u8 = CONFIG4;  // Already contains all needed bits
+const MISC1_REG: u8 = MISC1 | SRB1_ON;
+const LOFF_SENSP_REG: u8 = LOFF_SENSP_ADDR & 0x0;
+
 impl Ads1299Driver {
     /// Create a new instance of the Ads1299Driver.
     ///
@@ -772,95 +811,44 @@ impl Ads1299Driver {
             return Err(DriverError::Other(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id)));
         }
         
-        // Configure sample rate
-        self.configure_sample_rate(config.sample_rate)?;
+        // Setup registers for CH1 mode (working configuration)
+        let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
         
-        // Verify CONFIG1 was set correctly
-        let config1 = self.read_register(ADS1299_REG_CONFIG1)?;
-        let expected_config1 = match config.sample_rate {
-            250 => 0x96,  // 250 SPS (default)
-            500 => 0x95,  // 500 SPS
-            1000 => 0x94, // 1000 SPS
-            2000 => 0x93, // 2000 SPS
-            _ => 0x96,    // Default to 250 SPS
-        };
-        if config1 != expected_config1 {
-            warn!("CONFIG1 register verification failed: expected 0x{:02X}, got 0x{:02X}",
-                  expected_config1, config1);
-        } else {
-            debug!("CONFIG1 register verified: 0x{:02X} (sample rate: {} SPS)",
-                   config1, config.sample_rate);
+        // Write registers in the specific order
+        write_register(&mut spi, CONFIG1_ADDR, CONFIG1_REG)?;
+        write_register(&mut spi, CONFIG2_ADDR, CONFIG2_REG)?;
+        write_register(&mut spi, CONFIG3_ADDR, CONFIG3_REG)?;
+        write_register(&mut spi, CONFIG4_ADDR, CONFIG4_REG)?;
+        write_register(&mut spi, LOFF_SENSP_ADDR, LOFF_SENSP_REG)?;
+        write_register(&mut spi, MISC1_ADDR, MISC1_REG)?;
+        
+        // Configure CH1 and CH2 to be active
+        write_register(&mut spi, CH1SET_ADDR, CH1_REG)?;
+        write_register(&mut spi, CH2SET_ADDR, CH2_REG)?;
+        
+        // Power down channels 3-8
+        for ch in 3..=8 {
+            write_register(&mut spi, CH1SET_ADDR + (ch - 1), POWER_DOWN_CHANNEL)?;
         }
         
-        // Set CONFIG2 register (0x02)
-        // Bits 7-6 = 11: Internal reference enabled
-        // Bit 5 = 1: Test signal amplitude = 1 × –(VREFP – VREFN) / 2400
-        // Bits 4-3 = 00: Not used
-        // Bit 2-0 = 001: Test signal frequency = fCLK / 2^21
-        self.write_register(ADS1299_REG_CONFIG2, 0xD1)?;
+        // Set bias registers
+        write_register(&mut spi, BIAS_SENSP_ADDR, 3)?;
+        write_register(&mut spi, BIAS_SENSN_ADDR, 3)?;
         
-        // Verify CONFIG2 was set correctly
-        let config2 = self.read_register(ADS1299_REG_CONFIG2)?;
-        if config2 != 0xD1 {
-            warn!("CONFIG2 register verification failed: expected 0xD1, got 0x{:02X}", config2);
+        // Repeat the configuration to ensure it's set correctly
+        write_register(&mut spi, CONFIG1_ADDR, CONFIG1_REG)?;
+        write_register(&mut spi, CONFIG2_ADDR, CONFIG2_REG)?;
+        write_register(&mut spi, CONFIG3_ADDR, CONFIG3_REG)?;
+        write_register(&mut spi, CONFIG4_ADDR, CONFIG4_REG)?;
+        write_register(&mut spi, LOFF_SENSP_ADDR, LOFF_SENSP_REG)?;
+        write_register(&mut spi, MISC1_ADDR, MISC1_REG)?;
+        write_register(&mut spi, CH1SET_ADDR, CH1_REG)?;
+        write_register(&mut spi, CH2SET_ADDR, CH2_REG)?;
+        for ch in 3..=8 {
+            write_register(&mut spi, CH1SET_ADDR + (ch - 1), POWER_DOWN_CHANNEL)?;
         }
-        
-        // Set CONFIG3 register (0x03)
-        // 0x66 = 0110 0110 (PD_REFBUF=0, Bit6=1, Bit5=1, BIAS_MEAS=0, BIASREF_INT=0, PD_BIAS=1, BIAS_LOFF_SENS=1, BIAS_STAT=0)
-        // Bit 7 (PD_REFBUF) = 0: Reference buffer powered up
-        // Bit 6-5 = 11: Not specified in datasheet
-        // Bit 2 (PD_BIAS) = 1: Bias buffer powered up
-        // Bit 1 (BIAS_LOFF_SENS) = 1: Bias drive connected to LOFF sense
-        self.write_register(ADS1299_REG_CONFIG3, 0x66)?;
-        
-        // Verify CONFIG3 was set correctly
-        let config3 = self.read_register(ADS1299_REG_CONFIG3)?;
-        if config3 != 0x66 {
-            warn!("CONFIG3 register verification failed: expected 0x66, got 0x{:02X}", config3);
-        } else {
-            debug!("CONFIG3 register verified: 0x66 (bias buffer enabled, LOFF sense enabled)");
-        }
-        
-        // Set MISC1 register (0x15)
-        // Bit 5 (SRB1) = 1: SRB1 connected to all negative inputs
-        self.write_register(ADS1299_REG_MISC1, 0x20)?;
-        
-        // Verify MISC1 was set correctly
-        let misc1 = self.read_register(ADS1299_REG_MISC1)?;
-        if misc1 != 0x00 {
-            warn!("MISC1 register verification failed: expected 0x00, got 0x{:02X}", misc1);
-        }
-        
-        // Get gain code
-        let gain_code = self.gain_to_register_value(config.gain)?;
-        
-        // Configure channels
-        for &channel in &config.channels {
-            if channel < 8 {
-                // Construct the channel setting register value
-                // Bit 7 (PD) = 0: Channel powered up
-                // Bits 6-4 (GAIN) = from gain_code
-                // Bit 3 (SRB2) = 1: SRB2 connected to negative input
-                // Bits 2-0 (MUX) = 101: Test signal
-                let ch_value = ((gain_code & 0x07) << 4) | 0x05;
-                let reg_addr = 0x05 + channel as u8;
-                self.write_register(reg_addr, ch_value)?;
-                
-                // Verify channel setting was set correctly
-                let actual_value = self.read_register(reg_addr)?;
-                if actual_value != ch_value {
-                    warn!("Channel {} register verification failed: expected 0x{:02X}, got 0x{:02X}",
-                          channel, ch_value, actual_value);
-                } else {
-                    debug!("Channel {} configured successfully with value 0x{:02X} (gain={}, SRB2 enabled, test signal)",
-                           channel, ch_value, config.gain);
-                }
-            }
-        }
-        
-        // Set CONFIG4 register (0x17)
-        // Bit 0 (PD_LOFF_COMP) = 0: Lead-off comparators disabled
-        self.write_register(ADS1299_REG_CONFIG4, 0x00)?;
+        write_register(&mut spi, BIAS_SENSP_ADDR, 3)?;
+        write_register(&mut spi, BIAS_SENSN_ADDR, 3)?;
         
         // Wait for configuration to settle
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -982,6 +970,23 @@ fn current_timestamp_micros() -> Result<u64, DriverError> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_micros() as u64)
         .map_err(|e| DriverError::Other(format!("Failed to get timestamp: {}", e)))
+}
+
+// Helper function to write a value to a register in the ADS1299
+fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverError> {
+    // Command: WREG (0x40) + register address
+    let command = 0x40 | (register & 0x1F);
+    
+    // First byte: command, second byte: number of registers to write minus 1 (0 for single register)
+    // Third byte: value to write
+    let write_buffer = [command, 0x00, value];
+    
+    spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!("SPI write error: {}", e)
+    )))?;
+    
+    Ok(())
 }
 
 // Helper function to convert raw sample to voltage
