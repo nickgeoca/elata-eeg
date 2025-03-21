@@ -37,80 +37,43 @@ struct Ads1299Inner {
     registers: [u8; 24],
 }
 
-// ADS1299 Commands
-const ADS1299_CMD_WAKEUP: u8 = 0x02;
-const ADS1299_CMD_STANDBY: u8 = 0x04;
-const ADS1299_CMD_RESET: u8 = 0x06;
-const ADS1299_CMD_START: u8 = 0x08;
-const ADS1299_CMD_STOP: u8 = 0x0A;
-const ADS1299_CMD_RDATAC: u8 = 0x10;
-const ADS1299_CMD_SDATAC: u8 = 0x11;
-const ADS1299_CMD_RDATA: u8 = 0x12;
-
-// ADS1299 Registers
-const ADS1299_REG_ID: u8 = 0x00;
-const ADS1299_REG_CONFIG1: u8 = 0x01;
-const ADS1299_REG_CONFIG2: u8 = 0x02;
-const ADS1299_REG_CONFIG3: u8 = 0x03;
-const ADS1299_REG_LOFF: u8 = 0x04;
-const ADS1299_REG_CH1SET: u8 = 0x05;
-const ADS1299_REG_CH2SET: u8 = 0x06;
-const ADS1299_REG_CH3SET: u8 = 0x07;
-const ADS1299_REG_CH4SET: u8 = 0x08;
-const ADS1299_REG_CH5SET: u8 = 0x09;
-const ADS1299_REG_CH6SET: u8 = 0x0A;
-const ADS1299_REG_CH7SET: u8 = 0x0B;
-const ADS1299_REG_CH8SET: u8 = 0x0C;
-const ADS1299_REG_BIAS_SENSP: u8 = 0x0D;
-const ADS1299_REG_BIAS_SENSN: u8 = 0x0E;
-const ADS1299_REG_LOFF_SENSP: u8 = 0x0F;
-const ADS1299_REG_LOFF_SENSN: u8 = 0x10;
-const ADS1299_REG_LOFF_FLIP: u8 = 0x11;
-const ADS1299_REG_LOFF_STATP: u8 = 0x12;
-const ADS1299_REG_LOFF_STATN: u8 = 0x13;
-const ADS1299_REG_GPIO: u8 = 0x14;
-const ADS1299_REG_MISC1: u8 = 0x15;
-const ADS1299_REG_MISC2: u8 = 0x16;
-const ADS1299_REG_CONFIG4: u8 = 0x17;
-
-// ADS1299 Register Address Constants
-const CONFIG1_ADDR: u8 = 0x01;
-const CONFIG2_ADDR: u8 = 0x02;
-const CONFIG3_ADDR: u8 = 0x03;
-const CONFIG4_ADDR: u8 = 0x17;
-const LOFF_SENSP_ADDR: u8 = 0x0F;
-const MISC1_ADDR: u8 = 0x15;
-const CH1SET_ADDR: u8 = 0x05;
-const CH2SET_ADDR: u8 = 0x06;
-const BIAS_SENSP_ADDR: u8 = 0x0D;
-const BIAS_SENSN_ADDR: u8 = 0x0E;
-
 // ADS1299 Register Value Constants
-const CHNSET: u8 = 0x00;
-const GAIN_1: u8 = 0x10;
-const MUX_NORMAL: u8 = 0x00;
-const POWER_DOWN: u8 = 0x80;
-const CONFIG1: u8 = 0x00;
-const DR_250SPS: u8 = 0x96;
-const CONFIG2: u8 = 0xD0;
-const CONFIG3: u8 = 0x00;
-const PD_REFBUF_ON: u8 = 0x00;
-const PD_BIAS_ON: u8 = 0x04;
-const BIASREF_INT_ON: u8 = 0x08;
-const CONFIG4: u8 = 0x00;
-const MISC1: u8 = 0x00;
-const SRB1_ON: u8 = 0x20;
+const MUX_NORMAL: u8 = 0 << 0;
+const PD_REFBUF: u8 = 1 << 7;      // 1 : Enable internal reference buffer
+const BIAS_MEAS: u8 = 1 << 4;      // 1 : BIAS_IN signal is routed to the channel that has the MUX_Setting 010 (VREF)
+const BIASREF_INT: u8 = 1 << 3;    // 1 : BIASREF signal (AVDD + AVSS) / 2 generated internally
+const PD_BIAS: u8 = 1 << 2;        // 1 : BIAS buffer is enabled
+const BIAS_LOFF_SENS: u8 = 1 << 1; // 1 : BIAS sense is enabled
+const SRB1: u8 = 1 << 5;           // 1 : Switches closed.. This bit connects the SRB1 to all 4, 6, or 8 channels inverting inputs
+const DC_TEST: u8 = 3 << 0;
+const POWER_OFF_CH: u8 = 0x81;
+const BIAS_SENS_OFF_MASK: u8 = 0x00;
 
-// Computed register values
-const CH1_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
-const CH2_REG: u8 = CHNSET | GAIN_1 | MUX_NORMAL;
-const POWER_DOWN_CHANNEL: u8 = CHNSET | POWER_DOWN;
-const CONFIG1_REG: u8 = CONFIG1 | DR_250SPS;
-const CONFIG2_REG: u8 = CONFIG2;  // Already contains all needed bits
-const CONFIG3_REG: u8 = CONFIG3 | PD_REFBUF_ON | PD_BIAS_ON | BIASREF_INT_ON;
-const CONFIG4_REG: u8 = CONFIG4;  // Already contains all needed bits
-const MISC1_REG: u8 = MISC1 | SRB1_ON;
-const LOFF_SENSP_REG: u8 = LOFF_SENSP_ADDR & 0x0;
+// Register Setup
+const REG_ID_ADDR    : u8 = 0x00;
+const CONFIG1_ADDR   : u8 = 0x01; const config1_reg: u8 = 0x90;
+const CONFIG2_ADDR   : u8 = 0x02; const config2_reg: u8 = 0xD0 | DC_TEST;
+const CONFIG3_ADDR   : u8 = 0x03; const config3_reg: u8 = 0x60 | BIASREF_INT | PD_BIAS | PD_REFBUF;
+const LOFF_ADDR      : u8 = 0x04;
+const CH1SET_ADDR    : u8 = 0x05; const chn_reg    : u8 = 0x00 | MUX_NORMAL;
+                                  const chn_off    : u8 = 0x00 | POWER_OFF_CH;
+const BIAS_SENSP_ADDR: u8 = 0x0D; const bias_sensp_reg_mask : u8 = BIAS_SENS_OFF_MASK;
+const BIAS_SENSN_ADDR: u8 = 0x0E; const bias_sensn_reg_mask : u8 = BIAS_SENS_OFF_MASK;
+const LOFF_SENSP_ADDR: u8 = 0x0F; const loff_sesp_reg: u8 = 0x00;
+const MISC1_ADDR     : u8 = 0x15; const misc1_reg   : u8 = 0x00 | SRB1;
+const CONFIG4_ADDR   : u8 = 0x17; const config4_reg : u8 = 0x00;
+
+
+// ADS1299 Commands
+const CMD_WAKEUP: u8 = 0x02;
+const CMD_STANDBY: u8 = 0x04;
+const CMD_RESET: u8 = 0x06;
+const CMD_START: u8 = 0x08;
+const CMD_STOP: u8 = 0x0A;
+const CMD_RDATAC: u8 = 0x10;
+const CMD_SDATAC: u8 = 0x11;
+const CMD_RDATA: u8 = 0x12;
+
 
 impl Ads1299Driver {
     /// Create a new instance of the Ads1299Driver.
@@ -317,7 +280,7 @@ impl Ads1299Driver {
             info!("Buffering {} samples before sending batches", batch_size);
             
             // Make sure we're in SDATAC mode before starting
-            if let Err(e) = send_command_to_spi(&mut spi, ADS1299_CMD_SDATAC) {
+            if let Err(e) = send_command_to_spi(&mut spi, CMD_SDATAC) {
                 error!("Failed to send SDATAC command: {:?}", e);
                 return;
             }
@@ -326,7 +289,7 @@ impl Ads1299Driver {
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
             
             // Enter continuous data mode (RDATAC)
-            if let Err(e) = send_command_to_spi(&mut spi, ADS1299_CMD_RDATAC) {
+            if let Err(e) = send_command_to_spi(&mut spi, CMD_RDATAC) {
                 error!("Failed to send RDATAC command: {:?}", e);
                 return;
             }
@@ -403,14 +366,14 @@ impl Ads1299Driver {
                 let mut voltage_samples = Vec::with_capacity(num_channels);
                 for (i, &raw) in raw_samples.iter().enumerate() {
                     let channel_idx = config.channels[i];
-                    let voltage = convert_to_voltage(raw, config.gain, config.Vref);
+                    let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
                     voltage_samples.push(vec![voltage]);
                 }
                 
                 // Create AdcData
                 let data = AdcData {
                     timestamp,
-                    raw_samples: raw_samples.iter().map(|&s| vec![s as i32]).collect(),
+                    raw_samples: raw_samples.iter().map(|&s| vec![s]).collect(),
                     voltage_samples,
                 };
                 
@@ -462,7 +425,7 @@ impl Ads1299Driver {
         // Exit continuous data mode and stop conversion
         if let Some(spi) = self.spi.as_mut() {
             // First exit RDATAC mode
-            if let Err(e) = send_command_to_spi(spi, ADS1299_CMD_SDATAC) {
+            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
                 warn!("Failed to send SDATAC command during stop_acquisition: {:?}", e);
                 // Continue anyway to try to stop conversion
             }
@@ -667,7 +630,7 @@ impl Ads1299Driver {
     }
 
     /// Read data from the ADS1299.
-    fn read_data(&mut self) -> Result<Vec<u32>, DriverError> {
+    fn read_data(&mut self) -> Result<Vec<i32>, DriverError> {
         // Get the number of channels
         let num_channels = {
             let inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
@@ -682,7 +645,7 @@ impl Ads1299Driver {
     /// Reset the ADS1299 chip.
     fn reset_chip(&mut self) -> Result<(), DriverError> {
         // Send RESET command (0x06)
-        self.send_command(ADS1299_CMD_RESET)?;
+        self.send_command(CMD_RESET)?;
         
         // Wait for reset to complete (recommended 18 tCLK cycles, ~4.5µs at 4MHz)
         std::thread::sleep(std::time::Duration::from_micros(10));
@@ -693,91 +656,45 @@ impl Ads1299Driver {
     /// Start conversion on the ADS1299.
     fn start_conversion(&mut self) -> Result<(), DriverError> {
         // Send START command (0x08)
-        self.send_command(ADS1299_CMD_START)?;
+        self.send_command(CMD_START)?;
         Ok(())
     }
 
     /// Stop conversion on the ADS1299.
     fn stop_conversion(&mut self) -> Result<(), DriverError> {
         // Send STOP command (0x0A)
-        self.send_command(ADS1299_CMD_STOP)?;
+        self.send_command(CMD_STOP)?;
         Ok(())
     }
 
-    /// Configure the ADS1299 for single-ended operation.
-    fn configure_single_ended(&mut self) -> Result<(), DriverError> {
-        // Set MISC1 register (0x15)
-        // Bit 5 (SRB1) = 1: SRB1 is connected to all negative inputs
-        self.write_register(ADS1299_REG_MISC1, 0x20)?;
-        
-        // Get configuration data we need
-        let (gain, channels) = {
-            let inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
-            (inner.config.gain, inner.config.channels.clone())
-        };
-        
-        // Get gain code
-        let gain_code = self.gain_to_register_value(gain)?;
-        
-        // Configure channels
-        for &channel in &channels {
-            if channel < 8 {
-                // Construct the channel setting register value
-                // Bit 7 (PD) = 0: Channel powered up
-                // Bits 6-4 (GAIN) = from gain_code
-                // Bit 3 (SRB2) = 1: SRB2 connected to negative input
-                // Bits 2-0 (MUX) = 000: Normal electrode input
-                // Bit 3 (SRB2) = 0: SRB2 not connected to negative input
-                let ch_value = ((gain_code & 0x07) << 4) | 0x08;
-                self.write_register(0x05 + channel as u8, ch_value)?;
-                debug!("Configured channel {} with CHnSET=0x{:02X} (gain={}, SRB2 disabled, normal electrode input)",
-                       channel, ch_value, gain);
-            }
-        }
-        
-        // Set CONFIG3 register (0x03)
-        // 0x66 = 0110 0110 (PD_REFBUF=0, Bit6=1, Bit5=1, BIAS_MEAS=0, BIASREF_INT=0, PD_BIAS=1, BIAS_LOFF_SENS=1, BIAS_STAT=0)
-        // Bit 7 (PD_REFBUF) = 0: Reference buffer powered up
-        // Bit 6-5 = 11: Not specified in datasheet
-        // Bit 2 (PD_BIAS) = 1: Bias buffer powered up
-        // Bit 1 (BIAS_LOFF_SENS) = 1: Bias drive connected to LOFF sense
-        self.write_register(ADS1299_REG_CONFIG3, 0x66)?;
-        debug!("Configured CONFIG3=0x66 (bias buffer enabled, LOFF sense enabled)");
-        
-        Ok(())
-    }
-
-    /// Configure the sample rate on the ADS1299.
-    fn configure_sample_rate(&mut self, sample_rate: u32) -> Result<(), DriverError> {
-        // Calculate CONFIG1 register value based on sample rate
-        let config1_value = match sample_rate {
-            250 => 0x96,  // 250 SPS (default)
-            500 => 0x95,  // 500 SPS
-            1000 => 0x94, // 1000 SPS
-            2000 => 0x93, // 2000 SPS
-            _ => return Err(DriverError::ConfigurationError(
-                format!("Unsupported sample rate: {}. Supported rates: 250, 500, 1000, 2000", sample_rate)
-            )),
-        };
-        
-        // Set CONFIG1 register (0x01)
-        self.write_register(ADS1299_REG_CONFIG1, config1_value)?;
-        
-        Ok(())
-    }
-
-    /// Convert gain value to register value.
-    fn gain_to_register_value(&self, gain: f32) -> Result<u8, DriverError> {
+    /// Convert gain value to register mask.
+    fn gain_to_reg_mask(&self, gain: f32) -> Result<u8, DriverError> {
         match gain as u8 {
-            1 => Ok(0x01),  // Gain = 1 (0b001)
-            2 => Ok(0x02),  // Gain = 2 (0b010)
-            4 => Ok(0x03),  // Gain = 4 (0b011)
-            6 => Ok(0x00),  // Gain = 6 (0b000)
-            8 => Ok(0x05),  // Gain = 8 (0b101)
-            12 => Ok(0x06), // Gain = 12 (0b110)
-            24 => Ok(0x07), // Gain = 24 (0b111) - was incorrectly mapped to 0x00
+            1 => Ok(0 << 4),
+            2 => Ok(1 << 4),
+            4 => Ok(2 << 4),
+            6 => Ok(3 << 4),
+            8 => Ok(4 << 4),
+            12 => Ok(5 << 4),
+            24 => Ok(6 << 4),
             _ => Err(DriverError::ConfigurationError(
                 format!("Unsupported gain: {}. Supported gains: 1, 2, 4, 6, 8, 12, 24", gain)
+            )),
+        }
+    }
+
+    /// Convert samples per second value to register mask.
+    fn sps_to_reg_mask(&self, sps: u32) -> Result<u8, DriverError> {
+        match sps {
+            250 => Ok(6 << 0),
+            500 => Ok(5 << 0),
+            1000 => Ok(4 << 0),
+            2000 => Ok(3 << 0),
+            4000 => Ok(2 << 0),
+            8000 => Ok(1 << 0),
+            16_000 => Ok(0 << 0),
+            _ => Err(DriverError::ConfigurationError(
+                format!("Unsupported samples per second: {}. Supported sps: 250, 500, 1000, 2000, 4000, 8000, 16000", sps)
             )),
         }
     }
@@ -788,13 +705,16 @@ impl Ads1299Driver {
             let inner = self.inner.lock().await;
             inner.config.clone()
         };
-        
+        let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
+        let gain_mask = self.gain_to_reg_mask(config.gain)?;
+        let sps_mask = self.sps_to_reg_mask(config.sample_rate)?;
+
         // Power-up sequence following the working Python script pattern:
         
         // 1. Send RESET command (0x06)
-        self.send_command(ADS1299_CMD_RESET)?;
+        self.send_command(CMD_RESET)?;
         
-        // 2. Send zeros (as in the Python script)
+        // 2. Send zeros
         if let Some(spi) = self.spi.as_mut() {
             spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::IoError(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -803,64 +723,36 @@ impl Ads1299Driver {
         }
         
         // 3. Send SDATAC command to stop continuous data acquisition mode
-        self.send_command(ADS1299_CMD_SDATAC)?;
+        self.send_command(CMD_SDATAC)?;
         
         // Check device ID to verify communication
-        let id = self.read_register(ADS1299_REG_ID)?;
+        let id = self.read_register(REG_ID_ADDR)?;
         if id != 0x3E {
             return Err(DriverError::Other(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id)));
         }
         
         // Setup registers for CH1 mode (working configuration)
         let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-        
+
         // Write registers in the specific order
-        write_register(&mut spi, CONFIG1_ADDR, CONFIG1_REG)?;
-        write_register(&mut spi, CONFIG2_ADDR, CONFIG2_REG)?;
-        write_register(&mut spi, CONFIG3_ADDR, CONFIG3_REG)?;
-        write_register(&mut spi, CONFIG4_ADDR, CONFIG4_REG)?;
-        write_register(&mut spi, LOFF_SENSP_ADDR, LOFF_SENSP_REG)?;
-        write_register(&mut spi, MISC1_ADDR, MISC1_REG)?;
-        
-        // Configure CH1 and CH2 to be active
-        write_register(&mut spi, CH1SET_ADDR, CH1_REG)?;
-        write_register(&mut spi, CH2SET_ADDR, CH2_REG)?;
-        
-        // Power down channels 3-8
-        for ch in 3..=8 {
-            write_register(&mut spi, CH1SET_ADDR + (ch - 1), POWER_DOWN_CHANNEL)?;
-        }
-        
-        // Set bias registers
-        write_register(&mut spi, BIAS_SENSP_ADDR, 3)?;
-        write_register(&mut spi, BIAS_SENSN_ADDR, 3)?;
-        
-        // Repeat the configuration to ensure it's set correctly
-        write_register(&mut spi, CONFIG1_ADDR, CONFIG1_REG)?;
-        write_register(&mut spi, CONFIG2_ADDR, CONFIG2_REG)?;
-        write_register(&mut spi, CONFIG3_ADDR, CONFIG3_REG)?;
-        write_register(&mut spi, CONFIG4_ADDR, CONFIG4_REG)?;
-        write_register(&mut spi, LOFF_SENSP_ADDR, LOFF_SENSP_REG)?;
-        write_register(&mut spi, MISC1_ADDR, MISC1_REG)?;
-        write_register(&mut spi, CH1SET_ADDR, CH1_REG)?;
-        write_register(&mut spi, CH2SET_ADDR, CH2_REG)?;
-        for ch in 3..=8 {
-            write_register(&mut spi, CH1SET_ADDR + (ch - 1), POWER_DOWN_CHANNEL)?;
-        }
-        write_register(&mut spi, BIAS_SENSP_ADDR, 3)?;
-        write_register(&mut spi, BIAS_SENSN_ADDR, 3)?;
+        write_register(&mut spi, CONFIG1_ADDR, config1_reg | sps_mask)?;
+        write_register(&mut spi, CONFIG2_ADDR, config2_reg)?;
+        write_register(&mut spi, CONFIG3_ADDR, config3_reg)?;
+        write_register(&mut spi, CONFIG4_ADDR, config4_reg)?;
+        write_register(&mut spi, LOFF_SENSP_ADDR, loff_sesp_reg)?;
+        write_register(&mut spi, MISC1_ADDR, misc1_reg)?;
+        for ch in 0..=7             { write_register(&mut spi, CH1SET_ADDR + ch, chn_off)?; }
+        for &ch in &config.channels { write_register(&mut spi, CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?; }
+        write_register(&mut spi, BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask)?;
+        write_register(&mut spi, BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask)?;
         
         // Wait for configuration to settle
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         
-        // Print all register values for debugging
-        debug!("ADS1299 Register Values after initialization:");
-        for reg in 0..=0x17 {
-            if reg <= 0x17 {
-                let value = self.read_register(reg)?;
-                debug!("Register 0x{:02X} = 0x{:02X}", reg, value);
-            }
-        }
+        println!("----Register Dump----");
+        let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
+        for reg in 0..=0x17 {println!("0x{:02X} - 0x{:02X} {}", reg, self.read_register(reg as u8)?, names[reg]);}
+        println!("----Register Dump----");
         
         // Update status
         {
@@ -901,14 +793,21 @@ fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
     Ok(())
 }
 
-// Helper function to convert 3 bytes of SPI data to u32 for unipolar supply
-fn ch_spi_data_to_u32(msb: u8, mid: u8, lsb: u8) -> u32 {
-    // Combine the 3 bytes into a 24-bit unsigned value
-    (msb as u32) << 16 | (mid as u32) << 8 | (lsb as u32)
+
+/// Convert 24-bit SPI data to a signed 32-bit integer (sign-extended)
+fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {
+    let raw_value = ((msb as u32) << 16) | ((mid as u32) << 8) | (lsb as u32);
+    ((raw_value as i32) << 8) >> 8
+}
+
+/// Convert signed raw ADC value to voltage using VREF and gain
+/// Formula: voltage = (raw * (VREF / Gain)) / 2^23
+fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
+    ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32
 }
 
 // Helper function to read data from SPI in continuous mode (RDATAC)
-fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<u32>, DriverError> {
+fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
     debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
     
     // In continuous mode (RDATAC), we don't need to send RDATA command before each read
@@ -952,8 +851,8 @@ fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<u32>, Dr
         let mid = read_buffer[start_idx + 1];
         let lsb = read_buffer[start_idx + 2];
         
-        // Convert to u32 using the helper function
-        let value = ch_spi_data_to_u32(msb, mid, lsb);
+        // Convert to i32 using the ch_sample_to_raw function
+        let value = ch_sample_to_raw(msb, mid, lsb);
         
         debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}] = {}",
                ch, msb, mid, lsb, value);
@@ -989,14 +888,6 @@ fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverEr
     Ok(())
 }
 
-// Helper function to convert raw sample to voltage
-fn convert_to_voltage(sample: u32, gain: f32, vref: f32) -> f32 {
-    // Formula: voltage = (sample * vref) / (gain * 2^23)
-    let result = (sample as f64 * vref as f64) / (gain as f64 * 8388608.0);
-    info!("Converting raw sample {} to voltage: {} (gain={}, vref={})",
-          sample, result, gain, vref);
-    result as f32
-}
 
 // Implement the AdcDriver trait
 #[async_trait]

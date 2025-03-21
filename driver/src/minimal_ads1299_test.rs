@@ -73,43 +73,22 @@ const CONFIG4_REG: u8 = CONFIG4;  // Already contains all needed bits
 const MISC1_REG: u8 = MISC1 | SRB1_ON;
 const LOFF_SENSP_REG: u8 = LOFF_SENSP & 0x0;
 
-/// Converts three bytes from ADS1299 SPI data to a signed 32-bit integer
-///
-/// For bipolar mode, the ADS1299 provides 24 bits of data in signed format (two's complement).
-/// - msb: Most significant byte
-/// - mid: Middle byte
-/// - lsb: Least significant byte
-///
-/// To convert to voltage: voltage = (raw_value * (VREF / Gain)) / 2^23
-/// Where VREF is the reference voltage and Gain is the PGA gain setting
-#[inline]
-fn ch_spi_data_to_i32(msb: u8, mid: u8, lsb: u8) -> f32 {
-    // Combine bytes into a 24-bit value
-    let raw_value = ((msb as u32) << 16) | ((mid as u32) << 8) | (lsb as u32);
-
-    // Convert to signed 32-bit integer (sign-extend from 24 bits)
-    let signed = if raw_value & 0x800000 != 0 {
-        (raw_value | 0xFF000000) as i32
-    } else {
-        raw_value as i32
-    };
-
-    // Map from signed range (-8,388,608 to 8,388,607) to voltage range (0V to 5V)
-    const MIN_VALUE: i32 = -8_388_608;
-    const MAX_VALUE: i32 = 8_388_607;
-    const VOLTAGE_RANGE: f32 = 5.0;
-    println!("{}",(MAX_VALUE as f32 - MIN_VALUE as f32) / (MAX_VALUE as f32 - MIN_VALUE as f32) * VOLTAGE_RANGE);
-    let voltage = ((signed - MIN_VALUE) as f32) / ((MAX_VALUE - MIN_VALUE) as f32) * VOLTAGE_RANGE;
-
-    println!("Measured voltage = {:.3}V, raw = {}", voltage, signed);
-
-    voltage
-}
-
 
 fn main() -> Result<(), Box<dyn Error>> {
     read_channel_data_test()?;
     id_register_test()
+}
+
+/// Convert 24-bit SPI data to a signed 32-bit integer (sign-extended)
+fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {
+    let raw_value = ((msb as u32) << 16) | ((mid as u32) << 8) | (lsb as u32);
+    ((raw_value as i32) << 8) >> 8
+}
+
+/// Convert signed raw ADC value to voltage using VREF and gain
+/// Formula: voltage = (raw * (VREF / Gain)) / 2^23
+fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
+    ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32
 }
 
 /// Helper function to write to a register
@@ -312,11 +291,12 @@ fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
         println!("Status byte: 0x{:02X}", read_buffer[0]);
         
         // First 3 are status bytes
-        let ch1_value = ch_spi_data_to_i32(read_buffer[3], read_buffer[4], read_buffer[5]);
+        let raw_value = ch_sample_to_raw(read_buffer[3], read_buffer[4], read_buffer[5]);
+        let voltage = ch_raw_to_voltage(raw_value, 4.5, 1.0);
         // let ch2_value = ch_spi_data_to_i32(read_buffer[6], read_buffer[7], read_buffer[8]);
         
-        println!("Sample {}: Channel 1 raw bytes [{:02X} {:02X} {:02X}] = {}",
-                 i, read_buffer[3], read_buffer[4], read_buffer[5], ch1_value);
+        println!("Sample {}: Channel 1 raw bytes [{:02X} {:02X} {:02X}] = {}, v={}",
+                 i, read_buffer[3], read_buffer[4], read_buffer[5], raw_value, voltage);
         // println!("Sample {}: Channel 2 raw bytes [{:02X} {:02X} {:02X}] = {}",
         //          i, read_buffer[6], read_buffer[7], read_buffer[8], ch2_value);
 
