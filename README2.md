@@ -85,3 +85,12 @@ bash rebuild.sh
 4) Clinical or Research Insights: In clinical settings, EEG can help investigate sleep disorders, epileptiform activity, or abnormal brain rhythms. In research/BCI contexts, EEG can be used for controlling external devices, studying cognitive workload, etc.
 
 5) Classification/Decoding: Machine learning models can classify mental states (e.g., different motor imagery tasks, alert vs. drowsy states). This is widely used in brain-computer interface (BCI) applications.
+
+## Analsyis Software
+1) MNE-Python is by far the most comprehensive and widely adopted for general-purpose EEG processing and analysis in Python.
+
+2) PyEEG is good for feature extraction and complexity measures.
+
+3) MOABB and Braindecode cater more to BCI/deep-learning-driven EEG classification tasks.
+
+4) PyEDFlib is essential if you need robust EDF/BDF file handling.
