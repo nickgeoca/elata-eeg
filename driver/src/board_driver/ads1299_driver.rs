@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -6,7 +6,8 @@ use async_trait::async_trait;
 use log::{info, warn, debug, trace, error};
 use lazy_static::lazy_static;
 use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
-use rppal::gpio::{Gpio, InputPin};
+use rppal::gpio::{Gpio, InputPin, Trigger, Event};
+use std::thread;
 use super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
 
 // Static hardware lock to simulate real hardware access constraints
@@ -22,6 +23,9 @@ pub struct Ads1299Driver {
     additional_channel_buffering: usize,
     spi: Option<Spi>,
     drdy_pin: Option<InputPin>,
+    // New fields for interrupt-driven approach
+    interrupt_thread: Option<thread::JoinHandle<()>>,
+    interrupt_running: Arc<AtomicBool>,
 }
 
 /// Internal state for the Ads1299Driver.
@@ -195,6 +199,8 @@ impl Ads1299Driver {
             additional_channel_buffering,
             spi: Some(spi),
             drdy_pin: Some(drdy_pin),
+            interrupt_thread: None,
+            interrupt_running: Arc::new(AtomicBool::new(false)),
         };
         
         info!("Ads1299Driver created with config: {:?}", config);
@@ -260,60 +266,138 @@ impl Ads1299Driver {
         // Prepare for background task
         let inner_arc = self.inner.clone();
         let tx = self.tx.clone();
-        let drdy_pin = self.drdy_pin.take().ok_or(DriverError::NotInitialized)?;
-        let mut spi = self.spi.take().ok_or(DriverError::NotInitialized)?;
         
-        // Spawn a task that monitors DRDY pin and reads data
-        let handle = tokio::spawn(async move {
-            // Get configuration and base timestamp
-            let (config, base_timestamp) = {
-                let inner = inner_arc.lock().await;
-                (inner.config.clone(), inner.base_timestamp.expect("Base timestamp should be set"))
-            };
-            
-            // Get batch size from config
-            let batch_size = config.batch_size;
-            let num_channels = config.channels.len();
-            
-            info!("Starting acquisition with batch size: {}, sample rate: {} Hz",
-                   batch_size, config.sample_rate);
-            info!("Buffering {} samples before sending batches", batch_size);
-            
-            // Make sure we're in SDATAC mode before starting
-            if let Err(e) = send_command_to_spi(&mut spi, CMD_SDATAC) {
+        // Make sure we're in SDATAC mode before starting
+        if let Some(spi) = self.spi.as_mut() {
+            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
                 error!("Failed to send SDATAC command: {:?}", e);
-                return;
+                return Err(e);
             }
             
             // Small delay after sending command
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
             
             // Enter continuous data mode (RDATAC)
-            if let Err(e) = send_command_to_spi(&mut spi, CMD_RDATAC) {
+            if let Err(e) = send_command_to_spi(spi, CMD_RDATAC) {
                 error!("Failed to send RDATAC command: {:?}", e);
-                return;
+                return Err(e);
             }
             
             // Small delay after sending command
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        }
+        
+        debug!("Starting acquisition using hardware interrupts in continuous data mode");
+        
+        // Get configuration
+        let config = {
+            let inner = inner_arc.lock().await;
+            inner.config.clone()
+        };
+        
+        // Get batch size from config
+        let batch_size = config.batch_size;
+        let num_channels = config.channels.len();
+        
+        info!("Starting acquisition with batch size: {}, sample rate: {} Hz",
+               batch_size, config.sample_rate);
+        info!("Buffering {} samples before sending batches", batch_size);
+        
+        // Create a channel for sending data from the interrupt handler to the Tokio task
+        let (data_tx, mut data_rx) = mpsc::channel::<(Vec<i32>, u64)>(batch_size);
+        
+        // Set the interrupt running flag
+        self.interrupt_running.store(true, Ordering::SeqCst);
+        let interrupt_running = self.interrupt_running.clone();
+        
+        // Take ownership of the DRDY pin and SPI
+        let mut drdy_pin = self.drdy_pin.take().ok_or(DriverError::NotInitialized)?;
+        let mut spi = self.spi.take().ok_or(DriverError::NotInitialized)?;
+        
+        // Create a thread for handling the hardware interrupt
+        // Note: Hardware interrupts must be handled in a native thread, not a Tokio task
+        let interrupt_thread = thread::spawn(move || {
+            // Configure the pin for interrupt
+            match drdy_pin.set_interrupt(Trigger::FallingEdge, None) {
+                Ok(_) => debug!("DRDY pin interrupt configured successfully"),
+                Err(e) => {
+                    error!("Failed to configure DRDY pin interrupt: {:?}", e);
+                    return;
+                }
+            }
             
-            debug!("Starting acquisition loop using RDATAC (continuous data mode)");
+            debug!("Interrupt handler thread started");
+            
+            // Sample counter for the interrupt thread
+            let mut sample_count = 0;
+            
+            // Main interrupt handling loop
+            while interrupt_running.load(Ordering::SeqCst) {
+                // Wait for the interrupt with a timeout
+                match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
+                    Ok(Some(event)) if event.trigger == Trigger::FallingEdge => {
+                        // DRDY pin went low, data is ready
+                        match read_data_from_spi(&mut spi, num_channels) {
+                            Ok(samples) => {
+                                // Send samples and current count through the channel
+                                if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
+                                    error!("Failed to send samples to Tokio task: {}", e);
+                                    // If the channel is closed, exit the loop
+                                    break;
+                                }
+                                sample_count += 1;
+                            },
+                            Err(e) => {
+                                error!("Error reading data in interrupt handler: {:?}", e);
+                                // Continue and try again on next interrupt
+                            }
+                        }
+                    },
+                    Ok(Some(event)) => {
+                        // This shouldn't happen as we're only triggering on falling edge
+                        warn!("Unexpected interrupt event: {:?}", event);
+                    },
+                    Ok(None) => {
+                        // Timeout occurred, no interrupt
+                        debug!("Interrupt timeout - no data ready");
+                    },
+                    Err(e) => {
+                        error!("Error polling for interrupt: {:?}", e);
+                        // Sleep a bit to avoid tight loop on error
+                        thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+            }
+            
+            debug!("Interrupt handler thread terminated");
+            
+            // Clean up by disabling the interrupt
+            if let Err(e) = drdy_pin.clear_interrupt() {
+                error!("Failed to clear interrupt: {:?}", e);
+            }
+        });
+        
+        // Store the interrupt thread handle
+        self.interrupt_thread = Some(interrupt_thread);
+        
+        // Spawn a Tokio task to process the data from the interrupt handler
+        let handle = tokio::spawn(async move {
+            // Get base timestamp
+            let base_timestamp = {
+                let inner = inner_arc.lock().await;
+                inner.base_timestamp.expect("Base timestamp should be set")
+            };
             
             // Main acquisition loop
             let mut sample_buffer: Vec<AdcData> = Vec::with_capacity(batch_size);
             
-            loop {
+            debug!("Starting Tokio task to process data from interrupt handler");
+            
+            while let Some((raw_samples, sample_count)) = data_rx.recv().await {
                 // Check if we should continue running
-                let (should_continue, current_sample_count) = {
-                    let mut inner = inner_arc.lock().await;
-                    if !inner.running {
-                        (false, 0)
-                    } else {
-                        let count = inner.sample_count;
-                        // Update the sample count for the next sample
-                        inner.sample_count += 1;
-                        (true, count)
-                    }
+                let should_continue = {
+                    let inner = inner_arc.lock().await;
+                    inner.running
                 };
                 
                 if !should_continue {
@@ -327,40 +411,9 @@ impl Ads1299Driver {
                     break;
                 }
                 
-                // Measure DRDY timing for debugging
-                let drdy_start = std::time::Instant::now();
-                
-                // Wait for DRDY to go low (active low) with timeout
-                let mut timeout = 1000; // Adjust based on sample rate
-                while drdy_pin.is_high() && timeout > 0 {
-                    tokio::time::sleep(tokio::time::Duration::from_micros(10)).await;
-                    timeout -= 1;
-                }
-                
-                let drdy_duration = drdy_start.elapsed();
-                
-                if timeout == 0 {
-                    error!("DRDY timeout - pin never went low");
-                    continue; // Skip this sample and try again
-                } else {
-                    // Only log timing occasionally to avoid flooding logs
-                    if current_sample_count % 100 == 0 {
-                        debug!("DRDY timing: {:?} (timeout count: {})", drdy_duration, 1000 - timeout);
-                    }
-                }
-                
-                // Read data from ADS1299
-                let raw_samples = match read_data_from_spi(&mut spi, num_channels) {
-                    Ok(samples) => samples,
-                    Err(e) => {
-                        error!("Error reading data: {:?}", e);
-                        continue;
-                    }
-                };
-                
                 // Calculate timestamp
                 let sample_interval = (1_000_000 / config.sample_rate) as u64;
-                let timestamp = base_timestamp + current_sample_count * sample_interval;
+                let timestamp = base_timestamp + sample_count * sample_interval;
                 
                 // Convert raw samples to voltage
                 let mut voltage_samples = Vec::with_capacity(num_channels);
@@ -382,8 +435,8 @@ impl Ads1299Driver {
                 
                 // Send the batch when we've collected batch_size samples
                 if sample_buffer.len() >= batch_size {
-                    info!("Sending batch of {} samples (current_sample_count: {})",
-                          sample_buffer.len(), current_sample_count);
+                    debug!("Sending batch of {} samples (sample_count: {})",
+                          sample_buffer.len(), sample_count);
                     if let Err(e) = tx.send(DriverEvent::Data(sample_buffer)).await {
                         error!("Ads1299Driver event channel closed: {}", e);
                         break;
@@ -393,10 +446,7 @@ impl Ads1299Driver {
                 }
             }
             
-            // We're already in SDATAC mode, so no need to send it again
-            debug!("Acquisition loop terminated");
-            
-            debug!("Acquisition task terminated");
+            debug!("Tokio processing task terminated");
         });
         
         self.task_handle = Some(handle);
@@ -420,6 +470,20 @@ impl Ads1299Driver {
             
             inner.running = false;
             debug!("Signaled acquisition task to stop");
+        }
+        
+        // Signal the interrupt thread to stop
+        if self.interrupt_running.load(Ordering::SeqCst) {
+            debug!("Signaling interrupt thread to stop");
+            self.interrupt_running.store(false, Ordering::SeqCst);
+            
+            // Wait for the interrupt thread to complete
+            if let Some(handle) = self.interrupt_thread.take() {
+                match handle.join() {
+                    Ok(_) => debug!("Interrupt thread completed successfully"),
+                    Err(e) => warn!("Interrupt thread terminated with error: {:?}", e),
+                }
+            }
         }
         
         // Exit continuous data mode and stop conversion
@@ -488,6 +552,20 @@ impl Ads1299Driver {
         if should_stop {
             debug!("Stopping acquisition as part of shutdown");
             self.stop_acquisition().await?;
+        } else {
+            // Even if acquisition is not running, make sure interrupt thread is stopped
+            if self.interrupt_running.load(Ordering::SeqCst) {
+                debug!("Stopping interrupt thread as part of shutdown");
+                self.interrupt_running.store(false, Ordering::SeqCst);
+                
+                // Wait for the interrupt thread to complete
+                if let Some(handle) = self.interrupt_thread.take() {
+                    match handle.join() {
+                        Ok(_) => debug!("Interrupt thread completed successfully during shutdown"),
+                        Err(e) => warn!("Interrupt thread terminated with error during shutdown: {:?}", e),
+                    }
+                }
+            }
         }
 
         // Update final state
@@ -936,6 +1014,21 @@ impl Drop for Ads1299Driver {
         // This is why users should call shutdown() explicitly.
         if self.task_handle.is_some() {
             error!("Background task may still be running. Call shutdown() to properly terminate it.");
+        }
+        
+        // Check if interrupt thread is still running
+        if self.interrupt_running.load(Ordering::SeqCst) {
+            error!("Interrupt thread may still be running. Call shutdown() to properly terminate it.");
+            // Try to stop the interrupt thread
+            self.interrupt_running.store(false, Ordering::SeqCst);
+        }
+        
+        // Try to join the interrupt thread if it exists
+        if let Some(handle) = self.interrupt_thread.take() {
+            match handle.join() {
+                Ok(_) => debug!("Interrupt thread joined successfully in Drop implementation"),
+                Err(e) => error!("Failed to join interrupt thread in Drop implementation: {:?}", e),
+            }
         }
         
         // Release the hardware lock
