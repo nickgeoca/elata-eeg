@@ -1,7 +1,7 @@
 # ADS1299EEG_FE Board Driver
 
 This document provides information on setting up and using the ADS1299EEG_FE board with the Elata EEG system.
-
+Electrodes must be replaced once the gold-plating is visibly scratched or worn. Exposed metal substrate will cause undesirable galvanic noise in data.
 ### ADS1299 Configuration Reference Table
 
 | Help Guide | Used? | Jumpers | Register Flag | Explanation |

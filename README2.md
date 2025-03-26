@@ -71,3 +71,4 @@ bash rebuild.sh
 - Firmware versioning in the filename to account for expirimenetal errors from firmware
 - We're losing 1 bit of precision using float32. 24bit ADC and float32 is 23bit
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
+- integrate erro handlign
