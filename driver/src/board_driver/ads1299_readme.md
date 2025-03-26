@@ -228,3 +228,41 @@ For single-ended operation, the following register settings are crucial:
    - Set bit 3 (BIAS_MEAS) to 0 for normal operation
    - Set bit 2 (BIASREF_INT) to 1 to use internal reference for bias
    - Default value: 0x96 (0b10010110)
+
+
+
+
+   ....
+   Help Guide	Used?	Jumpers	Register Flag	Explanation
+5V Unipolar Power	✅ Yes	JP2[2-3] shorted, JP20[1-2] shorted	-	Use 5V
+reference electrode	✅ Yes	JP25 Pin 6 is ref electrode	MISC1.SRB1=1	Reference electrode is like the common negative to all the postiive electrodes
+Bias Electrode	✅ Yes	JP25 Pin 4 is bias electrode	CONFIG3.PD_BIAS=1	Bias electrdoe is to bias the DC voltage to mid supply
+BIAS_SHD	❌ No	JP17 open	-	Shield drive signal. It mirrors the bias signal and can be used to drive the cable shield to reduce noise and capacitive coupling.
+BIAS_DRV	✅ Yes	JP1[1–2]	CONFIG3.PD_BIAS=1	Output of the bias amplifier on ADS1299. This is the "active" signal that adjusts common-mode voltage.
+Fixed bias	✅ Yes	-	CONFIG3.BIASREF_INT=1	Just outputting a fixed mid-supply voltage (e.g. VDD/2). Simple but doesn't adapt.
+Closed-loop bias	❌ No	-	BIAS_SENSP/N = 0x00	Uses the feedback loop from electrodes to track the actual common-mode voltage and correct it. Better CMRR (common-mode rejection  ratio). Can only use a few channels or, too many = higher amplitude bias signal = output swing too large → saturates ADC or bias amplifier. Confirm with a few channels first
+Ref Buffer	✅ Yes	JP7 (1–2), JP8 (2–3)	CONFIG3.PD_REFBUF=1	helps avoid loading effects. All channels using SRB1 draw some current from the reference electrode
+Ref Unbuffered	❌ No	JP8 (1–2), JP7 open	-	Buffer adds its own noise
+Reference Voltage Internal	✅ Yes	-	CONFIG3.BIASREF_INT=1	
+Bias Buffer	✅ Yes	-	CONFIG3.PD_BIAS=1	
+Bias UnBuffer	❌ No	-	-	
+SRB1	✅ Yes	-	MISC1.SRB1=True	
+				
+Help Guide	Used?	Jumpers	Register Flag	Explanation
+5V Unipolar Power	✅ Yes	"JP2 [2–3] shorted,
+JP20 [1–2] shorted"	–	Operating from a single 5 V supply (AVDD = 5 V, AVSS = 0 V). The ADS1299 is powered unipolarly; the “negative” rail is ground (0 V). Make sure all supplies and grounds are stable and well-filtered for low-noise EEG.
+Reference Electrode	✅ Yes	JP25 Pin 6 is ref electrode	MISC1.SRB1 = 1	The single reference electrode to which all “positive” measurement electrodes are compared. Setting SRB1=1 routes this reference to the negative input of all channels (or a subset, depending on your board).
+Bias Electrode	✅ Yes	JP25 Pin 4 is bias electrode	CONFIG3.PD_BIAS = 1	The bias electrode drives a mid-supply voltage (often VDD/2) back into the patient/electrode circuit to suppress common-mode interference and keep input signals within a suitable range. Enabling PD_BIAS=1 powers the internal bias amplifier.
+BIAS_SHD (Shield)	❌ No	JP17 open	–	The shield drive signal is the same as the bias signal but is used to drive a cable shield in high-impedance or noisy environments. It reduces capacitive coupling. If not using shielded cables or no need for active shielding, leave it open.
+BIAS_DRV	✅ Yes	JP1 [1–2]	CONFIG3.PD_BIAS = 1	The output of the on-chip bias amplifier (the active drive). This is usually routed to the bias electrode. By driving an active bias, the system better cancels common-mode noise.
+Fixed Bias	✅ Yes	–	CONFIG3.BIASREF_INT = 1	With BIASREF_INT=1, the ADS1299 internally generates a ~mid-supply reference for the bias amplifier. This “fixed” bias is simpler but does not adapt to changing electrode offsets.
+Closed-Loop Bias	❌ No	–	BIAS_SENSP/N = 0x00	A feedback loop that senses actual electrode voltages and adjusts the bias in real time. Improves common-mode rejection (CMR) but can saturate the bias amp if too many channels or high offsets are present. Usually recommended when you have a well-characterized electrode setup and want maximum noise rejection.
+Ref Buffer	✅ Yes	"JP7 [1–2],
+JP8 [2–3]"	CONFIG3.PD_REFBUF = 1	Powers the internal reference buffer. This buffer provides a stable, low-impedance reference voltage to the inputs (especially when using SRB1 for many channels). It helps reduce loading and keep the measured signals accurate.
+Ref Unbuffered	❌ No	"JP8 [1–2],
+JP7 open"	–	If you disable the reference buffer, you save the buffer’s noise contribution but risk heavier loading on the external reference. Typically not used in EEG unless you have a robust external reference setup.
+"Reference Voltage
+Internal"	✅ Yes	–	CONFIG3.BIASREF_INT = 1	This overlaps conceptually with “Fixed Bias,” because BIASREF_INT selects the internal mid-supply as the bias reference. If you also use the ADS1299’s built-in 2.4 V reference for ADC conversions (CONFIG3.PD_REFBUF=1 + default reference routing), then the device is fully self-contained with no external reference source.
+Bias Buffer	✅ Yes	–	CONFIG3.PD_BIAS = 1	Enables the on-chip buffer for the bias amplifier (the same setting under BIAS Electrode). Ensuring this is on if you’re driving a bias electrode.
+Bias UnBuffer	❌ No	–	–	If you prefer not to use the on-chip bias buffer (for instance, if you have an external amplifier driving your bias), you’d disable it. Not used here.
+SRB1	✅ Yes	–	MISC1.SRB1 = 1	Connects the inverting inputs of all channels to SRB1 (the “reference electrode”). Commonly used in EEG to share one reference. If you’re using SRB2 or separate references, you’d handle it differently.
