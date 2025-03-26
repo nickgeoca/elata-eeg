@@ -14,6 +14,8 @@ pub struct DaemonConfig {
     pub dsp_high_pass_cutoff_hz: f32,
     /// Low-pass filter cutoff frequency in Hz
     pub dsp_low_pass_cutoff_hz: f32,
+    /// Batch size for processing data
+    pub batch_size: usize,
 }
 
 impl Default for DaemonConfig {
@@ -24,6 +26,7 @@ impl Default for DaemonConfig {
             session: "".to_string(),
             dsp_high_pass_cutoff_hz: 0.1,  // Default value from current implementation
             dsp_low_pass_cutoff_hz: 100.0, // Default value from current implementation
+            batch_size: 32,
         }
     }
 }

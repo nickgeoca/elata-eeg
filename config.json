@@ -2,6 +2,7 @@
   "max_recording_length_minutes": 60,
   "recordings_directory": "./recordings/",
   "session": "",
-  "dsp_high_pass_cutoff_hz": 0.5,
-  "dsp_low_pass_cutoff_hz": 80.0
+  "dsp_high_pass_cutoff_hz": 2,
+  "dsp_low_pass_cutoff_hz": 40.0,
+  "batch_size": 16
 }
