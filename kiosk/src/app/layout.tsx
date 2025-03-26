@@ -17,6 +17,8 @@ export const metadata: Metadata = {
   description: "Real-time EEG monitoring application",
 };
 
+import { CommandWebSocketProvider } from "@/context/CommandWebSocketContext";
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -27,7 +29,9 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
-        {children}
+        <CommandWebSocketProvider>
+          {children}
+        </CommandWebSocketProvider>
       </body>
     </html>
   );
