@@ -8,6 +8,7 @@ import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
 import { ScrollingBuffer } from '../utils/ScrollingBuffer';
 import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';
+import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -18,13 +19,6 @@ export default function EegMonitorWebGL() {
   const latestTimestampRef = useRef<number>(Date.now());
   const [canvasDimensions, setCanvasDimensions] = useState({ width: 800, height: 480 });
   const [showSettings, setShowSettings] = useState(false);
-  
-  // Recording state
-  const [isRecording, setIsRecording] = useState(false);
-  const [recordingStatus, setRecordingStatus] = useState('Not recording');
-  const [recordingFilePath, setRecordingFilePath] = useState<string | null>(null);
-  const [wsConnected, setWsConnected] = useState(false);
-  const [wsRef, setWsRef] = useState<WebSocket | null>(null);
   
   // Get configuration from context
   const { config, status: configStatus } = useEegConfig();
@@ -40,72 +34,15 @@ export default function EegMonitorWebGL() {
     samplesProcessed: 0
   });
 
-  // Connect to the command WebSocket for recording
-  useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8080/command');
-    setWsRef(ws);
-    
-    ws.onopen = () => {
-      console.log('Command WebSocket connected');
-      setWsConnected(true);
-    };
-    
-    ws.onmessage = (event) => {
-      try {
-        const response = JSON.parse(event.data);
-        
-        if (response.status === 'ok') {
-          // Parse the message to determine recording status
-          const recording = response.message.startsWith('Currently recording');
-          let filePath = null;
-          
-          if (recording) {
-            // Extract file path from message
-            const match = response.message.match(/Currently recording to (.+)/);
-            if (match && match[1]) {
-              filePath = match[1];
-            }
-          }
-          
-          setIsRecording(recording);
-          setRecordingStatus(response.message);
-          setRecordingFilePath(filePath);
-        } else {
-          console.error('Command error:', response.message);
-        }
-      } catch (error) {
-        console.error('Error parsing command response:', error);
-      }
-    };
-    
-    ws.onclose = () => {
-      console.log('Command WebSocket disconnected');
-      setWsConnected(false);
-    };
-    
-    ws.onerror = (error) => {
-      console.error('Command WebSocket error:', error);
-      setWsConnected(false);
-    };
-    
-    return () => {
-      ws.close();
-    };
-  }, []);
-
-  // Send command to start recording
-  const startRecording = useCallback(() => {
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
-      wsRef.send(JSON.stringify({ command: 'start' }));
-    }
-  }, [wsRef]);
-
-  // Send command to stop recording
-  const stopRecording = useCallback(() => {
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
-      wsRef.send(JSON.stringify({ command: 'stop' }));
-    }
-  }, [wsRef]);
+  // Use the command WebSocket context
+  const {
+    wsConnected,
+    startRecording,
+    stopRecording,
+    recordingStatus,
+    recordingFilePath,
+    ws,
+  } = useCommandWebSocket();
 
   // Update canvas dimensions based on container size
   useEffect(() => {
@@ -168,27 +105,26 @@ export default function EegMonitorWebGL() {
       <div className="flex justify-between items-center p-2 bg-gray-800 border-b border-gray-700">
         <div className="flex items-center">
           <h1 className="text-xl font-bold text-white mr-4">EEG Monitor</h1>
-          <EegStatusBar
-            status={status}
-            dataReceived={dataReceived}
-            fps={displayFps}
-            packetsReceived={debugInfoRef.current.packetsReceived}
-          />
+          <div className="flex items-center text-white">
+            <span>Status:</span>
+            <span className={`inline-block w-3 h-3 rounded-full mx-2 ${dataReceived ? 'bg-green-500' : 'bg-gray-500'}`}></span>
+            <span>{dataReceived ? 'receiving data' : 'no data'}</span>
+          </div>
         </div>
         <div className="flex space-x-2">
           {/* Recording button */}
           <button
-            onClick={isRecording ? stopRecording : startRecording}
+            onClick={recordingStatus.startsWith('Currently recording') ? stopRecording : startRecording}
             disabled={!wsConnected}
             className={`px-4 py-1 rounded-md flex items-center ${
               !wsConnected
                 ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                : isRecording
+                : recordingStatus.startsWith('Currently recording')
                   ? 'bg-red-600 hover:bg-red-700 text-white'
                   : 'bg-green-600 hover:bg-green-700 text-white'
             }`}
           >
-            {isRecording ? (
+            {recordingStatus.startsWith('Currently recording') ? (
               <>
                 <span className="inline-block w-2 h-2 rounded-full bg-white mr-2"></span>
                 Stop Recording
@@ -201,6 +137,17 @@ export default function EegMonitorWebGL() {
             )}
           </button>
           
+          {/* Recordings button */}
+          <a
+            href="/recordings"
+            className="px-4 py-1 rounded-md bg-purple-600 hover:bg-purple-700 text-white flex items-center"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+            </svg>
+            Recordings
+          </a>
+          
           {/* Settings button */}
           <button
             onClick={toggleSettings}
@@ -212,7 +159,7 @@ export default function EegMonitorWebGL() {
       </div>
       
       {/* Recording status indicator */}
-      {isRecording && (
+      {recordingStatus.startsWith('Currently recording') && (
         <div className="bg-red-900 text-white px-2 py-1 text-sm flex justify-between">
           <div className="flex items-center">
             <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2"></span>

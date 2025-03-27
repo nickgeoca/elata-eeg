@@ -72,3 +72,25 @@ bash rebuild.sh
 - We're losing 1 bit of precision using float32. 24bit ADC and float32 is 23bit
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
 - integrate erro handlign
+- need to enable local device discovery if you want to download recordings
+
+
+## What Can EEG Analysis Tell You?
+1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).
+
+2) Event-Related Potentials (ERP): By time-locking your data to specific events or stimuli, you can observe averaged “peaks and troughs” that give insight into the brain’s typical response or processing speed.
+
+3) Connectivity & Network Analysis: Measures such as coherence, phase-locking value, and Granger causality allow you to infer how different brain regions might interact or synchronize during tasks.
+
+4) Clinical or Research Insights: In clinical settings, EEG can help investigate sleep disorders, epileptiform activity, or abnormal brain rhythms. In research/BCI contexts, EEG can be used for controlling external devices, studying cognitive workload, etc.
+
+5) Classification/Decoding: Machine learning models can classify mental states (e.g., different motor imagery tasks, alert vs. drowsy states). This is widely used in brain-computer interface (BCI) applications.
+
+## Analsyis Software
+1) MNE-Python is by far the most comprehensive and widely adopted for general-purpose EEG processing and analysis in Python.
+
+2) PyEEG is good for feature extraction and complexity measures.
+
+3) MOABB and Braindecode cater more to BCI/deep-learning-driven EEG classification tasks.
+
+4) PyEDFlib is essential if you need robust EDF/BDF file handling.
