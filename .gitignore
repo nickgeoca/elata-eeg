@@ -21,3 +21,5 @@ Cargo.lock
 #.idea/
 
 .install_manifest.json
+
+.ipynb*
