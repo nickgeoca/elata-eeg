@@ -4,5 +4,6 @@
   "session": "",
   "dsp_high_pass_cutoff_hz": 2,
   "dsp_low_pass_cutoff_hz": 40.0,
-  "batch_size": 16
+  "batch_size": 16,
+  "driver_type": "Ads1299"
 }

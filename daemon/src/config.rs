@@ -1,5 +1,6 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
+use eeg_driver::DriverType;
 
 /// Configuration for the daemon
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -16,6 +17,8 @@ pub struct DaemonConfig {
     pub dsp_low_pass_cutoff_hz: f32,
     /// Batch size for processing data
     pub batch_size: usize,
+    /// Type of board driver to use (Ads1299 or Mock)
+    pub driver_type: DriverType,
 }
 
 impl Default for DaemonConfig {
@@ -27,6 +30,7 @@ impl Default for DaemonConfig {
             dsp_high_pass_cutoff_hz: 0.1,  // Default value from current implementation
             dsp_low_pass_cutoff_hz: 100.0, // Default value from current implementation
             batch_size: 32,
+            driver_type: DriverType::Mock, // Default to Mock driver for safety
         }
     }
 }
