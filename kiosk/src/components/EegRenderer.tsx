@@ -192,7 +192,7 @@ export const EegRenderer = React.memo(function EegRenderer({
     }
     
     // Create WebGL command for drawing the grid
-    const drawGrid = regl({
+    const drawGrid = offscreenRegl({
       frag: `
         precision mediump float;
         uniform vec4 color;
@@ -208,13 +208,13 @@ export const EegRenderer = React.memo(function EegRenderer({
         }
       `,
       attributes: {
-        position: regl.prop('points')
+        position: offscreenRegl.prop('points')
       },
       uniforms: {
-        color: regl.prop('color')
+        color: offscreenRegl.prop('color')
       },
       primitive: 'lines',
-      count: regl.prop('count'), // Add count property
+      count: offscreenRegl.prop('count'), // Add count property
       blend: {
         enable: true,
         func: {
@@ -228,7 +228,7 @@ export const EegRenderer = React.memo(function EegRenderer({
     });
     
     // Create WebGL command for drawing the EEG lines
-    const drawLines = regl({
+    const drawLines = offscreenRegl({
       frag: `
         precision mediump float;
         uniform vec4 color;
@@ -254,16 +254,16 @@ export const EegRenderer = React.memo(function EegRenderer({
         }
       `,
       attributes: {
-        position: regl.prop('points')
+        position: offscreenRegl.prop('points')
       },
       uniforms: {
-        color: regl.prop('color'),
-        yOffset: regl.prop('yOffset'),
-        yScale: regl.prop('yScale')
+        color: offscreenRegl.prop('color'),
+        yOffset: offscreenRegl.prop('yOffset'),
+        yScale: offscreenRegl.prop('yScale')
       },
       primitive: 'line strip',
       lineWidth: 1.0, // Minimum allowed line width in REGL (must be between 1 and 32)
-      count: regl.prop('count'),
+      count: offscreenRegl.prop('count'),
       blend: {
         enable: true,
         func: {
