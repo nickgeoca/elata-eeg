@@ -46,7 +46,7 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  voltageScaleFactor = 23600
+  voltageScaleFactor = 13600
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
