@@ -5,10 +5,10 @@ use tokio::time::{sleep, Duration};
 use async_trait::async_trait;
 use log::{info, warn, debug, trace, error};
 use lazy_static::lazy_static;
-use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
-use rppal::gpio::{Gpio, InputPin, Trigger, Event};
 use std::thread;
+use std::io;
 use super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
+use super::hal::{SpiPort, InterruptPin, Edge};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -21,8 +21,8 @@ pub struct Ads1299Driver {
     task_handle: Option<JoinHandle<()>>,
     tx: mpsc::Sender<DriverEvent>,
     additional_channel_buffering: usize,
-    spi: Option<Spi>,
-    drdy_pin: Option<InputPin>,
+    spi: Option<Box<dyn SpiPort>>,
+    drdy_pin: Option<Box<dyn InterruptPin>>,
     // New fields for interrupt-driven approach
     interrupt_thread: Option<thread::JoinHandle<()>>,
     interrupt_running: Arc<AtomicBool>,
@@ -104,6 +104,37 @@ impl Ads1299Driver {
         config: AdcConfig,
         additional_channel_buffering: usize
     ) -> Result<(Self, mpsc::Receiver<DriverEvent>), DriverError> {
+        // Initialize SPI and DRDY pin using the default implementations
+        let spi = Self::init_spi()?;
+        let drdy_pin = Self::init_drdy_pin()?;
+        
+        // Use the new_with_hal constructor with our initialized hardware
+        Self::new_with_hal(spi, drdy_pin, config, additional_channel_buffering)
+    }
+
+    /// Create a new instance of the Ads1299Driver with provided HAL implementations.
+    ///
+    /// This constructor takes an ADC configuration, HAL implementations for SPI and DRDY pin,
+    /// and an optional additional channel buffering parameter.
+    ///
+    /// # Important
+    /// Users should explicitly call `shutdown()` when done with the driver to ensure proper cleanup.
+    /// While the Drop implementation provides some basic cleanup, it cannot perform the full async shutdown sequence.
+    ///
+    /// # Returns
+    /// A tuple containing the driver instance and a receiver for driver events.
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - config.board_driver is not DriverType::Ads1299
+    /// - config.batch_size is 0 (batch size must be positive)
+    /// - config.batch_size is less than the number of channels (need at least one sample per channel)
+    pub fn new_with_hal(
+        spi: Box<dyn SpiPort>,
+        drdy_pin: Box<dyn InterruptPin>,
+        config: AdcConfig,
+        additional_channel_buffering: usize
+    ) -> Result<(Self, mpsc::Receiver<DriverEvent>), DriverError> {
         // Try to acquire the hardware lock to simulate real hardware access constraints
         let mut hardware_in_use = HARDWARE_LOCK.lock()
             .map_err(|_| DriverError::Other("Failed to acquire hardware lock".to_string()))?;
@@ -157,26 +188,6 @@ impl Ads1299Driver {
             ));
         }
         
-        // Initialize SPI
-        let spi = match Self::init_spi() {
-            Ok(spi) => spi,
-            Err(e) => {
-                // Release the lock if we're returning an error
-                *hardware_in_use = false;
-                return Err(e);
-            }
-        };
-        
-        // Initialize DRDY pin
-        let drdy_pin = match Self::init_drdy_pin() {
-            Ok(pin) => pin,
-            Err(e) => {
-                // Release the lock if we're returning an error
-                *hardware_in_use = false;
-                return Err(e);
-            }
-        };
-        
         // Initialize register cache
         let registers = [0u8; 24];
         
@@ -203,7 +214,7 @@ impl Ads1299Driver {
             interrupt_running: Arc::new(AtomicBool::new(false)),
         };
         
-        info!("Ads1299Driver created with config: {:?}", config);
+        info!("Ads1299Driver created with HAL implementations and config: {:?}", config);
         info!("Channel buffer size: {} (batch_size: {} + additional_buffering: {})",
               channel_buffer_size, config.batch_size, additional_channel_buffering);
         
@@ -269,7 +280,7 @@ impl Ads1299Driver {
         
         // Make sure we're in SDATAC mode before starting
         if let Some(spi) = self.spi.as_mut() {
-            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
+            if let Err(e) = send_command_to_spi(spi.as_mut(), CMD_SDATAC) {
                 error!("Failed to send SDATAC command: {:?}", e);
                 return Err(e);
             }
@@ -278,7 +289,7 @@ impl Ads1299Driver {
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
             
             // Enter continuous data mode (RDATAC)
-            if let Err(e) = send_command_to_spi(spi, CMD_RDATAC) {
+            if let Err(e) = send_command_to_spi(spi.as_mut(), CMD_RDATAC) {
                 error!("Failed to send RDATAC command: {:?}", e);
                 return Err(e);
             }
@@ -318,7 +329,7 @@ impl Ads1299Driver {
         // Note: Hardware interrupts must be handled in a native thread, not a Tokio task
         let interrupt_thread = thread::spawn(move || {
             // Configure the pin for interrupt
-            match drdy_pin.set_interrupt(Trigger::FallingEdge, None) {
+            match drdy_pin.set_interrupt_edge(super::hal::Edge::Falling) {
                 Ok(_) => debug!("DRDY pin interrupt configured successfully"),
                 Err(e) => {
                     error!("Failed to configure DRDY pin interrupt: {:?}", e);
@@ -335,9 +346,9 @@ impl Ads1299Driver {
             while interrupt_running.load(Ordering::SeqCst) {
                 // Wait for the interrupt with a timeout
                 match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
-                    Ok(Some(event)) if event.trigger == Trigger::FallingEdge => {
+                    Ok(Some(_)) => {
                         // DRDY pin went low, data is ready
-                        match read_data_from_spi(&mut spi, num_channels) {
+                        match read_data_from_spi(spi.as_mut(), num_channels) {
                             Ok(samples) => {
                                 // Send samples and current count through the channel
                                 if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
@@ -352,10 +363,6 @@ impl Ads1299Driver {
                                 // Continue and try again on next interrupt
                             }
                         }
-                    },
-                    Ok(Some(event)) => {
-                        // This shouldn't happen as we're only triggering on falling edge
-                        warn!("Unexpected interrupt event: {:?}", event);
                     },
                     Ok(None) => {
                         // Timeout occurred, no interrupt
@@ -489,7 +496,7 @@ impl Ads1299Driver {
         // Exit continuous data mode and stop conversion
         if let Some(spi) = self.spi.as_mut() {
             // First exit RDATAC mode
-            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
+            if let Err(e) = send_command_to_spi(spi.as_mut(), CMD_SDATAC) {
                 warn!("Failed to send SDATAC command during stop_acquisition: {:?}", e);
                 // Continue anyway to try to stop conversion
             }
@@ -584,80 +591,25 @@ impl Ads1299Driver {
     }
 
     /// Initialize SPI communication with the ADS1299.
-    fn init_spi() -> Result<Spi, DriverError> {
-        // Use SPI0 with CS0 at 500kHz (matching the working Python script)
-        // ADS1299 datasheet specifies CPOL=0, CPHA=1 (Mode 1)
-        let spi_speed = 500_000; // 500kHz - confirmed working with Python script
-        info!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
-        
-        // For debugging, try to create a mock SPI device if the real one fails
-        match Spi::new(
-            Bus::Spi0,
-            SlaveSelect::Ss0,
-            spi_speed,
-            Mode::Mode1,  // CPOL=0, CPHA=1 for ADS1299
-        ) {
-            Ok(spi) => {
-                info!("SPI initialization successful");
-                Ok(spi)
-            },
-            Err(e) => {
-                error!("SPI initialization error: {}", e);
-                error!("This could be because the SPI device is not available or the user doesn't have permission to access it.");
-                error!("Make sure the SPI interface is enabled and the user has permission to access it.");
-                
-                // Return the error
-                Err(DriverError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("SPI initialization error: {}", e)
-                )))
-            }
-        }
+    fn init_spi() -> Result<Box<dyn SpiPort>, DriverError> {
+        // Use mock implementation
+        let spi = super::mock_hal::mock_impl::create_spi();
+        debug!("Mock SPI initialized successfully");
+        Ok(Box::new(spi))
     }
 
     /// Initialize the DRDY pin for detecting when new data is available.
-    fn init_drdy_pin() -> Result<InputPin, DriverError> {
-        info!("Initializing GPIO for DRDY pin (GPIO25)");
-        
-        match Gpio::new() {
-            Ok(gpio) => {
-                info!("GPIO initialization successful");
-                
-                // GPIO25 (Pin 22) is used for DRDY
-                match gpio.get(25) {
-                    Ok(pin) => {
-                        info!("GPIO pin 25 acquired successfully");
-                        Ok(pin.into_input_pullup())
-                    },
-                    Err(e) => {
-                        error!("GPIO pin 25 error: {}", e);
-                        error!("This could be because the GPIO pin is already in use or the user doesn't have permission to access it.");
-                        error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
-                        
-                        Err(DriverError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("GPIO pin error: {}", e)
-                        )))
-                    }
-                }
-            },
-            Err(e) => {
-                error!("GPIO initialization error: {}", e);
-                error!("This could be because the GPIO interface is not available or the user doesn't have permission to access it.");
-                error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
-                
-                Err(DriverError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("GPIO initialization error: {}", e)
-                )))
-            }
-        }
+    fn init_drdy_pin() -> Result<Box<dyn InterruptPin>, DriverError> {
+        // Use mock implementation
+        let drdy = super::mock_hal::mock_impl::create_drdy();
+        debug!("Mock DRDY pin initialized successfully");
+        Ok(Box::new(drdy))
     }
 
     /// Send a command to the ADS1299.
     fn send_command(&mut self, command: u8) -> Result<(), DriverError> {
         let spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-        send_command_to_spi(spi, command)
+        send_command_to_spi(spi.as_mut(), command)
     }
 
     /// Read a register from the ADS1299.
@@ -669,17 +621,11 @@ impl Ads1299Driver {
         
         // First transfer: command and count (number of registers to read minus 1)
         let write_buffer = [command, 0x00];
-        spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI write command error: {}", e)
-        )))?;
+        spi.write(&write_buffer)?;
         
         // Second transfer: read the data (send dummy byte to receive data)
         let mut read_buffer = [0u8];
-        spi.transfer(&mut read_buffer, &[0u8]).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI transfer error: {}", e)
-        )))?;
+        spi.transfer(&mut read_buffer, &[0u8])?;
         
         Ok(read_buffer[0])
     }
@@ -695,10 +641,7 @@ impl Ads1299Driver {
         // Third byte: value to write
         let write_buffer = [command, 0x00, value];
         
-        spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI write error: {}", e)
-        )))?;
+        spi.write(&write_buffer)?;
         
         // Update register cache
         let mut inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
@@ -717,7 +660,7 @@ impl Ads1299Driver {
         
         // Get SPI and read data
         let spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-        read_data_from_spi(spi, num_channels)
+        read_data_from_spi(spi.as_mut(), num_channels)
     }
 
     /// Reset the ADS1299 chip.
@@ -794,10 +737,7 @@ impl Ads1299Driver {
         
         // 2. Send zeros
         if let Some(spi) = self.spi.as_mut() {
-            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI write error: {}", e)
-            )))?;
+            spi.write(&[0x00, 0x00, 0x00])?;
         }
         
         // 3. Send SDATAC command to stop continuous data acquisition mode
@@ -813,16 +753,16 @@ impl Ads1299Driver {
         let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
 
         // Write registers in the specific order
-        write_register(&mut spi, CONFIG1_ADDR, config1_reg | sps_mask)?;
-        write_register(&mut spi, CONFIG2_ADDR, config2_reg)?;
-        write_register(&mut spi, CONFIG3_ADDR, config3_reg)?;
-        write_register(&mut spi, CONFIG4_ADDR, config4_reg)?;
-        write_register(&mut spi, LOFF_SENSP_ADDR, loff_sesp_reg)?;
-        write_register(&mut spi, MISC1_ADDR, misc1_reg)?;
-        for ch in 0..=7             { write_register(&mut spi, CH1SET_ADDR + ch, chn_off)?; }
-        for &ch in &config.channels { write_register(&mut spi, CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?; }
-        write_register(&mut spi, BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask)?;
-        write_register(&mut spi, BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask)?;
+        write_register(spi.as_mut(), CONFIG1_ADDR, config1_reg | sps_mask)?;
+        write_register(spi.as_mut(), CONFIG2_ADDR, config2_reg)?;
+        write_register(spi.as_mut(), CONFIG3_ADDR, config3_reg)?;
+        write_register(spi.as_mut(), CONFIG4_ADDR, config4_reg)?;
+        write_register(spi.as_mut(), LOFF_SENSP_ADDR, loff_sesp_reg)?;
+        write_register(spi.as_mut(), MISC1_ADDR, misc1_reg)?;
+        for ch in 0..=7             { write_register(spi.as_mut(), CH1SET_ADDR + ch, chn_off)?; }
+        for &ch in &config.channels { write_register(spi.as_mut(), CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?; }
+        write_register(spi.as_mut(), BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask)?;
+        write_register(spi.as_mut(), BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask)?;
         
         // Wait for configuration to settle
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -862,12 +802,9 @@ impl Ads1299Driver {
 }
 
 // Helper function to send a command to SPI
-fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
+fn send_command_to_spi(spi: &mut dyn SpiPort, command: u8) -> Result<(), DriverError> {
     let buffer = [command];
-    spi.write(&buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
+    spi.write(&buffer)?;
     Ok(())
 }
 
@@ -885,7 +822,7 @@ fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
 }
 
 // Helper function to read data from SPI in continuous mode (RDATAC)
-fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
+fn read_data_from_spi(spi: &mut dyn SpiPort, num_channels: usize) -> Result<Vec<i32>, DriverError> {
     debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
     
     // In continuous mode (RDATAC), we don't need to send RDATA command before each read
@@ -904,10 +841,7 @@ fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, Dr
         Ok(_) => debug!("SPI transfer successful, read {} bytes", read_buffer.len()),
         Err(e) => {
             error!("SPI transfer error: {}", e);
-            return Err(DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI transfer error: {}", e)
-            )));
+            return Err(DriverError::IoError(e));
         }
     }
     
@@ -950,7 +884,7 @@ fn current_timestamp_micros() -> Result<u64, DriverError> {
 }
 
 // Helper function to write a value to a register in the ADS1299
-fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverError> {
+fn write_register(spi: &mut dyn SpiPort, register: u8, value: u8) -> Result<(), DriverError> {
     // Command: WREG (0x40) + register address
     let command = 0x40 | (register & 0x1F);
     
@@ -958,10 +892,7 @@ fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverEr
     // Third byte: value to write
     let write_buffer = [command, 0x00, value];
     
-    spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
+    spi.write(&write_buffer)?;
     
     Ok(())
 }

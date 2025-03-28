@@ -100,14 +100,33 @@ pub enum DriverError {
 // Remove the problematic From implementations that violate orphan rules
 // Instead, create wrapper types for external errors
 #[derive(Debug)]
+#[cfg(feature = "pi-hardware")]
 pub struct SpiError(rppal::spi::Error);
+
+#[cfg(not(feature = "pi-hardware"))]
+#[derive(Debug)]
+pub struct SpiError(String);
 
 #[derive(Debug)]
 pub struct TimeError(std::time::SystemTimeError);
 
+#[cfg(feature = "pi-hardware")]
+impl From<rppal::spi::Error> for SpiError {
+    fn from(err: rppal::spi::Error) -> Self {
+        SpiError(err)
+    }
+}
+
 impl From<SpiError> for DriverError {
     fn from(err: SpiError) -> Self {
-        DriverError::Other(err.0.to_string())
+        #[cfg(feature = "pi-hardware")]
+        {
+            DriverError::Other(err.0.to_string())
+        }
+        #[cfg(not(feature = "pi-hardware"))]
+        {
+            DriverError::Other(err.0)
+        }
     }
 }
 
@@ -135,35 +154,51 @@ pub async fn create_driver(config: AdcConfig)
     
     match config.board_driver {
         DriverType::Ads1299 => {
-            // Try to create the ADS1299 hardware driver
-            match super::ads1299_driver::Ads1299Driver::new(config.clone(), 0) {
-                Ok((driver, events)) => {
-                    // Check if the driver is in error state after creation
-                    if driver.get_status().await == DriverStatus::Error {
-                        error!("ADS1299 driver is in error state after creation");
-                        error!("Falling back to mock driver");
+            #[cfg(feature = "pi-hardware")]
+            {
+                // Try to create real hardware HAL implementations
+                info!("Attempting to create ADS1299 driver with hardware HAL");
+                match (
+                    super::rppal_hal::rppal_impl::create_spi(),
+                    super::rppal_hal::rppal_impl::create_drdy()
+                ) {
+                    (Ok(spi_impl), Ok(drdy_impl)) => {
+                        let spi = Box::new(spi_impl);
+                        let drdy = Box::new(drdy_impl);
                         
-                        // Fall back to mock driver
-                        let mut mock_config = config.clone();
-                        mock_config.board_driver = DriverType::Mock;
-                        let (mock_driver, mock_events) = super::mock_driver::MockDriver::new(mock_config, 0)?;
-                        Ok((Box::new(mock_driver), mock_events))
-                    } else {
-                        info!("ADS1299 driver created successfully");
-                        Ok((Box::new(driver), events))
+                        match super::ads1299_driver::Ads1299Driver::new_with_hal(
+                            spi, drdy, config.clone(), 0
+                        ) {
+                            Ok((driver, rx)) => {
+                                // Check if the driver is in error state after creation
+                                if driver.get_status().await == DriverStatus::Error {
+                                    warn!("ADS1299 driver is in error state after creation, falling back to MockDriver");
+                                } else {
+                                    info!("ADS1299 driver created successfully with hardware HAL");
+                                    return Ok((Box::new(driver), rx));
+                                }
+                            },
+                            Err(e) => {
+                                warn!("Ads1299Driver failed with hardware HAL: {}, falling back to MockDriver", e);
+                            }
+                        }
+                    },
+                    _ => {
+                        warn!("Failed to initialize hardware HAL, falling back to MockDriver");
                     }
-                },
-                Err(e) => {
-                    error!("Failed to create ADS1299 driver: {}", e);
-                    error!("Falling back to mock driver");
-                    
-                    // Fall back to mock driver
-                    let mut mock_config = config.clone();
-                    mock_config.board_driver = DriverType::Mock;
-                    let (mock_driver, mock_events) = super::mock_driver::MockDriver::new(mock_config, 0)?;
-                    Ok((Box::new(mock_driver), mock_events))
                 }
             }
+
+            // Fallback (either pi-hardware failed, or not enabled)
+            #[cfg(not(feature = "pi-hardware"))]
+            info!("pi-hardware feature not enabled, using MockDriver");
+
+            // Create mock driver as fallback
+            info!("Creating mock driver as fallback");
+            let mut mock_config = config.clone();
+            mock_config.board_driver = DriverType::Mock;
+            let (mock_driver, mock_events) = super::mock_driver::MockDriver::new(mock_config, 0)?;
+            Ok((Box::new(mock_driver), mock_events))
         },
         DriverType::Mock => {
             info!("Creating mock driver");

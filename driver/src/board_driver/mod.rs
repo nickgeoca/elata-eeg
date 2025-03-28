@@ -2,6 +2,9 @@ pub mod mock_driver;
 pub mod mock_data_generator;
 pub mod ads1299_driver;
 pub mod types;
+pub mod hal;
+pub mod rppal_hal;
+pub mod mock_hal;
 
 // Re-export types for convenience
 pub use self::types::{AdcData, AdcConfig, DriverEvent, DriverStatus, DriverError, AdcDriver, DriverType};
