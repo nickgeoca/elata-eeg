@@ -253,8 +253,8 @@ pub async fn process_eeg_data(
         }
         
         // Create smaller batches to send more frequently to WebSocket clients
-        // Split the incoming data into chunks of 32 samples
-        let batch_size = 32;
+        // Split the incoming data into chunks of batch_size samples
+        let batch_size = csv_recorder.lock().await.config.batch_size;
         let num_channels = data.processed_voltage_samples.len();
         let samples_per_channel = data.processed_voltage_samples[0].len();
         

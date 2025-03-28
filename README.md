@@ -15,6 +15,12 @@
 
 ---
 
+## BOM
+- Electrodes - https://shop.openbci.com/products/openbci-gold-cup-electrodes?variant=37345591591070
+- ADS1299 board
+- Pi 5
+- Header Wires
+
 ## Overview
 **Open EEG Project** aims to build a **low-cost, open-source EEG machine** for precision psychiatry and neuroscience research. We use a Raspberry Pi (Model 5 recommended) plus a Texas Instruments ADS1299-based amplifier board to acquire 8 channels (or more) of EEG signals at high resolution.  
 - **Goal**: Democratize EEG hardware, encourage collaboration, and maintain a fully open, right-to-repair design.  

@@ -41,7 +41,7 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  voltageScaleFactor = 4
+  voltageScaleFactor = 4600
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
   const pointsArraysRef = useRef<Float32Array[]>([]);

@@ -15,6 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Recordings directory: {}", daemon_config.recordings_directory);
     println!("  High-pass filter cutoff: {} Hz", daemon_config.dsp_high_pass_cutoff_hz);
     println!("  Low-pass filter cutoff: {} Hz", daemon_config.dsp_low_pass_cutoff_hz);
+    println!("  Batch size: {}", daemon_config.batch_size);
     
     // Debug: Print current working directory
     match std::env::current_dir() {
@@ -33,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         channels: vec![0, 1],
         gain: 24.0,
         board_driver: DriverType::Ads1299,
-        batch_size: 16,
+        batch_size: daemon_config.batch_size,
         Vref: 4.5,
         dsp_high_pass_cutoff_hz: daemon_config.dsp_high_pass_cutoff_hz,
         dsp_low_pass_cutoff_hz: daemon_config.dsp_low_pass_cutoff_hz,
