@@ -1,17 +1,8 @@
-#[cfg(feature = "pi-hardware")]
 use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
-#[cfg(feature = "pi-hardware")]
 use rppal::gpio::{Gpio, InputPin, Level};
 use std::error::Error;
 use std::thread::sleep;
 use std::time::Duration;
-
-#[cfg(not(feature = "pi-hardware"))]
-fn main() {
-    eprintln!("This binary requires the pi-hardware feature to be enabled.");
-    eprintln!("Run with: cargo run --bin minimal_ads1299_test --features pi-hardware");
-    std::process::exit(1);
-}
 
 // Register addresses
 const ID_REG_ADDR: u8 = 0x00;
@@ -83,7 +74,6 @@ const MISC1_REG: u8 = MISC1 | SRB1_ON;
 const LOFF_SENSP_REG: u8 = LOFF_SENSP & 0x0;
 
 
-#[cfg(feature = "pi-hardware")]
 fn main() -> Result<(), Box<dyn Error>> {
     read_channel_data_test()?;
     id_register_test()
@@ -102,14 +92,12 @@ fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
 }
 
 /// Helper function to write to a register
-#[cfg(feature = "pi-hardware")]
 fn write_register(spi: &mut Spi, reg_addr: u8, val: u8) -> Result<(), Box<dyn Error>> {
     spi.write(&[WREG_CMD | reg_addr, 0x00, val])?;
     Ok(())
 }
 
 /// Helper function to read from a register
-#[cfg(feature = "pi-hardware")]
 fn read_register(spi: &mut Spi, reg_addr: u8) -> Result<u8, Box<dyn Error>> {
     let mut buffer = [0u8];
     spi.write(&[RREG_CMD | reg_addr, 0x00])?;
@@ -117,7 +105,6 @@ fn read_register(spi: &mut Spi, reg_addr: u8) -> Result<u8, Box<dyn Error>> {
     Ok(buffer[0])
 }
 
-#[cfg(feature = "pi-hardware")]
 fn verify_register(spi: &mut Spi, name: &str, reg_addr: u8, exp: u8) -> Result<(), Box<dyn Error>>  {
     let act = read_register(spi, reg_addr)?;
     if (act != exp) {
@@ -127,7 +114,6 @@ fn verify_register(spi: &mut Spi, name: &str, reg_addr: u8, exp: u8) -> Result<(
 }
 
 /// Test to verify the ADS1299 ID register
-#[cfg(feature = "pi-hardware")]
 fn id_register_test() -> Result<(), Box<dyn Error>> {
     println!("Starting minimal ADS1299 ID register test...");
     
@@ -167,7 +153,6 @@ fn id_register_test() -> Result<(), Box<dyn Error>> {
 }
 
 /// Test to read channel data from the ADS1299
-#[cfg(feature = "pi-hardware")]
 fn read_channel_data_test() -> Result<(), Box<dyn Error>> {
     println!("Starting ADS1299 channel data reading test...");
     

@@ -15,12 +15,13 @@ path = "src/main.rs"
 [[bin]]
 name = "minimal_ads1299_test"
 path = "src/minimal_ads1299_test.rs"
+required-features = ["pi-hardware"]
 
 [features]
 # Feature for Raspberry Pi hardware support
 pi-hardware = ["dep:rppal"]
-# Default features
-default = []
+# pi hardware is the default
+default = ["pi-hardware"]
 
 [dependencies]
 tokio = { version = "1.28.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
