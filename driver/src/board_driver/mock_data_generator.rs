@@ -229,7 +229,7 @@ impl EegGenerator {
         let mut line_noise_50hz_phase = vec![0.0; num_channels];
         let mut line_noise_60hz_phase = vec![0.0; num_channels];
         let mut line_noise_amplitude = vec![0.0; num_channels];
-        let mut alpha_burst_counter = vec![0; num_channels];
+        let alpha_burst_counter = vec![0; num_channels];
         
         for i in 0..num_channels {
             delta_phase[i] = rng.gen::<f32>() * 2.0 * PI;

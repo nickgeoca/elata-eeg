@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use std::thread;
 use std::io;
 use super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
-use super::hal::{SpiPort, InterruptPin, Edge};
+use super::hal::{SpiPort, DmaSpiPort, InterruptPin, Edge};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -23,9 +23,12 @@ pub struct Ads1299Driver {
     additional_channel_buffering: usize,
     spi: Option<Box<dyn SpiPort>>,
     drdy_pin: Option<Box<dyn InterruptPin>>,
-    // New fields for interrupt-driven approach
+    // Fields for interrupt-driven approach
     interrupt_thread: Option<thread::JoinHandle<()>>,
     interrupt_running: Arc<AtomicBool>,
+    // Fields for DMA-driven approach
+    using_dma: bool,
+    dma_buffer: Vec<u8>,
 }
 
 /// Internal state for the Ads1299Driver.
@@ -212,6 +215,8 @@ impl Ads1299Driver {
             drdy_pin: Some(drdy_pin),
             interrupt_thread: None,
             interrupt_running: Arc::new(AtomicBool::new(false)),
+            using_dma: false,
+            dma_buffer: Vec::new(),
         };
         
         info!("Ads1299Driver created with HAL implementations and config: {:?}", config);
@@ -230,7 +235,7 @@ impl Ads1299Driver {
     /// Start data acquisition from the ADS1299.
     ///
     /// This method validates the driver state, initializes the ADS1299 chip,
-    /// and spawns a background task that reads data from the chip.
+    /// and spawns a background task that reads data from the chip using DMA.
     pub(crate) async fn start_acquisition(&mut self) -> Result<(), DriverError> {
         // Check preconditions without holding the lock for too long
         {
@@ -296,13 +301,29 @@ impl Ads1299Driver {
             
             // Small delay after sending command
             tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            
+            // Check if DMA is supported
+            if !spi.supports_dma() {
+                return Err(DriverError::ConfigurationError("DMA is required but not supported by the SPI implementation".to_string()));
+            }
+            
+            info!("Using DMA for data acquisition");
+            return self.start_acquisition_with_dma().await;
+        } else {
+            return Err(DriverError::NotInitialized);
         }
-        
-        debug!("Starting acquisition using hardware interrupts in continuous data mode");
+    }
+    
+    /// Start data acquisition from the ADS1299 using DMA.
+    ///
+    /// This method uses DMA for data transfer, which is more efficient for high-speed sampling.
+    /// It allocates a DMA buffer and sets up a DMA transfer that will be triggered by the DRDY pin.
+    async fn start_acquisition_with_dma(&mut self) -> Result<(), DriverError> {
+        debug!("Starting acquisition using DMA in continuous data mode");
         
         // Get configuration
         let config = {
-            let inner = inner_arc.lock().await;
+            let inner = self.inner.lock().await;
             inner.config.clone()
         };
         
@@ -310,84 +331,111 @@ impl Ads1299Driver {
         let batch_size = config.batch_size;
         let num_channels = config.channels.len();
         
-        info!("Starting acquisition with batch size: {}, sample rate: {} Hz",
+        info!("Starting acquisition with DMA, batch size: {}, sample rate: {} Hz",
                batch_size, config.sample_rate);
-        info!("Buffering {} samples before sending batches", batch_size);
         
-        // Create a channel for sending data from the interrupt handler to the Tokio task
+        // Calculate sample size in bytes: 3 status bytes + (3 bytes per channel * num_channels)
+        let sample_size = 3 + (3 * num_channels);
+        
+        // Allocate DMA buffer: sample_size * batch_size
+        let buffer_size = sample_size * batch_size;
+        self.dma_buffer = vec![0u8; buffer_size];
+        
+        // Take ownership of the SPI
+        let mut spi_box = self.spi.take().ok_or(DriverError::NotInitialized)?;
+        
+        // Check if the SPI implementation supports DMA
+        if !spi_box.supports_dma() {
+            return Err(DriverError::ConfigurationError("DMA is required but not supported by the SPI implementation".to_string()));
+        }
+        
+        // Prepare for background task
+        let inner_arc = self.inner.clone();
+        let tx = self.tx.clone();
+        
+        // Set up DMA transfer
         let (data_tx, mut data_rx) = mpsc::channel::<(Vec<i32>, u64)>(batch_size);
         
-        // Set the interrupt running flag
-        self.interrupt_running.store(true, Ordering::SeqCst);
-        let interrupt_running = self.interrupt_running.clone();
-        
-        // Take ownership of the DRDY pin and SPI
-        let mut drdy_pin = self.drdy_pin.take().ok_or(DriverError::NotInitialized)?;
-        let mut spi = self.spi.take().ok_or(DriverError::NotInitialized)?;
-        
-        // Create a thread for handling the hardware interrupt
-        // Note: Hardware interrupts must be handled in a native thread, not a Tokio task
-        let interrupt_thread = thread::spawn(move || {
-            // Configure the pin for interrupt
-            match drdy_pin.set_interrupt_edge(super::hal::Edge::Falling) {
-                Ok(_) => debug!("DRDY pin interrupt configured successfully"),
-                Err(e) => {
-                    error!("Failed to configure DRDY pin interrupt: {:?}", e);
-                    return;
-                }
-            }
-            
-            debug!("Interrupt handler thread started");
-            
-            // Sample counter for the interrupt thread
-            let mut sample_count = 0;
-            
-            // Main interrupt handling loop
-            while interrupt_running.load(Ordering::SeqCst) {
-                // Wait for the interrupt with a timeout
-                match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
-                    Ok(Some(_)) => {
-                        // DRDY pin went low, data is ready
-                        match read_data_from_spi(spi.as_mut(), num_channels) {
-                            Ok(samples) => {
-                                // Send samples and current count through the channel
-                                if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
-                                    error!("Failed to send samples to Tokio task: {}", e);
-                                    // If the channel is closed, exit the loop
-                                    break;
-                                }
-                                sample_count += 1;
-                            },
-                            Err(e) => {
-                                error!("Error reading data in interrupt handler: {:?}", e);
-                                // Continue and try again on next interrupt
-                            }
-                        }
-                    },
-                    Ok(None) => {
-                        // Timeout occurred, no interrupt
-                        debug!("Interrupt timeout - no data ready");
-                    },
-                    Err(e) => {
-                        error!("Error polling for interrupt: {:?}", e);
-                        // Sleep a bit to avoid tight loop on error
-                        thread::sleep(std::time::Duration::from_millis(100));
+        // Create a closure to process DMA data
+        let mut sample_count = 0;
+        let dma_callback = move |buffer: &[u8], batch_size: usize| {
+            // Process each sample in the batch
+            for i in 0..batch_size {
+                // Calculate the offset for this sample in the buffer
+                let offset = i * sample_size;
+                
+                // Parse the data (skip the first 3 status bytes)
+                let mut samples = Vec::with_capacity(num_channels);
+                
+                for ch in 0..num_channels {
+                    let start_idx = offset + 3 + (ch * 3); // Skip 3 status bytes, then 3 bytes per channel
+                    
+                    // Extract the 3 bytes for this channel
+                    if start_idx + 2 < buffer.len() {
+                        let msb = buffer[start_idx];
+                        let mid = buffer[start_idx + 1];
+                        let lsb = buffer[start_idx + 2];
+                        
+                        // Convert to i32 using the ch_sample_to_raw function
+                        let value = ch_sample_to_raw(msb, mid, lsb);
+                        samples.push(value);
                     }
                 }
+                
+                // Send samples and current count through the channel
+                if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
+                    error!("Failed to send samples to Tokio task: {}", e);
+                    // If the channel is closed, we can't do much here
+                    return;
+                }
+                
+                sample_count += 1;
             }
-            
-            debug!("Interrupt handler thread terminated");
-            
-            // Clean up by disabling the interrupt
-            if let Err(e) = drdy_pin.clear_interrupt() {
-                error!("Failed to clear interrupt: {:?}", e);
+        };
+        
+        // Try to get a DMA-capable SPI implementation
+        // Since DmaSpiPort is not object-safe, we need to use concrete types directly
+        let dma_spi_result = {
+            // Try to downcast to specific implementations we know about
+            if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
+                if let Err(e) = DmaSpiPort::start_dma_transfer(mock_spi, &mut self.dma_buffer, sample_size, batch_size, dma_callback) {
+                    error!("Failed to start DMA transfer with MockSpi: {:?}", e);
+                    Err(DriverError::IoError(e))
+                } else {
+                    Ok(())
+                }
+            } else {
+                #[cfg(feature = "pi-hardware")]
+                if let Some(rppal_spi) = spi_box.as_any_mut().downcast_mut::<super::rppal_hal::rppal_impl::RppalSpi>() {
+                    if let Err(e) = DmaSpiPort::start_dma_transfer(rppal_spi, &mut self.dma_buffer, sample_size, batch_size, dma_callback) {
+                        error!("Failed to start DMA transfer with RppalSpi: {:?}", e);
+                        Err(DriverError::IoError(e))
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    Err(DriverError::ConfigurationError("Failed to get DMA-capable SPI implementation".to_string()))
+                }
+                
+                #[cfg(not(feature = "pi-hardware"))]
+                Err(DriverError::ConfigurationError("Failed to get DMA-capable SPI implementation".to_string()))
             }
-        });
+        };
         
-        // Store the interrupt thread handle
-        self.interrupt_thread = Some(interrupt_thread);
+        // Check if DMA start was successful
+        if let Err(e) = dma_spi_result {
+            // Put the SPI back and return the error
+            self.spi = Some(spi_box);
+            return Err(e);
+        }
         
-        // Spawn a Tokio task to process the data from the interrupt handler
+        // Put the SPI back
+        self.spi = Some(spi_box);
+        
+        // Mark that we're using DMA
+        self.using_dma = true;
+        
+        // Spawn a Tokio task to process the data from the DMA transfer
         let handle = tokio::spawn(async move {
             // Get base timestamp
             let base_timestamp = {
@@ -398,7 +446,7 @@ impl Ads1299Driver {
             // Main acquisition loop
             let mut sample_buffer: Vec<AdcData> = Vec::with_capacity(batch_size);
             
-            debug!("Starting Tokio task to process data from interrupt handler");
+            debug!("Starting Tokio task to process data from DMA transfer");
             
             while let Some((raw_samples, sample_count)) = data_rx.recv().await {
                 // Check if we should continue running
@@ -425,9 +473,11 @@ impl Ads1299Driver {
                 // Convert raw samples to voltage
                 let mut voltage_samples = Vec::with_capacity(num_channels);
                 for (i, &raw) in raw_samples.iter().enumerate() {
-                    let channel_idx = config.channels[i];
-                    let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
-                    voltage_samples.push(vec![voltage]);
+                    if i < config.channels.len() {
+                        let channel_idx = config.channels[i];
+                        let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
+                        voltage_samples.push(vec![voltage]);
+                    }
                 }
                 
                 // Create AdcData
@@ -457,7 +507,7 @@ impl Ads1299Driver {
         });
         
         self.task_handle = Some(handle);
-        info!("Ads1299Driver acquisition started");
+        info!("Ads1299Driver acquisition started with DMA");
         Ok(())
     }
 
@@ -479,18 +529,35 @@ impl Ads1299Driver {
             debug!("Signaled acquisition task to stop");
         }
         
-        // Signal the interrupt thread to stop
-        if self.interrupt_running.load(Ordering::SeqCst) {
-            debug!("Signaling interrupt thread to stop");
-            self.interrupt_running.store(false, Ordering::SeqCst);
-            
-            // Wait for the interrupt thread to complete
-            if let Some(handle) = self.interrupt_thread.take() {
-                match handle.join() {
-                    Ok(_) => debug!("Interrupt thread completed successfully"),
-                    Err(e) => warn!("Interrupt thread terminated with error: {:?}", e),
+        // Stop the DMA transfer
+        if self.using_dma {
+            debug!("Stopping DMA transfer");
+            if let Some(spi_box) = self.spi.as_mut() {
+                // Try to get a DMA-capable SPI implementation
+                // Since DmaSpiPort is not object-safe, we need to use concrete types directly
+                let dma_stop_result = {
+                    // Try to downcast to specific implementations we know about
+                    if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
+                        DmaSpiPort::stop_dma_transfer(mock_spi)
+                    } else {
+                        #[cfg(feature = "pi-hardware")]
+                        if let Some(rppal_spi) = spi_box.as_any_mut().downcast_mut::<super::rppal_hal::rppal_impl::RppalSpi>() {
+                            DmaSpiPort::stop_dma_transfer(rppal_spi)
+                        } else {
+                            Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                        }
+                        
+                        #[cfg(not(feature = "pi-hardware"))]
+                        Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                    }
+                };
+                
+                if let Err(e) = dma_stop_result {
+                    warn!("Failed to stop DMA transfer: {:?}", e);
+                    // Continue anyway to try to stop conversion
                 }
             }
+            self.using_dma = false;
         }
         
         // Exit continuous data mode and stop conversion
@@ -560,18 +627,36 @@ impl Ads1299Driver {
             debug!("Stopping acquisition as part of shutdown");
             self.stop_acquisition().await?;
         } else {
-            // Even if acquisition is not running, make sure interrupt thread is stopped
-            if self.interrupt_running.load(Ordering::SeqCst) {
-                debug!("Stopping interrupt thread as part of shutdown");
-                self.interrupt_running.store(false, Ordering::SeqCst);
-                
-                // Wait for the interrupt thread to complete
-                if let Some(handle) = self.interrupt_thread.take() {
-                    match handle.join() {
-                        Ok(_) => debug!("Interrupt thread completed successfully during shutdown"),
-                        Err(e) => warn!("Interrupt thread terminated with error during shutdown: {:?}", e),
+            // Even if acquisition is not running, make sure cleanup is done
+            
+            // Check if using DMA
+            if self.using_dma {
+                debug!("Stopping DMA transfer as part of shutdown");
+                if let Some(spi_box) = self.spi.as_mut() {
+                    // Try to get a DMA-capable SPI implementation
+                    // Since DmaSpiPort is not object-safe, we need to use concrete types directly
+                    let dma_stop_result = {
+                        // Try to downcast to specific implementations we know about
+                        if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
+                            DmaSpiPort::stop_dma_transfer(mock_spi)
+                        } else {
+                            #[cfg(feature = "pi-hardware")]
+                            if let Some(rppal_spi) = spi_box.as_any_mut().downcast_mut::<super::rppal_hal::rppal_impl::RppalSpi>() {
+                                DmaSpiPort::stop_dma_transfer(rppal_spi)
+                            } else {
+                                Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                            }
+                            
+                            #[cfg(not(feature = "pi-hardware"))]
+                            Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                        }
+                    };
+                    
+                    if let Err(e) = dma_stop_result {
+                        warn!("Failed to stop DMA transfer during shutdown: {:?}", e);
                     }
                 }
+                self.using_dma = false;
             }
         }
 
@@ -947,11 +1032,35 @@ impl Drop for Ads1299Driver {
             error!("Background task may still be running. Call shutdown() to properly terminate it.");
         }
         
-        // Check if interrupt thread is still running
-        if self.interrupt_running.load(Ordering::SeqCst) {
-            error!("Interrupt thread may still be running. Call shutdown() to properly terminate it.");
-            // Try to stop the interrupt thread
-            self.interrupt_running.store(false, Ordering::SeqCst);
+        // Check if using DMA
+        if self.using_dma {
+            error!("DMA transfer may still be active. Call shutdown() to properly terminate it.");
+            // Try to stop the DMA transfer
+            if let Some(spi_box) = self.spi.as_mut() {
+                // Try to get a DMA-capable SPI implementation
+                // Since DmaSpiPort is not object-safe, we need to use concrete types directly
+                let dma_stop_result = {
+                    // Try to downcast to specific implementations we know about
+                    if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
+                        DmaSpiPort::stop_dma_transfer(mock_spi)
+                    } else {
+                        #[cfg(feature = "pi-hardware")]
+                        if let Some(rppal_spi) = spi_box.as_any_mut().downcast_mut::<super::rppal_hal::rppal_impl::RppalSpi>() {
+                            DmaSpiPort::stop_dma_transfer(rppal_spi)
+                        } else {
+                            Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                        }
+                        
+                        #[cfg(not(feature = "pi-hardware"))]
+                        Err(io::Error::new(io::ErrorKind::Unsupported, "Failed to get DMA-capable SPI implementation"))
+                    }
+                };
+                
+                if let Err(e) = dma_stop_result {
+                    error!("Failed to stop DMA transfer in Drop implementation: {:?}", e);
+                }
+            }
+            self.using_dma = false;
         }
         
         // Try to join the interrupt thread if it exists
