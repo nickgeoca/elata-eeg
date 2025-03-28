@@ -23,9 +23,6 @@ pub struct Ads1299Driver {
     additional_channel_buffering: usize,
     spi: Option<Box<dyn SpiPort>>,
     drdy_pin: Option<Box<dyn InterruptPin>>,
-    // Fields for interrupt-driven approach
-    interrupt_thread: Option<thread::JoinHandle<()>>,
-    interrupt_running: Arc<AtomicBool>,
     // Fields for DMA-driven approach
     using_dma: bool,
     dma_buffer: Vec<u8>,
@@ -213,8 +210,6 @@ impl Ads1299Driver {
             additional_channel_buffering,
             spi: Some(spi),
             drdy_pin: Some(drdy_pin),
-            interrupt_thread: None,
-            interrupt_running: Arc::new(AtomicBool::new(false)),
             using_dma: false,
             dma_buffer: Vec::new(),
         };
@@ -353,8 +348,8 @@ impl Ads1299Driver {
         let inner_arc = self.inner.clone();
         let tx = self.tx.clone();
         
-        // Set up DMA transfer
-        let (data_tx, mut data_rx) = mpsc::channel::<(Vec<i32>, u64)>(batch_size);
+        // Set up DMA transfer with extra buffer capacity to handle temporary consumer lag
+        let (data_tx, mut data_rx) = mpsc::channel::<(Vec<i32>, u64)>(batch_size * 2);
         
         // Create a closure to process DMA data
         let mut sample_count = 0;
@@ -382,11 +377,20 @@ impl Ads1299Driver {
                     }
                 }
                 
-                // Send samples and current count through the channel
-                if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
-                    error!("Failed to send samples to Tokio task: {}", e);
-                    // If the channel is closed, we can't do much here
-                    return;
+                // Send samples and current count through the channel using non-blocking try_send
+                match data_tx.try_send((samples, sample_count)) {
+                    Ok(_) => { /* Sample sent successfully */ }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Log this! It means the consumer task is falling behind.
+                        warn!("DMA callback: Channel full, dropping sample batch! Consumer task may be overwhelmed.");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // The receiver task has shut down, stop trying to send.
+                        error!("DMA callback: Channel closed. Stopping send attempts.");
+                        // Consider adding a way to signal the DMA transfer to stop here if possible,
+                        // although the main task shutting down should handle this eventually.
+                        return; // Stop processing further samples in this callback invocation if the channel is closed.
+                    }
                 }
                 
                 sample_count += 1;
@@ -395,8 +399,14 @@ impl Ads1299Driver {
         
         // Try to get a DMA-capable SPI implementation
         // Since DmaSpiPort is not object-safe, we need to use concrete types directly
+        
+        // Note: Assuming the underlying DmaSpiPort implementation (e.g., RppalSpi)
+        // is configured to use the correct DRDY pin as the DMA trigger signal.
+        // The drdy_pin field in Ads1299Driver is currently only used for an initial state check.
         let dma_spi_result = {
-            // Try to downcast to specific implementations we know about
+            // Downcasting to a concrete SPI type is necessary here because the
+            // DmaSpiPort trait methods (start/stop_dma_transfer) likely cannot be
+            // made object-safe due to their generic parameters (e.g., the callback closure).
             if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
                 if let Err(e) = DmaSpiPort::start_dma_transfer(mock_spi, &mut self.dma_buffer, sample_size, batch_size, dma_callback) {
                     error!("Failed to start DMA transfer with MockSpi: {:?}", e);
@@ -536,7 +546,9 @@ impl Ads1299Driver {
                 // Try to get a DMA-capable SPI implementation
                 // Since DmaSpiPort is not object-safe, we need to use concrete types directly
                 let dma_stop_result = {
-                    // Try to downcast to specific implementations we know about
+                    // Downcasting to a concrete SPI type is necessary here because the
+                    // DmaSpiPort trait methods (start/stop_dma_transfer) likely cannot be
+                    // made object-safe due to their generic parameters.
                     if let Some(mock_spi) = spi_box.as_any_mut().downcast_mut::<super::mock_hal::mock_impl::MockSpi>() {
                         DmaSpiPort::stop_dma_transfer(mock_spi)
                     } else {
@@ -716,7 +728,7 @@ impl Ads1299Driver {
     }
 
     /// Write a value to a register in the ADS1299.
-    fn write_register(&mut self, register: u8, value: u8) -> Result<(), DriverError> {
+    async fn write_register(&mut self, register: u8, value: u8) -> Result<(), DriverError> {
         let spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
         
         // Command: WREG (0x40) + register address
@@ -729,17 +741,17 @@ impl Ads1299Driver {
         spi.write(&write_buffer)?;
         
         // Update register cache
-        let mut inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
+        let mut inner = self.inner.lock().await;
         inner.registers[register as usize] = value;
         
         Ok(())
     }
 
     /// Read data from the ADS1299.
-    fn read_data(&mut self) -> Result<Vec<i32>, DriverError> {
+    async fn read_data(&mut self) -> Result<Vec<i32>, DriverError> {
         // Get the number of channels
         let num_channels = {
-            let inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
+            let inner = self.inner.lock().await;
             inner.config.channels.len()
         };
         
@@ -838,24 +850,24 @@ impl Ads1299Driver {
         let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
 
         // Write registers in the specific order
-        write_register(spi.as_mut(), CONFIG1_ADDR, config1_reg | sps_mask)?;
-        write_register(spi.as_mut(), CONFIG2_ADDR, config2_reg)?;
-        write_register(spi.as_mut(), CONFIG3_ADDR, config3_reg)?;
-        write_register(spi.as_mut(), CONFIG4_ADDR, config4_reg)?;
-        write_register(spi.as_mut(), LOFF_SENSP_ADDR, loff_sesp_reg)?;
-        write_register(spi.as_mut(), MISC1_ADDR, misc1_reg)?;
-        for ch in 0..=7             { write_register(spi.as_mut(), CH1SET_ADDR + ch, chn_off)?; }
-        for &ch in &config.channels { write_register(spi.as_mut(), CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?; }
-        write_register(spi.as_mut(), BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask)?;
-        write_register(spi.as_mut(), BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask)?;
+        self.write_register(CONFIG1_ADDR, config1_reg | sps_mask).await?;
+        self.write_register(CONFIG2_ADDR, config2_reg).await?;
+        self.write_register(CONFIG3_ADDR, config3_reg).await?;
+        self.write_register(CONFIG4_ADDR, config4_reg).await?;
+        self.write_register(LOFF_SENSP_ADDR, loff_sesp_reg).await?;
+        self.write_register(MISC1_ADDR, misc1_reg).await?;
+        for ch in 0..=7             { self.write_register(CH1SET_ADDR + ch, chn_off).await?; }
+        for &ch in &config.channels { self.write_register(CH1SET_ADDR + ch as u8, chn_reg | gain_mask).await?; }
+        self.write_register(BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask).await?;
+        self.write_register(BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask).await?;
         
         // Wait for configuration to settle
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         
-        println!("----Register Dump----");
+        debug!("----Register Dump----");
         let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
-        for reg in 0..=0x17 {println!("0x{:02X} - 0x{:02X} {}", reg, self.read_register(reg as u8)?, names[reg]);}
-        println!("----Register Dump----");
+        for reg in 0..=0x17 {debug!("Reg 0x{:02X} ({:<12}): 0x{:02X}", reg, names[reg], self.read_register(reg as u8)?);}
+        debug!("----Register Dump----");
         
         // Update status
         {
@@ -968,20 +980,6 @@ fn current_timestamp_micros() -> Result<u64, DriverError> {
         .map_err(|e| DriverError::Other(format!("Failed to get timestamp: {}", e)))
 }
 
-// Helper function to write a value to a register in the ADS1299
-fn write_register(spi: &mut dyn SpiPort, register: u8, value: u8) -> Result<(), DriverError> {
-    // Command: WREG (0x40) + register address
-    let command = 0x40 | (register & 0x1F);
-    
-    // First byte: command, second byte: number of registers to write minus 1 (0 for single register)
-    // Third byte: value to write
-    let write_buffer = [command, 0x00, value];
-    
-    spi.write(&write_buffer)?;
-    
-    Ok(())
-}
-
 
 // Implement the AdcDriver trait
 #[async_trait]
@@ -1061,14 +1059,6 @@ impl Drop for Ads1299Driver {
                 }
             }
             self.using_dma = false;
-        }
-        
-        // Try to join the interrupt thread if it exists
-        if let Some(handle) = self.interrupt_thread.take() {
-            match handle.join() {
-                Ok(_) => debug!("Interrupt thread joined successfully in Drop implementation"),
-                Err(e) => error!("Failed to join interrupt thread in Drop implementation: {:?}", e),
-            }
         }
         
         // Release the hardware lock
