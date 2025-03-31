@@ -61,6 +61,12 @@ export default function EegMonitorWebGL() {
         windowSizeRef.current = samplesNeeded;
         
         console.log(`Canvas dimensions updated: ${width}x${height}, samples needed: ${samplesNeeded}`);
+        
+        // If canvas already exists, update its dimensions
+        if (canvasRef.current) {
+          canvasRef.current.width = width;
+          canvasRef.current.height = height;
+        }
       }
     };
 

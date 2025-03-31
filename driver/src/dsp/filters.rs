@@ -3,7 +3,6 @@ use rustfft::{FftPlanner, num_complex::Complex};
 use std::sync::Arc;
 use std::time::Instant;
 use std::f32::consts::PI;
-// TODO add ADS1299 constants
 use std::error::Error;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};

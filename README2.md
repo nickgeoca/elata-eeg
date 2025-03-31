@@ -3,7 +3,14 @@ TL;DR: This..
 ## Simple Description
 This..
 
-## Electro Placement Guide TODO clean this up
+## BOM
+- Electrodes - https://shop.openbci.com/products/openbci-gold-cup-electrodes?variant=37345591591070
+- ADS1299 board
+- Pi 5
+- Header Wires
+- eeg head band - https://www.fri-fl-shop.com/products/19-channel-eeg-headband
+
+## Electro Placement Guide
 - Check Electrode Contact: Good contact (gel, minimal motion) helps reduce large offset drifts. Scotch tape can help hold electrodes in place but can also allow some micro motion.
 - Give the System Time to Settle: Right after you place electrodes, the offset is often larger. Let the system stabilize for ~30 s or so before recording.
 
@@ -73,7 +80,30 @@ bash rebuild.sh
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
 - integrate erro handlign
 - need to enable local device discovery if you want to download recordings
-
+- Fix readmes
+- Change board name. ads1299-elata-v0.1
+- UI, switch to mock mode?
+- Add normalization for the GUI and pass voltage range per channel
+- use this?? `use js_sys::Float32Array;`
+- Clean up driver object. may be better if we can use the board as the obj and pass the filtering into it or something
+- driver readme. double check jumpers and register settings.
+- Add to config.json? the fitler parameters?
+- - Then maybe add an HTTP route to download.
+- Add WS to stop EEG?
+- consider using canvas again
+- Handle voltage scaling. Should it be passed as normalized values -1 to 1 from the daemon?
+- Fix up the eeg graph. x axis. y axis. signal spacing, etc
+- Blink test doc
+- GUI switch to mock mode. Enable disable channels? no changes during recording
+- Better 50hz/60hz notch filtering? Change filter paramters
+- Add data exploration repo? seperate from this one?
+- discuss battery vs plugin. how much does 60hz affect sginal qaulity?
+- mock driver thru UI and have it run on computer in mock mode for web dev'ing it
+- Switch to DMA mode
+- Go thru google docs on notes i aws taking
+- data offline redundancy thing
+- test low esr capacitor on power supply
+- remove 5min recording thing in the daemon main
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).

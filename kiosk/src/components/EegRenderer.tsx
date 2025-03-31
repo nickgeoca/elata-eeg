@@ -14,6 +14,11 @@
  * The render offset is expressed as a percentage of canvas width, allowing
  * for smooth scrolling that's consistent regardless of screen dimensions or
  * frame rate fluctuations.
+ *
+ * Double buffering is implemented to eliminate flickering:
+ * 1. All drawing operations are performed on an off-screen canvas
+ * 2. The completed frame is copied to the visible canvas in a single operation
+ * 3. This prevents the user from seeing partial renders
  */
 
 import React, { useEffect, useRef } from 'react';
@@ -41,9 +46,11 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  voltageScaleFactor = 4600
+  voltageScaleFactor = 13600
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
+  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const offscreenReglRef = useRef<any>(null);
   const pointsArraysRef = useRef<Float32Array[]>([]);
   const lastFrameTimeRef = useRef(Date.now());
   const frameCountRef = useRef(0);
@@ -60,13 +67,32 @@ export const EegRenderer = React.memo(function EegRenderer({
         const { width, height } = canvasRef.current;
         
         // Only update if dimensions have changed
-        if (width !== canvasDimensionsRef.current.width || 
+        if (width !== canvasDimensionsRef.current.width ||
             height !== canvasDimensionsRef.current.height) {
           
           canvasDimensionsRef.current = { width, height };
           
+          // Update offscreen canvas dimensions to match
+          if (offscreenCanvasRef.current) {
+            offscreenCanvasRef.current.width = width;
+            offscreenCanvasRef.current.height = height;
+            
+            // Reinitialize WebGL contexts when dimensions change
+            if (offscreenReglRef.current) {
+              offscreenReglRef.current.destroy();
+              offscreenReglRef.current = REGL({
+                canvas: offscreenCanvasRef.current,
+                attributes: {
+                  antialias: false,
+                  depth: false,
+                  preserveDrawingBuffer: true
+                }
+              });
+            }
+          }
+          
           if (!isProduction) {
-            console.log(`Canvas dimensions changed: ${width}x${height}`);
+            console.log(`Canvas dimensions changed: ${width}x${height}, updated offscreen canvas`);
           }
         }
       }
@@ -121,12 +147,34 @@ export const EegRenderer = React.memo(function EegRenderer({
     if (!canvasRef.current) return;
     
     if (!isProduction) {
-      console.log("Initializing WebGL renderer");
+      console.log("Initializing WebGL renderer with double buffering");
     }
     
-    // Initialize regl
+    // Create offscreen canvas with the same dimensions
+    const visibleCanvas = canvasRef.current;
+    const { width, height } = visibleCanvas;
+    
+    // Create offscreen canvas
+    const offscreenCanvas = document.createElement('canvas');
+    offscreenCanvas.width = width;
+    offscreenCanvas.height = height;
+    offscreenCanvasRef.current = offscreenCanvas;
+    
+    // Initialize regl for the offscreen canvas
+    const offscreenRegl = REGL({
+      canvas: offscreenCanvas,
+      attributes: {
+        antialias: false,
+        depth: false,
+        preserveDrawingBuffer: true
+      }
+    });
+    
+    offscreenReglRef.current = offscreenRegl;
+    
+    // Initialize regl for the visible canvas (for copying only)
     const regl = REGL({
-      canvas: canvasRef.current,
+      canvas: visibleCanvas,
       attributes: {
         antialias: false,
         depth: false,
@@ -144,7 +192,7 @@ export const EegRenderer = React.memo(function EegRenderer({
     }
     
     // Create WebGL command for drawing the grid
-    const drawGrid = regl({
+    const drawGrid = offscreenRegl({
       frag: `
         precision mediump float;
         uniform vec4 color;
@@ -160,13 +208,13 @@ export const EegRenderer = React.memo(function EegRenderer({
         }
       `,
       attributes: {
-        position: regl.prop('points')
+        position: offscreenRegl.prop('points')
       },
       uniforms: {
-        color: regl.prop('color')
+        color: offscreenRegl.prop('color')
       },
       primitive: 'lines',
-      count: regl.prop('count'), // Add count property
+      count: offscreenRegl.prop('count'), // Add count property
       blend: {
         enable: true,
         func: {
@@ -180,7 +228,7 @@ export const EegRenderer = React.memo(function EegRenderer({
     });
     
     // Create WebGL command for drawing the EEG lines
-    const drawLines = regl({
+    const drawLines = offscreenRegl({
       frag: `
         precision mediump float;
         uniform vec4 color;
@@ -206,16 +254,16 @@ export const EegRenderer = React.memo(function EegRenderer({
         }
       `,
       attributes: {
-        position: regl.prop('points')
+        position: offscreenRegl.prop('points')
       },
       uniforms: {
-        color: regl.prop('color'),
-        yOffset: regl.prop('yOffset'),
-        yScale: regl.prop('yScale')
+        color: offscreenRegl.prop('color'),
+        yOffset: offscreenRegl.prop('yOffset'),
+        yScale: offscreenRegl.prop('yScale')
       },
       primitive: 'line strip',
       lineWidth: 1.0, // Minimum allowed line width in REGL (must be between 1 and 32)
-      count: regl.prop('count'),
+      count: offscreenRegl.prop('count'),
       blend: {
         enable: true,
         func: {
@@ -271,7 +319,42 @@ export const EegRenderer = React.memo(function EegRenderer({
     // Create initial grid lines
     const gridLines = createGridLines();
     
-    // Render function with time-based scrolling
+    // Create a command to copy from offscreen to visible canvas
+    const copyToScreen = regl({
+      frag: `
+        precision mediump float;
+        uniform sampler2D texture;
+        varying vec2 uv;
+        void main() {
+          gl_FragColor = texture2D(texture, uv);
+        }
+      `,
+      vert: `
+        precision mediump float;
+        attribute vec2 position;
+        varying vec2 uv;
+        void main() {
+          uv = 0.5 * (position + 1.0);
+          gl_Position = vec4(position, 0, 1);
+        }
+      `,
+      attributes: {
+        position: [
+          -1, -1,
+          1, -1,
+          -1, 1,
+          1, 1
+        ]
+      },
+      uniforms: {
+        texture: regl.prop('texture')
+      },
+      depth: { enable: false },
+      count: 4,
+      primitive: 'triangle strip'
+    });
+
+    // Render function with time-based scrolling and double buffering
     const render = () => {
       // Get current time for logging and other operations
       const now = Date.now();
@@ -348,13 +431,14 @@ export const EegRenderer = React.memo(function EegRenderer({
         }
       }
       
-      // Clear the canvas
-      regl.clear({
+      // STEP 1: Draw to the offscreen canvas
+      // Clear the offscreen canvas
+      offscreenReglRef.current.clear({
         color: [0.1, 0.1, 0.2, 1],
         depth: 1
       });
       
-      // Draw grid
+      // Draw grid on offscreen canvas
       drawGrid({
         points: gridLines,
         color: [0.2, 0.2, 0.2, 0.8],
@@ -364,13 +448,13 @@ export const EegRenderer = React.memo(function EegRenderer({
       // Track if any data was drawn
       let totalPointsDrawn = 0;
       
-      // Draw each channel - always draw all channels together
+      // Draw each channel on offscreen canvas - always draw all channels together
       for (let ch = 0; ch < channelCount; ch++) {
         if (!dataRef.current[ch]) continue;
         const buffer = dataRef.current[ch];
         
         // Ensure point arrays are large enough
-        if (ch >= pointsArraysRef.current.length || 
+        if (ch >= pointsArraysRef.current.length ||
             pointsArraysRef.current[ch].length < buffer.getCapacity() * 2) {
           // Reallocate this channel's points array
           pointsArraysRef.current[ch] = new Float32Array(buffer.getCapacity() * 2);
@@ -414,7 +498,7 @@ export const EegRenderer = React.memo(function EegRenderer({
             safeCount = Math.floor(pointsLength / 2);
           }
           
-          // Draw the channel data
+          // Draw the channel data on offscreen canvas
           drawLines({
             points: points.subarray(0, safeCount * 2),
             count: safeCount,
@@ -445,6 +529,24 @@ export const EegRenderer = React.memo(function EegRenderer({
       if (!isProduction && totalPointsDrawn === 0 && Math.random() < 0.05) {
         console.warn(`No points drawn in this frame! Check if data is available.`);
       }
+      
+      // STEP 2: Copy from offscreen canvas to visible canvas
+      // Create a texture from the offscreen canvas
+      const offscreenTexture = reglRef.current.texture(offscreenCanvasRef.current);
+      
+      // Clear the visible canvas
+      reglRef.current.clear({
+        color: [0.1, 0.1, 0.2, 1],
+        depth: 1
+      });
+      
+      // Copy the offscreen texture to the visible canvas
+      copyToScreen({
+        texture: offscreenTexture
+      });
+      
+      // Clean up the texture to prevent memory leaks
+      offscreenTexture.destroy();
     };
     // Set up rendering with FPS control
     let animationFrameId: number;
@@ -477,7 +579,18 @@ export const EegRenderer = React.memo(function EegRenderer({
     // Clean up
     return () => {
       cancelAnimationFrame(animationFrameId);
-      regl.destroy();
+      
+      // Clean up both regl instances
+      if (reglRef.current) {
+        reglRef.current.destroy();
+      }
+      
+      if (offscreenReglRef.current) {
+        offscreenReglRef.current.destroy();
+      }
+      
+      // Remove references to canvases
+      offscreenCanvasRef.current = null;
     };
   }, [canvasRef, config, dataRef, latestTimestampRef, debugInfoRef, voltageScaleFactor]);
 

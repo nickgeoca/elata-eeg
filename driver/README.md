@@ -11,9 +11,6 @@ ads1299_sample_voltage = raw_sample * vref / gain / 2**23
 
 ## Sample Code
 
-## TODO
-- Does putting filtering in the daemon make more sense? Just pass raw from the driver
-
 ## Basic Usage
 ```rust
 use eeg_driver::{AdcConfig, EegSystem, DriverType};
