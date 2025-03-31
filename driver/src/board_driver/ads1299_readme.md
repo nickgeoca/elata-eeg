@@ -1,11 +1,23 @@
 # ADS1299EEG_FE Board Driver
 
-This document provides information on the board configuration and setup guide, to use it with the Elata EEG system. Configuration and setup is below.
+This document outlines the configuration and setup of the [TI ADS1299 EVM](https://www.ti.com/tool/ADS1299EEGFE-PDK) board for integration with the Elata EEG system. It provides the necessary steps to initialize the board, configure the driver, and bring up the hardware for data acquisition.
 
+The setup uses a Raspberry Pi 5 connected to the ADS1299 EVM, serving as the main controller for EEG signal acquisition. Custom drivers on the Pi handle SPI communication, device configuration, and system initialization, forming the core of the Elata EEG hardware stack.
 
-
+```
+[EEG Electrodes]
+       │
+       ▼
+[ADS1299 EVM Board]
+       │   (SPI + GPIO)
+       ▼
+[Raspberry Pi 5]
+       │
+       ▼
+[UI / Logging / Processing]
+```
 ## ADS1299 Configuration Summary
-TL;DR: This board is configured for basic EEG acquisition using a unipolar 5V supply, with a buffered reference electrode (SRB1) and a fixed internal bias drive to stabilize signals and reduce common-mode noise. For the prototype, we aren't using closed-loop bias or shield driving.
+TL;DR: The ADS1299 board is configured for basic EEG acquisition using a unipolar 5V supply, with a buffered reference electrode (SRB1) and a fixed internal bias drive to stabilize signals and reduce common-mode noise. For the prototype, we aren't using closed-loop bias or shield driving.
 
 | Feature / Setting          | Used? | Hardware (Jumpers)                    | Software (Register Flag) | Purpose (Basic Explanation)                                                                                                |
 | :------------------------- | :---- | :------------------------------------ | :----------------------- | :------------------------------------------------------------------------------------------------------------------------- |
@@ -95,6 +107,24 @@ The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the followin
 | 0x17    | 0x00   | CONFIG4                | Configuration Register 4                         |
 
 
+## Implementation Notes
+
+- The ADS1299 communicates via SPI with the following settings:
+  - Mode 1 (CPOL=0, CPHA=1)
+  - Maximum clock speed of 5MHz (we use 4MHz to be safe)
+  - MSB first
+  - 8-bit word size
+
+- The DRDY pin is used to detect when new data is available:
+  - It is active low (goes low when data is ready)
+  - We use GPIO25 (Pin 22) on the Raspberry Pi 5
+
+- The ADS1299 has a 24-bit ADC, so each sample is 3 bytes
+  - We need to convert these to i32 values
+
+- The ADS1299 can operate in continuous or single-shot mode
+  - We use continuous mode for EEG applications
+  - We use the RDATAC command to start continuous data acquisition
 
 ## Usage Example
 
