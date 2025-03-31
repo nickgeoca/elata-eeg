@@ -7,7 +7,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use serde::{Serialize, Deserialize};
 use log::{info, warn, debug, trace, error};
-use super::mock_driver::MockDriver;
+use super::mock::driver::MockDriver;
 
 // Driver events
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,7 +136,7 @@ pub async fn create_driver(config: AdcConfig)
     match config.board_driver {
         DriverType::Ads1299 => {
             // Try to create the ADS1299 hardware driver
-            match super::ads1299_driver::Ads1299Driver::new(config.clone(), 0) {
+            match super::ads1299::driver::Ads1299Driver::new(config.clone(), 0) {
                 Ok((driver, events)) => {
                     // Check if the driver is in error state after creation
                     if driver.get_status().await == DriverStatus::Error {
@@ -146,7 +146,7 @@ pub async fn create_driver(config: AdcConfig)
                         // Fall back to mock driver
                         let mut mock_config = config.clone();
                         mock_config.board_driver = DriverType::Mock;
-                        let (mock_driver, mock_events) = super::mock_driver::MockDriver::new(mock_config, 0)?;
+                        let (mock_driver, mock_events) = super::mock::driver::MockDriver::new(mock_config, 0)?;
                         Ok((Box::new(mock_driver), mock_events))
                     } else {
                         info!("ADS1299 driver created successfully");
@@ -160,14 +160,14 @@ pub async fn create_driver(config: AdcConfig)
                     // Fall back to mock driver
                     let mut mock_config = config.clone();
                     mock_config.board_driver = DriverType::Mock;
-                    let (mock_driver, mock_events) = super::mock_driver::MockDriver::new(mock_config, 0)?;
+                    let (mock_driver, mock_events) = super::mock::driver::MockDriver::new(mock_config, 0)?;
                     Ok((Box::new(mock_driver), mock_events))
                 }
             }
         },
         DriverType::Mock => {
             info!("Creating mock driver");
-            let (driver, events) = super::mock_driver::MockDriver::new(config, 0)?;
+            let (driver, events) = super::mock::driver::MockDriver::new(config, 0)?;
             Ok((Box::new(driver), events))
         }
     }

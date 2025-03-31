@@ -1,10 +1,10 @@
-pub mod board_driver;
+pub mod board_drivers;
 pub mod dsp;
 pub mod eeg_system;
 
 // Re-export the main types that users need
 pub use eeg_system::EegSystem;
-pub use board_driver::types::{AdcConfig, DriverType, DriverStatus};
+pub use board_drivers::types::{AdcConfig, DriverType, DriverStatus};
 use serde::{Serialize, Deserialize};
 
 /// Processed EEG data structure
@@ -17,6 +17,6 @@ pub struct ProcessedData {
 
 // Optionally expose lower-level access through a raw module
 pub mod raw {
-    pub use crate::board_driver::*;
+    pub use crate::board_drivers::*;
     pub use crate::dsp::*;
 }
