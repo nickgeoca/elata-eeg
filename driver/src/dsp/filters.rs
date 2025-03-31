@@ -168,6 +168,40 @@ impl SignalProcessor {
         processed = self.lowpass_filters[channel].process(processed);
         processed
     }
+    
+    /// Process a chunk of samples for a specific channel
+    ///
+    /// This is more efficient than processing samples individually when working with batches
+    ///
+    /// # Arguments
+    /// * `channel` - The channel index
+    /// * `samples` - The input samples to process
+    /// * `output` - The buffer to store processed samples (must be pre-allocated with same length as samples)
+    ///
+    /// # Returns
+    /// * `Result<(), &'static str>` - Ok if successful, Err with message if failed
+    pub fn process_chunk(&mut self, channel: usize, samples: &[f32], output: &mut [f32]) -> Result<(), &'static str> {
+        // Validate inputs
+        if channel >= self.num_channels {
+            return Err("Channel index out of bounds");
+        }
+        
+        if output.len() < samples.len() {
+            return Err("Output buffer too small");
+        }
+        
+        // Process each sample through the filter chain
+        for (i, &sample) in samples.iter().enumerate() {
+            let mut processed = sample;
+            processed = self.highpass_filters[channel].process(processed);
+            processed = self.notch_filters_50hz[channel].process(processed);
+            processed = self.notch_filters_60hz[channel].process(processed);
+            processed = self.lowpass_filters[channel].process(processed);
+            output[i] = processed;
+        }
+        
+        Ok(())
+    }
 
     pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32) {
         self.sample_rate = new_sample_rate;

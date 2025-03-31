@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex}; // Use Tokio Mutex
 use tokio::task::JoinHandle;
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 use crate::board_driver::{
     create_driver, AdcConfig, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
@@ -16,6 +17,7 @@ pub struct EegSystem {
     processing_task: Option<JoinHandle<()>>,
     tx: mpsc::Sender<ProcessedData>,
     event_rx: Option<mpsc::Receiver<DriverEvent>>,
+    cancel_token: CancellationToken,
 }
 
 impl EegSystem {
@@ -31,6 +33,7 @@ impl EegSystem {
             config.dsp_low_pass_cutoff_hz,
         )));
         let (tx, rx) = mpsc::channel(100);
+        let cancel_token = CancellationToken::new();
 
         let system = Self {
             driver,
@@ -38,6 +41,7 @@ impl EegSystem {
             processing_task: None,
             tx,
             event_rx: Some(event_rx),
+            cancel_token,
         };
 
         Ok((system, rx))
@@ -63,14 +67,21 @@ impl EegSystem {
             )));
         }
 
-        // Stop any existing processing task gracefully
-        if let Some(task) = self.processing_task.take() {
-            task.abort();
+        // Cancel any existing processing task gracefully
+        if self.processing_task.is_some() {
+            self.cancel_token.cancel();
+            // Create a new token for the next task
+            self.cancel_token = CancellationToken::new();
         }
 
         // Reset the signal processor
         {
-            let mut proc_guard = self.processor.lock().await;
+            let mut proc_guard = match self.processor.lock().await {
+                guard => guard,
+                // This would only happen if a thread panicked while holding the lock
+                // In a real system, we might want to recreate the processor entirely
+            };
+            
             proc_guard.reset(
                 config.sample_rate,
                 config.channels.len(),
@@ -89,64 +100,60 @@ impl EegSystem {
         let tx = self.tx.clone();
         // Capture the channel count from the configuration
         let channel_count = config.channels.len();
+        // Clone the cancellation token for the task
+        let cancel_token = self.cancel_token.clone();
 
         self.processing_task = Some(tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    DriverEvent::Data(data_batch) => {
-                        // Pre-allocate with known capacity
-                        let batch_size = data_batch.len();
-                        // Use the channel count from the configuration instead of the data
-                        // let channel_count = data_batch[0].voltage_samples.len();
-                        let samples_per_channel = data_batch[0].voltage_samples[0].len();
-                        
-                        // Pre-allocate for processed voltage samples
-                        let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
-                        for _ in 0..channel_count {
-                            processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
-                        }
-                        
-                        // Pre-allocate for raw samples
-                        let mut raw_samples: Vec<Vec<i32>> = Vec::with_capacity(channel_count);
-                        for _ in 0..channel_count {
-                            raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
-                        }
-                        
-                        // Single lock acquisition for the batch
-                        let mut proc_guard = processor.lock().await;
-                        
-                        // Process all samples in the batch
-                        for data in &data_batch {
-                            // Collect raw samples
-                            for (ch_idx, channel_raw_samples) in data.raw_samples.iter().enumerate() {
-                                raw_samples[ch_idx].extend(channel_raw_samples.iter().cloned());
+            // Create a select future that will complete when either:
+            // 1. We receive an event from the driver
+            // 2. The cancellation token is triggered
+            loop {
+                tokio::select! {
+                    // Check if cancellation was requested
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                    // Process events from the driver
+                    event_opt = event_rx.recv() => {
+                        match event_opt {
+                            Some(event) => {
+                                match event {
+                                    DriverEvent::Data(data_batch) => {
+                                        if let Err(e) = process_data_batch(
+                                            &data_batch,
+                                            channel_count,
+                                            &processor,
+                                            &tx
+                                        ).await {
+                                            eprintln!("Error processing data batch: {}", e);
+                                            // Send error event if possible
+                                            let _ = tx.send(ProcessedData {
+                                                timestamp: data_batch.last().map_or(0, |d| d.timestamp),
+                                                raw_samples: Vec::new(),
+                                                processed_voltage_samples: Vec::new(),
+                                                error: Some(format!("Processing error: {}", e)),
+                                            }).await;
+                                            
+                                            // Continue processing - don't break on errors
+                                        }
+                                    }
+                                    DriverEvent::StatusChange(status) => {
+                                        if status == DriverStatus::Stopped {
+                                            break;
+                                        }
+                                    }
+                                    DriverEvent::Error(err_msg) => {
+                                        eprintln!("Driver error: {}", err_msg);
+                                        // Optionally forward the error
+                                    }
+                                }
                             }
-                            
-                            // Process voltage samples
-                            for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
-                                processed_voltage_samples[ch_idx].extend(
-                                    channel_samples.iter().map(|&voltage|
-                                        proc_guard.process_sample(ch_idx, voltage)
-                                    )
-                                );
+                            None => {
+                                // Channel closed, exit the task
+                                break;
                             }
-                        }
-                        drop(proc_guard);
-
-                        if tx.send(ProcessedData {
-                            timestamp: data_batch.last().unwrap().timestamp,
-                            raw_samples,
-                            processed_voltage_samples,
-                        }).await.is_err() {
-                            break;
                         }
                     }
-                    DriverEvent::StatusChange(status) => {
-                        if status == DriverStatus::Stopped {
-                            break;
-                        }
-                    }
-                    _ => {}
                 }
             }
         }));
@@ -154,17 +161,119 @@ impl EegSystem {
         Ok(())
     }
 
-    /// Stop the data acquisition & abort the background task
+/// Helper function to process a batch of data
+///
+/// This is separated from the main task to improve readability
+async fn process_data_batch(
+    data_batch: &[AdcData],
+    channel_count: usize,
+    processor: &Arc<Mutex<SignalProcessor>>,
+    tx: &mpsc::Sender<ProcessedData>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if data_batch.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-allocate with known capacity
+    let batch_size = data_batch.len();
+    let samples_per_channel = data_batch[0].voltage_samples[0].len();
+    
+    // Pre-allocate for processed voltage samples
+    let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+    for _ in 0..channel_count {
+        processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+    }
+    
+    // Pre-allocate for raw samples
+    let mut raw_samples: Vec<Vec<i32>> = Vec::with_capacity(channel_count);
+    for _ in 0..channel_count {
+        raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+    }
+    
+    // Single lock acquisition for the batch
+    let mut proc_guard = match processor.lock().await {
+        guard => guard,
+        // This would only happen if a thread panicked while holding the lock
+    };
+    
+    // Process all samples in the batch
+    for data in data_batch {
+        // Collect raw samples
+        for (ch_idx, channel_raw_samples) in data.raw_samples.iter().enumerate() {
+            if ch_idx < raw_samples.len() {
+                raw_samples[ch_idx].extend(channel_raw_samples.iter().cloned());
+            }
+        }
+        
+        // Process voltage samples using the new process_chunk method
+        for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
+            if ch_idx < channel_count {
+                // Create a temporary buffer for the processed samples
+                let mut processed_buffer = vec![0.0; channel_samples.len()];
+                
+                // Process the entire chunk at once
+                if let Err(err) = proc_guard.process_chunk(ch_idx, channel_samples, &mut processed_buffer) {
+                    return Err(format!("Error processing chunk for channel {}: {}", ch_idx, err).into());
+                }
+                
+                // Add the processed samples to our result
+                processed_voltage_samples[ch_idx].extend(processed_buffer);
+            }
+        }
+    }
+    drop(proc_guard);
+
+    // Send the processed data
+    tx.send(ProcessedData {
+        timestamp: data_batch.last().unwrap().timestamp,
+        raw_samples,
+        processed_voltage_samples,
+        error: None,
+    }).await.map_err(|e| format!("Failed to send processed data: {}", e).into())
+}
+
+    /// Stop the data acquisition & gracefully cancel the background task
     pub async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         self.driver.stop_acquisition().await?;
-        if let Some(task) = self.processing_task.take() {
-            task.abort();
+        
+        // Signal the task to stop gracefully
+        if self.processing_task.is_some() {
+            self.cancel_token.cancel();
+            
+            // Wait for a short time for the task to complete
+            if let Some(task) = self.processing_task.take() {
+                match tokio::time::timeout(Duration::from_millis(500), task).await {
+                    Ok(_) => {
+                        // Task completed gracefully
+                    },
+                    Err(_) => {
+                        // Task didn't complete in time, force abort
+                        // This is a fallback mechanism
+                        eprintln!("Warning: Processing task didn't complete in time, forcing abort");
+                    }
+                }
+            }
+            
+            // Create a new token for future tasks
+            self.cancel_token = CancellationToken::new();
         }
+        
         Ok(())
     }
 
     /// Reconfigure the driver with new settings, resetting the processor
     pub async fn reconfigure(&mut self, config: AdcConfig) -> Result<(), Box<dyn Error>> {
+        // Stop the current driver and processing task
+        self.stop().await?;
+        
+        // Create a new driver with the updated configuration
+        let (new_driver, new_event_rx) = create_driver(config.clone()).await?;
+        
+        // Replace the driver and event_rx
+        self.driver = new_driver;
+        self.event_rx = Some(new_event_rx);
+        
+        // Initialize processing with the new configuration
         self.initialize_processing(config).await
     }
 

@@ -13,6 +13,19 @@ pub struct ProcessedData {
     pub timestamp: u64,
     pub raw_samples: Vec<Vec<i32>>,
     pub processed_voltage_samples: Vec<Vec<f32>>,
+    /// Optional error message if processing failed
+    pub error: Option<String>,
+}
+
+impl Default for ProcessedData {
+    fn default() -> Self {
+        Self {
+            timestamp: 0,
+            raw_samples: Vec::new(),
+            processed_voltage_samples: Vec::new(),
+            error: None,
+        }
+    }
 }
 
 // Optionally expose lower-level access through a raw module

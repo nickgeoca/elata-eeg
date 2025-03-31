@@ -331,6 +331,10 @@ impl Ads1299Driver {
             // Sample counter for the interrupt thread
             let mut sample_count = 0;
             
+            // Error tracking for detecting persistent issues
+            let mut consecutive_errors = 0;
+            const MAX_CONSECUTIVE_ERRORS: usize = 5; // Threshold for considering a persistent error
+            
             // Main interrupt handling loop
             while interrupt_running.load(Ordering::SeqCst) {
                 // Wait for the interrupt with a timeout
@@ -339,6 +343,9 @@ impl Ads1299Driver {
                         // DRDY pin went low, data is ready
                         match read_data_from_spi(&mut spi, num_channels) {
                             Ok(samples) => {
+                                // Reset error counter on successful read
+                                consecutive_errors = 0;
+                                
                                 // Send samples and current count through the channel
                                 if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
                                     error!("Failed to send samples to Tokio task: {}", e);
@@ -349,6 +356,15 @@ impl Ads1299Driver {
                             },
                             Err(e) => {
                                 error!("Error reading data in interrupt handler: {:?}", e);
+                                consecutive_errors += 1;
+                                
+                                // If we've had too many consecutive errors, signal a critical error
+                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                                    error!("Critical error: {} consecutive SPI failures", consecutive_errors);
+                                    // Send an error event through the data channel using a special marker
+                                    let _ = data_tx.blocking_send((Vec::new(), u64::MAX));
+                                    break; // Exit the interrupt loop on persistent errors
+                                }
                                 // Continue and try again on next interrupt
                             }
                         }
@@ -389,11 +405,27 @@ impl Ads1299Driver {
             };
             
             // Main acquisition loop
-            let mut sample_buffer: Vec<AdcData> = Vec::with_capacity(batch_size);
+            // Buffer to accumulate raw samples and timestamps before creating AdcData
+            // Each inner Vec will store batch_size samples for a single channel
+            let mut raw_sample_buffer: Vec<Vec<i32>> = vec![Vec::with_capacity(batch_size); num_channels];
+            let mut voltage_sample_buffer: Vec<Vec<f32>> = vec![Vec::with_capacity(batch_size); num_channels];
+            let mut timestamps: Vec<u64> = Vec::with_capacity(batch_size);
             
             debug!("Starting Tokio task to process data from interrupt handler");
             
             while let Some((raw_samples, sample_count)) = data_rx.recv().await {
+                // Check for error signal from interrupt thread
+                if sample_count == u64::MAX {
+                    error!("Received critical hardware error signal from interrupt thread");
+                    if let Err(e) = tx.send(DriverEvent::Error("Critical hardware error detected".to_string())).await {
+                        error!("Failed to send error event: {}", e);
+                    }
+                    // Update driver status
+                    let mut inner = inner_arc.lock().await;
+                    inner.status = DriverStatus::Error;
+                    break; // Exit the processing loop
+                }
+                
                 // Check if we should continue running
                 let should_continue = {
                     let inner = inner_arc.lock().await;
@@ -402,9 +434,17 @@ impl Ads1299Driver {
                 
                 if !should_continue {
                     // Send any remaining samples in the buffer before breaking
-                    if !sample_buffer.is_empty() {
-                        debug!("Sending final batch of {} samples before stopping", sample_buffer.len());
-                        if let Err(e) = tx.send(DriverEvent::Data(sample_buffer)).await {
+                    if !timestamps.is_empty() {
+                        debug!("Sending final batch of {} samples before stopping", timestamps.len());
+                        
+                        // Create AdcData with the accumulated samples
+                        let data = AdcData {
+                            timestamp: *timestamps.last().unwrap_or(&0),
+                            raw_samples: raw_sample_buffer.clone(),
+                            voltage_samples: voltage_sample_buffer.clone(),
+                        };
+                        
+                        if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
                             error!("Ads1299Driver event channel closed: {}", e);
                         }
                     }
@@ -414,35 +454,48 @@ impl Ads1299Driver {
                 // Calculate timestamp
                 let sample_interval = (1_000_000 / config.sample_rate) as u64;
                 let timestamp = base_timestamp + sample_count * sample_interval;
+                timestamps.push(timestamp);
                 
-                // Convert raw samples to voltage
-                let mut voltage_samples = Vec::with_capacity(num_channels);
+                // CAUTION: While inner_arc.lock().await is async, the processing within the lock is synchronous CPU work.
+                // For simple voltage conversion, this is fine, but more complex processing here could block the Tokio executor.
+                // Process raw samples and add to buffers (transposed structure)
                 for (i, &raw) in raw_samples.iter().enumerate() {
-                    let channel_idx = config.channels[i];
-                    let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
-                    voltage_samples.push(vec![voltage]);
+                    if i < num_channels {
+                        // Add raw sample to buffer
+                        raw_sample_buffer[i].push(raw);
+                        
+                        // Convert raw sample to voltage and add to buffer
+                        let channel_idx = config.channels[i];
+                        let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
+                        voltage_sample_buffer[i].push(voltage);
+                    }
                 }
                 
-                // Create AdcData
-                let data = AdcData {
-                    timestamp,
-                    raw_samples: raw_samples.iter().map(|&s| vec![s]).collect(),
-                    voltage_samples,
-                };
-                
-                // Add to buffer
-                sample_buffer.push(data);
-                
                 // Send the batch when we've collected batch_size samples
-                if sample_buffer.len() >= batch_size {
+                if timestamps.len() >= batch_size {
                     debug!("Sending batch of {} samples (sample_count: {})",
-                          sample_buffer.len(), sample_count);
-                    if let Err(e) = tx.send(DriverEvent::Data(sample_buffer)).await {
+                          timestamps.len(), sample_count);
+                    
+                    // Create AdcData with the accumulated samples
+                    let data = AdcData {
+                        timestamp: *timestamps.last().unwrap_or(&0),
+                        raw_samples: raw_sample_buffer.clone(),
+                        voltage_samples: voltage_sample_buffer.clone(),
+                    };
+                    
+                    if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
                         error!("Ads1299Driver event channel closed: {}", e);
                         break;
                     }
-                    // Create a new buffer for the next batch
-                    sample_buffer = Vec::with_capacity(batch_size);
+                    
+                    // Clear buffers for next batch
+                    for channel in &mut raw_sample_buffer {
+                        channel.clear();
+                    }
+                    for channel in &mut voltage_sample_buffer {
+                        channel.clear();
+                    }
+                    timestamps.clear();
                 }
             }
             
@@ -992,7 +1045,8 @@ impl super::types::AdcDriver for Ads1299Driver {
 }
 
 // Implement Send and Sync for Ads1299Driver
-// This is safe because we're using Arc<Mutex<>> for shared state
+// SAFETY: This unsafe impl of Send/Sync is justified due to the internal Arc<Mutex> and careful resource handling.
+// If the driver's internal structure changes, this safety guarantee must be re-evaluated.
 unsafe impl Send for Ads1299Driver {}
 unsafe impl Sync for Ads1299Driver {}
 
