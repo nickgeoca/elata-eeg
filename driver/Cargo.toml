@@ -18,7 +18,7 @@ path = "src/board_driver/ads1299_test.rs"
 
 [dependencies]
 tokio = { version = "1.28.0", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["sync"] }
+tokio-util = "0.7.14"
 rand = "0.8"
 libc = "0.2"
 nix = "0.26"

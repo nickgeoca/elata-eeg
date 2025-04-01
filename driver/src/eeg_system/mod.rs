@@ -6,10 +6,81 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use crate::board_driver::{
-    create_driver, AdcConfig, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
+    create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
 };
 use crate::dsp::filters::SignalProcessor;
 use super::ProcessedData;
+
+/// Helper function to process a batch of data
+///
+/// This is separated from the main task to improve readability
+async fn process_data_batch(
+    data_batch: &[AdcData],
+    channel_count: usize,
+    processor: &Arc<Mutex<SignalProcessor>>,
+    tx: &mpsc::Sender<ProcessedData>,
+) -> Result<(), Box<dyn Error + Send + Sync>> {
+    if data_batch.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-allocate with known capacity
+    let batch_size = data_batch.len();
+    let samples_per_channel = data_batch[0].voltage_samples[0].len();
+    
+    // Pre-allocate for processed voltage samples
+    let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+    for _ in 0..channel_count {
+        processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+    }
+    
+    // Pre-allocate for raw samples
+    let mut raw_samples: Vec<Vec<i32>> = Vec::with_capacity(channel_count);
+    for _ in 0..channel_count {
+        raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+    }
+    
+    // Single lock acquisition for the batch
+    let mut proc_guard = match processor.lock().await {
+        guard => guard,
+        // This would only happen if a thread panicked while holding the lock
+    };
+    
+    // Process all samples in the batch
+    for data in data_batch {
+        // Collect raw samples
+        for (ch_idx, channel_raw_samples) in data.raw_samples.iter().enumerate() {
+            if ch_idx < raw_samples.len() {
+                raw_samples[ch_idx].extend(channel_raw_samples.iter().cloned());
+            }
+        }
+        
+        // Process voltage samples using the new process_chunk method
+        for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
+            if ch_idx < channel_count {
+                // Create a temporary buffer for the processed samples
+                let mut processed_buffer = vec![0.0; channel_samples.len()];
+                
+                // Process the entire chunk at once
+                if let Err(err) = proc_guard.process_chunk(ch_idx, channel_samples, &mut processed_buffer) {
+                    return Err(format!("Error processing chunk for channel {}: {}", ch_idx, err).into());
+                }
+                
+                // Add the processed samples to our result
+                processed_voltage_samples[ch_idx].extend(processed_buffer);
+            }
+        }
+    }
+    drop(proc_guard);
+
+    // Send the processed data
+    tx.send(ProcessedData {
+        timestamp: data_batch.last().unwrap().timestamp,
+        raw_samples,
+        processed_voltage_samples,
+        error: None,
+    }).await.map_err(|e| format!("Failed to send processed data: {}", e).into())
+}
 
 pub struct EegSystem {
     driver: Box<dyn AdcDriver>,
@@ -161,76 +232,6 @@ impl EegSystem {
         Ok(())
     }
 
-/// Helper function to process a batch of data
-///
-/// This is separated from the main task to improve readability
-async fn process_data_batch(
-    data_batch: &[AdcData],
-    channel_count: usize,
-    processor: &Arc<Mutex<SignalProcessor>>,
-    tx: &mpsc::Sender<ProcessedData>,
-) -> Result<(), Box<dyn Error + Send + Sync>> {
-    if data_batch.is_empty() {
-        return Ok(());
-    }
-
-    // Pre-allocate with known capacity
-    let batch_size = data_batch.len();
-    let samples_per_channel = data_batch[0].voltage_samples[0].len();
-    
-    // Pre-allocate for processed voltage samples
-    let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
-    for _ in 0..channel_count {
-        processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
-    }
-    
-    // Pre-allocate for raw samples
-    let mut raw_samples: Vec<Vec<i32>> = Vec::with_capacity(channel_count);
-    for _ in 0..channel_count {
-        raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
-    }
-    
-    // Single lock acquisition for the batch
-    let mut proc_guard = match processor.lock().await {
-        guard => guard,
-        // This would only happen if a thread panicked while holding the lock
-    };
-    
-    // Process all samples in the batch
-    for data in data_batch {
-        // Collect raw samples
-        for (ch_idx, channel_raw_samples) in data.raw_samples.iter().enumerate() {
-            if ch_idx < raw_samples.len() {
-                raw_samples[ch_idx].extend(channel_raw_samples.iter().cloned());
-            }
-        }
-        
-        // Process voltage samples using the new process_chunk method
-        for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
-            if ch_idx < channel_count {
-                // Create a temporary buffer for the processed samples
-                let mut processed_buffer = vec![0.0; channel_samples.len()];
-                
-                // Process the entire chunk at once
-                if let Err(err) = proc_guard.process_chunk(ch_idx, channel_samples, &mut processed_buffer) {
-                    return Err(format!("Error processing chunk for channel {}: {}", ch_idx, err).into());
-                }
-                
-                // Add the processed samples to our result
-                processed_voltage_samples[ch_idx].extend(processed_buffer);
-            }
-        }
-    }
-    drop(proc_guard);
-
-    // Send the processed data
-    tx.send(ProcessedData {
-        timestamp: data_batch.last().unwrap().timestamp,
-        raw_samples,
-        processed_voltage_samples,
-        error: None,
-    }).await.map_err(|e| format!("Failed to send processed data: {}", e).into())
-}
 
     /// Stop the data acquisition & gracefully cancel the background task
     pub async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
