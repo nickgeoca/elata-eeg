@@ -60,7 +60,7 @@ The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the followin
 | Power Line | ADS1299 Pin (J4) | Raspberry Pi 5 Pin |
 |------------|------------------|-------------------|
 | DVDD 5V | Pin JP4.10 | Pin 2 |
-| DVDD 3V | Pin JP4.19 | Pin 1 |
+| DVDD 3V | Pin JP4.9 | Pin 1 |
 | Ground | Pin JP4.5 | Pin 9 |
 
 
