@@ -23,3 +23,4 @@ Cargo.lock
 .install_manifest.json
 
 .ipynb*
+__pycache__/*
