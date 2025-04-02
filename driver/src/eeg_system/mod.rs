@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::board_driver::{
+use crate::board_drivers::{
     create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
 };
 use crate::dsp::filters::SignalProcessor;

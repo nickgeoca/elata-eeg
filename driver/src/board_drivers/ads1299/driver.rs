@@ -8,7 +8,7 @@ use lazy_static::lazy_static;
 use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
 use rppal::gpio::{Gpio, InputPin, Trigger, Event};
 use std::thread;
-use super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
+use super::super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -1022,7 +1022,7 @@ fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverEr
 
 // Implement the AdcDriver trait
 #[async_trait]
-impl super::types::AdcDriver for Ads1299Driver {
+impl super::super::types::AdcDriver for Ads1299Driver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         self.shutdown().await
     }

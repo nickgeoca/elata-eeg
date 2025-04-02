@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use rand::Rng;
 use log::{debug, trace};
 use lazy_static::lazy_static;
-use super::types::{AdcConfig, AdcData, DriverError};
+use super::super::types::{AdcConfig, AdcData, DriverError};
 
 /// Helper function to get current timestamp in microseconds
 ///

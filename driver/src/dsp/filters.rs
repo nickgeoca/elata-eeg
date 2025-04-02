@@ -7,9 +7,9 @@ use std::error::Error;
 use std::thread::sleep;
 use std::time::{Duration, SystemTime};
 use tokio;
-use crate::board_driver::types::DriverError;
-use crate::board_driver::types::AdcDriver;
-use crate::board_driver::types::DriverStatus;
+use crate::board_drivers::types::DriverError;
+use crate::board_drivers::types::AdcDriver;
+use crate::board_drivers::types::DriverStatus;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 

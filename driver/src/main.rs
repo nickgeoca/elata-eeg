@@ -1,4 +1,4 @@
-mod board_driver;
+mod board_drivers;
 
 use tokio;
 use std::error::Error;

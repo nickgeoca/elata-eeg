@@ -5,7 +5,7 @@ use tokio::time::{sleep, Duration};
 use async_trait::async_trait;
 use log::{info, warn, debug, trace, error};
 use lazy_static::lazy_static;
-use super::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
+use super::super::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
 use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
 
 // Static hardware lock to simulate real hardware access constraints
@@ -370,7 +370,7 @@ impl MockDriver {
 
 // Implement the AdcDriver trait
 #[async_trait]
-impl super::types::AdcDriver for MockDriver {
+impl super::super::types::AdcDriver for MockDriver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         self.shutdown().await
     }
