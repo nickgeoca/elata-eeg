@@ -168,7 +168,7 @@ impl CsvRecorder {
         }
         
         let writer = self.writer.as_mut().unwrap();
-        let num_channels = data.processed_voltage_samples.len().min(4); // Limit to 4 channels
+        let num_channels = data.processed_voltage_samples.len();
         let samples_per_channel = data.processed_voltage_samples[0].len();
         
         // Calculate microseconds per sample based on sample rate
