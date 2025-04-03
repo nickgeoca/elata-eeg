@@ -1,4 +1,4 @@
-TL;DR: This..
+> This is not FDA approved. For research only.
 
 ## Simple Description
 This..
@@ -64,19 +64,12 @@ bash rebuild.sh
 ```
 
 ## TODO
-- Interent security check review
 - Production ready task items
-  1) Mock Driver Issue: Update the daemon's main.rs to use a real hardware driver instead of the mock driver. Currently, it's using DriverType::Mock on line 29, but the real hardware driver (DriverType::Ads1299) is not fully implemented yet.
-  2) Error Handling: Add more robust error handling for critical operations in the script, beyond just using set -e.
-  3) Health Checks: Add mechanisms to verify that services are running correctly after they're started.
-  4) Network Configuration: Add support for configuring network settings, especially if a static IP is needed.
-  5) Security Hardening: Consider additional security measures for a production system.
-  6) add screen rotate... wlr-randr --output HDMI-A-2 --transform 270
+- Health Checks: Add mechanisms to verify that services are running correctly after they're started.
+- Network Configuration: Add support for configuring network settings, especially if a static IP is needed.
+- Security Hardening: Consider additional security measures for a production system.
 - X11 (LDXE-pi) to Wayland (labwc) was rocky
-- After kiosk is solid, make sure all the files in install.sh (e.g. /home/elata/.config/labwc/autostart) mathc what we got working in the acutal files. 
-- Realtime hardware update? pros and cons
 - Firmware versioning in the filename to account for expirimenetal errors from firmware
-- We're losing 1 bit of precision using float32. 24bit ADC and float32 is 23bit
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
 - integrate erro handlign
 - need to enable local device discovery if you want to download recordings
@@ -84,26 +77,18 @@ bash rebuild.sh
 - Change board name. ads1299-elata-v0.1
 - UI, switch to mock mode?
 - Add normalization for the GUI and pass voltage range per channel
-- use this?? `use js_sys::Float32Array;`
 - Clean up driver object. may be better if we can use the board as the obj and pass the filtering into it or something
-- driver readme. double check jumpers and register settings.
 - Add to config.json? the fitler parameters?
 - - Then maybe add an HTTP route to download.
 - Add WS to stop EEG?
-- consider using canvas again
 - Handle voltage scaling. Should it be passed as normalized values -1 to 1 from the daemon?
 - Fix up the eeg graph. x axis. y axis. signal spacing, etc
 - Blink test doc
 - GUI switch to mock mode. Enable disable channels? no changes during recording
-- Better 50hz/60hz notch filtering? Change filter paramters
 - Add data exploration repo? seperate from this one?
 - discuss battery vs plugin. how much does 60hz affect sginal qaulity?
 - mock driver thru UI and have it run on computer in mock mode for web dev'ing it
-- Switch to DMA mode
-- Go thru google docs on notes i aws taking
-- data offline redundancy thing
 - test low esr capacitor on power supply
-- remove 5min recording thing in the daemon main
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).

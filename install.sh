@@ -3,6 +3,11 @@
 # Version information
 EEG_INSTALL_VERSION="1.0.0"
 
+# Enable SPI
+echo "Navigate to "Interface Options" -> "SPI" -> Enable"
+sudo raspi-config
+
+
 # Make scripts executable
 chmod +x rebuild.sh
 chmod +x start.sh
