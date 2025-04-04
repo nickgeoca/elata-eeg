@@ -65,11 +65,16 @@ bash rebuild.sh
 
 ## TODO
 ### TODO MVP
-@Kyle we need a run of this, end to end on a fresh Pi 5.
+@Kyle we need a run of this, end to end on a fresh Pi 5. Should we be paying people to try it?
+
 - Code the touch screen
 - 3-d printed case
 - BOM... (e.g. header to lead cables)
-- Install instructions
+- 60hz problem. It's way too strong, so either:
+  - Use a battery
+  - Possibly fix with a $0.30 capacitor accross 5v and gnd
+  - Use a [USB line filter](https://www.amazon.com/iFi-iSilencer-Eliminator-Suppressor-Adapter/dp/B084C24W8L?crid=2U7DZVT2POA2W&sprefix=audio%2Bpower%2Bsupply%2Bnoise%2Bfilter%2Busb%2B%2Caps%2C135&sr=8-4&th=1)
+- Install Instructions
   - Purchase BOM
   - Assemble prototype
   - Pi 5 Setup: WiFi, git clone, bash install.sh, etc
@@ -78,11 +83,12 @@ bash rebuild.sh
     2) Pull SD card. Set WiFi and SSH
     3) Touch screen? Will that work out of the box?
   - Configure Chrome/Firefox to detect local network
-- Expectations:
-  - Putting on the leads is tricky. There is goo and typically lab assistants do this part.
-  - Installing cables (SPI, power, etc) is tricky
-  - What can EEG do so far? After they click record, how do they know their sleep quality?
-  - Prototype grade- Hdmi cable in 3-d printed case, etc
+- Managing Expectations
+  - Putting on the leads is tricky. There is goo and typically lab staff put it on the subject
+  - One time install of the cables (SPI, power, etc) is tricky. Probably takes a weekend to get the EEG setup.
+  - Our data analysis is still limited. After you record with the EEG, how do you know your sleep quality?
+  - The EEG is prototype grade (Hdmi cable in 3-d printed case, battery hanging out of it, etc)
+  - 
 
 
 ### TODO Code
@@ -114,6 +120,8 @@ bash rebuild.sh
 - install script
   - Also some Pi's seem to use Wayland by default and others X11. They switched to wayland on Pi 5 last year.
   - Impact on Pi 5 Behavior (Revised): Yes, the script makes significant changes. Crucially, while the default Raspberry Pi OS (Bookworm) on a Pi 5 uses Wayland (with the Wayfire compositor) for its graphical session, this script overrides that default and forces the system to use X11. It does this by:
+- Should we add 60hz detection? Like your too close to a wall socket
+- Dry vs wet electrodes
 
 
 
