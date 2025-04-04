@@ -16,6 +16,7 @@ use crate::config::DaemonConfig;
 pub struct EegBatchData {
     pub channels: Vec<Vec<f32>>,  // Each inner Vec represents a channel's data for the batch
     pub timestamp: u64,           // Timestamp for the start of the batch
+    pub error: Option<String>,    // Optional error message from the driver
 }
 
 /// Structure to hold CSV recording state
@@ -252,35 +253,53 @@ pub async fn process_eeg_data(
             }
         }
         
-        // Create smaller batches to send more frequently to WebSocket clients
-        // Split the incoming data into chunks of batch_size samples
-        let batch_size = csv_recorder.lock().await.config.batch_size;
-        let num_channels = data.processed_voltage_samples.len();
-        let samples_per_channel = data.processed_voltage_samples[0].len();
-        
-        for chunk_start in (0..samples_per_channel).step_by(batch_size) {
-            let chunk_end = (chunk_start + batch_size).min(samples_per_channel);
+        // Check if there's an error in the data
+        if let Some(error_msg) = &data.error {
+            println!("Error from EEG system: {}", error_msg);
             
-            // More efficient chunking - use slices instead of cloning when possible
-            // If we need to send the data to multiple clients, we'll still need to clone
-            let chunk_timestamp = data.timestamp + (chunk_start as u64 * 4000); // Adjust timestamp for each chunk
-            
-            // Create EegBatchData for WebSocket clients (they don't need raw samples)
-            let mut chunk_channels = Vec::with_capacity(num_channels);
-            for channel in &data.processed_voltage_samples {
-                // More efficient: pre-allocate and use extend_from_slice
-                let mut channel_chunk = Vec::with_capacity(chunk_end - chunk_start);
-                channel_chunk.extend_from_slice(&channel[chunk_start..chunk_end]);
-                chunk_channels.push(channel_chunk);
-            }
-            
-            let eeg_batch_data = EegBatchData {
-                channels: chunk_channels,
-                timestamp: chunk_timestamp / 1000, // Convert to milliseconds
+            // Create an error batch to send to WebSocket clients
+            let error_batch = EegBatchData {
+                channels: Vec::new(),
+                timestamp: data.timestamp / 1000, // Convert to milliseconds
+                error: Some(error_msg.clone()),
             };
             
-            if let Err(e) = tx_to_web_socket.send(eeg_batch_data) {
-                println!("Warning: Failed to send data chunk to WebSocket clients: {}", e);
+            if let Err(e) = tx_to_web_socket.send(error_batch) {
+                println!("Warning: Failed to send error to WebSocket clients: {}", e);
+            }
+        } else if !data.processed_voltage_samples.is_empty() && !data.processed_voltage_samples[0].is_empty() {
+            // Only process data if there are actual samples
+            // Create smaller batches to send more frequently to WebSocket clients
+            // Split the incoming data into chunks of batch_size samples
+            let batch_size = csv_recorder.lock().await.config.batch_size;
+            let num_channels = data.processed_voltage_samples.len();
+            let samples_per_channel = data.processed_voltage_samples[0].len();
+            
+            for chunk_start in (0..samples_per_channel).step_by(batch_size) {
+                let chunk_end = (chunk_start + batch_size).min(samples_per_channel);
+                
+                // More efficient chunking - use slices instead of cloning when possible
+                // If we need to send the data to multiple clients, we'll still need to clone
+                let chunk_timestamp = data.timestamp + (chunk_start as u64 * 4000); // Adjust timestamp for each chunk
+                
+                // Create EegBatchData for WebSocket clients (they don't need raw samples)
+                let mut chunk_channels = Vec::with_capacity(num_channels);
+                for channel in &data.processed_voltage_samples {
+                    // More efficient: pre-allocate and use extend_from_slice
+                    let mut channel_chunk = Vec::with_capacity(chunk_end - chunk_start);
+                    channel_chunk.extend_from_slice(&channel[chunk_start..chunk_end]);
+                    chunk_channels.push(channel_chunk);
+                }
+                
+                let eeg_batch_data = EegBatchData {
+                    channels: chunk_channels,
+                    timestamp: chunk_timestamp / 1000, // Convert to milliseconds
+                    error: None,
+                };
+                
+                if let Err(e) = tx_to_web_socket.send(eeg_batch_data) {
+                    println!("Warning: Failed to send data chunk to WebSocket clients: {}", e);
+                }
             }
         }
         

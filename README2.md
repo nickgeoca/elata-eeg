@@ -92,6 +92,11 @@ bash rebuild.sh
 
 
 ### TODO Code
+Priorites
+- Remove printlns?
+- Fix readmes
+
+Lowest Priority
 - Production ready task items
 - Health Checks: Add mechanisms to verify that services are running correctly after they're started.
 - Network Configuration: Add support for configuring network settings, especially if a static IP is needed.
@@ -101,7 +106,6 @@ bash rebuild.sh
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
 - integrate erro handlign
 - need to enable local device discovery if you want to download recordings
-- Fix readmes
 - Change board name. ads1299-elata-v0.1
 - UI, switch to mock mode?
 - Add normalization for the GUI and pass voltage range per channel

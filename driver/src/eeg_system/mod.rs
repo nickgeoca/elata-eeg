@@ -212,10 +212,31 @@ impl EegSystem {
                                         if status == DriverStatus::Stopped {
                                             break;
                                         }
+                                        
+                                        // Forward status changes to the processed data stream
+                                        let _ = tx.send(ProcessedData {
+                                            timestamp: std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_micros() as u64,
+                                            raw_samples: Vec::new(),
+                                            processed_voltage_samples: Vec::new(),
+                                            error: Some(format!("Driver status changed: {:?}", status)),
+                                        }).await;
                                     }
                                     DriverEvent::Error(err_msg) => {
                                         eprintln!("Driver error: {}", err_msg);
-                                        // Optionally forward the error
+                                        
+                                        // Forward the error to the processed data stream
+                                        let _ = tx.send(ProcessedData {
+                                            timestamp: std::time::SystemTime::now()
+                                                .duration_since(std::time::UNIX_EPOCH)
+                                                .unwrap_or_default()
+                                                .as_micros() as u64,
+                                            raw_samples: Vec::new(),
+                                            processed_voltage_samples: Vec::new(),
+                                            error: Some(format!("Driver error: {}", err_msg)),
+                                        }).await;
                                     }
                                 }
                             }

@@ -17,6 +17,7 @@ import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE, WINDOW_DURATION } from '../uti
 interface EegDataHandlerProps {
   config: any;
   onDataUpdate: (dataReceived: boolean) => void;
+  onError?: (error: string) => void; // New callback for error handling
   dataRef: React.MutableRefObject<ScrollingBuffer[]>;
   windowSizeRef: React.MutableRefObject<number>;
   debugInfoRef: React.MutableRefObject<{
@@ -30,6 +31,7 @@ interface EegDataHandlerProps {
 export function useEegDataHandler({
   config,
   onDataUpdate,
+  onError,
   dataRef,
   windowSizeRef,
   debugInfoRef,
@@ -161,6 +163,30 @@ export function useEegDataHandler({
           
           // Update the latest timestamp reference for our rendering window
           latestTimestampRef.current = timestamp;
+          
+          // Check for error flag at byte 8
+          if (event.data.byteLength > 8) {
+            const errorFlag = dataView.getUint8(8);
+            
+            // If error flag is set (value 1), this is an error message
+            if (errorFlag === 1) {
+              // Extract error message from the rest of the buffer
+              const errorBytes = new Uint8Array(event.data.slice(9));
+              const errorMessage = new TextDecoder().decode(errorBytes);
+              
+              if (!isProduction) {
+                console.error('EEG driver error:', errorMessage);
+              }
+              
+              // Call the error handler if provided
+              if (onError) {
+                onError(errorMessage);
+              }
+              
+              // Don't process this as data
+              return;
+            }
+          }
           
           // Calculate how many samples per channel
           const channelCount = config?.channels?.length || 4;

@@ -24,19 +24,53 @@ pub struct CommandResponse {
 /// Creates a binary EEG packet according to the specified format:
 /// [timestamp (8 bytes)] [channel_samples...] for each channel in the data
 pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
+    // Check if this is an error packet
+    if let Some(error) = &eeg_batch_data.error {
+        // For error packets, we'll use a special format:
+        // - timestamp (8 bytes)
+        // - error flag (1 byte, value 1)
+        // - error message (UTF-8 encoded)
+        let mut buffer = Vec::with_capacity(9 + error.len());
+        
+        // Write timestamp (8 bytes) in little-endian format
+        buffer.extend_from_slice(&eeg_batch_data.timestamp.to_le_bytes());
+        
+        // Write error flag (1 byte)
+        buffer.push(1);
+        
+        // Write error message as UTF-8 bytes
+        buffer.extend_from_slice(error.as_bytes());
+        
+        return buffer;
+    }
+    
+    // For normal data packets:
     // Get timestamp in milliseconds
     let timestamp = eeg_batch_data.timestamp;
     
     // Use the actual number of channels from the data
     let num_channels = eeg_batch_data.channels.len();
+    
+    // Check if we have any channels with data
+    if num_channels == 0 {
+        // Return just a timestamp with no data
+        let mut buffer = Vec::with_capacity(9);
+        buffer.extend_from_slice(&timestamp.to_le_bytes());
+        buffer.push(0); // Not an error
+        return buffer;
+    }
+    
     let samples_per_channel = eeg_batch_data.channels[0].len();
     
-    // Calculate buffer size: 8 bytes for timestamp + 4 bytes per float per channel
-    let buffer_size = 8 + (num_channels * samples_per_channel * 4);
+    // Calculate buffer size: 8 bytes for timestamp + 1 byte for error flag + 4 bytes per float per channel
+    let buffer_size = 9 + (num_channels * samples_per_channel * 4);
     let mut buffer = Vec::with_capacity(buffer_size);
     
     // Write timestamp (8 bytes) in little-endian format
     buffer.extend_from_slice(&timestamp.to_le_bytes());
+    
+    // Write error flag (1 byte, value 0 for no error)
+    buffer.push(0);
     
     // Write each channel's samples
     // Use all available channels from the data

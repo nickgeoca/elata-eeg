@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/path/to/your/adc_daemon
+ExecStart=/usr/local/bin/eeg_daemon
 Restart=always
 RestartSec=5
-User=your_user
-WorkingDirectory=/path/to/working/directory
+User=elata
+WorkingDirectory=/home/elata/elata-eeg/daemon
 Environment="RUST_LOG=info"
 
 [Install]
