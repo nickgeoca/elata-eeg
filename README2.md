@@ -64,6 +64,28 @@ bash rebuild.sh
 ```
 
 ## TODO
+### TODO MVP
+@Kyle we need a run of this, end to end on a fresh Pi 5.
+- Code the touch screen
+- 3-d printed case
+- BOM... (e.g. header to lead cables)
+- Install instructions
+  - Purchase BOM
+  - Assemble prototype
+  - Pi 5 Setup: WiFi, git clone, bash install.sh, etc
+  - either need 
+    1) Keyboard to set WiFi password, etc
+    2) Pull SD card. Set WiFi and SSH
+    3) Touch screen? Will that work out of the box?
+  - Configure Chrome/Firefox to detect local network
+- Expectations:
+  - Putting on the leads is tricky. There is goo and typically lab assistants do this part.
+  - Installing cables (SPI, power, etc) is tricky
+  - What can EEG do so far? After they click record, how do they know their sleep quality?
+  - Prototype grade- Hdmi cable in 3-d printed case, etc
+
+
+### TODO Code
 - Production ready task items
 - Health Checks: Add mechanisms to verify that services are running correctly after they're started.
 - Network Configuration: Add support for configuring network settings, especially if a static IP is needed.
@@ -89,6 +111,11 @@ bash rebuild.sh
 - discuss battery vs plugin. how much does 60hz affect sginal qaulity?
 - mock driver thru UI and have it run on computer in mock mode for web dev'ing it
 - test low esr capacitor on power supply
+- install script
+  - Also some Pi's seem to use Wayland by default and others X11. They switched to wayland on Pi 5 last year.
+  - Impact on Pi 5 Behavior (Revised): Yes, the script makes significant changes. Crucially, while the default Raspberry Pi OS (Bookworm) on a Pi 5 uses Wayland (with the Wayfire compositor) for its graphical session, this script overrides that default and forces the system to use X11. It does this by:
+
+
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).
