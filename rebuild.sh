@@ -12,14 +12,7 @@ if [ "$FROM_INSTALL" != "from-install" ]; then
   ./stop.sh
 fi
 
-# Rebuild Rust driver
-echo "🔧 Rebuilding Rust driver..."
-cd driver
-cargo clean  # Ensures a fresh build
-cargo build --release
-cd ..
-echo "✅ Driver rebuild complete!"
-
+# Driver is built automatically as a dependency of the daemon
 # Rebuild Rust daemon
 echo "🔧 Rebuilding Rust daemon..."
 cd daemon

@@ -48,9 +48,10 @@ export default function EegMonitorWebGL() {
   // Update canvas dimensions based on container size
   useEffect(() => {
     const updateDimensions = () => {
-      if (containerRef.current) {
+      // Ensure config is loaded and container ref exists
+      if (containerRef.current && config) {
         const { width } = containerRef.current.getBoundingClientRect();
-        const channelCount = config?.channels?.length || 4;
+        const channelCount = config.channels?.length || 4; // Use loaded config
         const height = GRAPH_HEIGHT * channelCount;
         
         // Update canvas dimensions
@@ -58,7 +59,7 @@ export default function EegMonitorWebGL() {
         
         // Update window size for ScrollingBuffer based on screen width and sample rate
         const sampleRate = config?.sample_rate || 250;
-        const samplesNeeded = Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000));
+        const samplesNeeded = Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000)); // Use loaded config
         windowSizeRef.current = samplesNeeded;
         
         console.log(`Canvas dimensions updated: ${width}x${height}, samples needed: ${samplesNeeded}`);
@@ -72,8 +73,9 @@ export default function EegMonitorWebGL() {
     };
 
     // Initial update
-    updateDimensions();
-
+    if (config) { // Only run initial update if config is ready
+      updateDimensions();
+    }
     // Add resize listener
     window.addEventListener('resize', updateDimensions);
     

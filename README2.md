@@ -95,6 +95,7 @@ bash rebuild.sh
 Priorites
 - Remove printlns?
 - Fix readmes
+- MVP push. add /boot/firmware/config.txt line? dtparam=spi=on
 
 Lowest Priority
 - Production ready task items

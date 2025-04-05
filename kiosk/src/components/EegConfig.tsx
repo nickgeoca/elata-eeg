@@ -36,7 +36,10 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const ws = new WebSocket('ws://localhost:8080/config');
     
-    ws.onopen = () => setStatus('Connected');
+    ws.onopen = () => {
+      console.log('Config WebSocket: Connection opened');
+      setStatus('Connected');
+    };
     
     ws.onmessage = (event) => {
       try {
@@ -58,8 +61,14 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       }
     };
     
-    ws.onclose = () => setStatus('Disconnected');
-    ws.onerror = () => setStatus('Error');
+    ws.onclose = () => {
+      console.log('Config WebSocket: Connection closed');
+      setStatus('Disconnected');
+    };
+    ws.onerror = (event) => {
+      console.error('Config WebSocket: Error occurred:', event);
+      setStatus('Error');
+    };
     
     return () => ws.close();
   }, []);

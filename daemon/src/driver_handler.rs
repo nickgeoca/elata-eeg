@@ -303,7 +303,18 @@ pub async fn process_eeg_data(
             }
         }
         
-        count += data.processed_voltage_samples[0].len();
+        // Check if there are any samples before accessing
+        if !data.processed_voltage_samples.is_empty() {
+            // It's safer to check the first channel specifically, in case it's empty
+            if let Some(first_channel_samples) = data.processed_voltage_samples.get(0) {
+                 count += first_channel_samples.len();
+            } else {
+                // This case should ideally not happen if the outer vec is not empty, but good to handle
+                println!("Warning: processed_voltage_samples is not empty, but the first channel is missing samples.");
+            }
+        } else {
+             println!("Warning: Received data packet with empty processed_voltage_samples.");
+        }
         last_timestamp = Some(data.timestamp);
         
         if let Some(last_ts) = last_timestamp {
@@ -322,8 +333,18 @@ pub async fn process_eeg_data(
             let rate = 250.0 / elapsed.as_secs_f32();
             println!("Processing rate: {:.2} Hz", rate);
             println!("Total samples processed: {}", count);
-            println!("Sample data (first 5 values from first channel):");
-            println!("  1st Channel {:?}", &data.processed_voltage_samples[0]);
+            println!("Sample data (first 5 values from first channel, if available):");
+            // Check if the samples vector is not empty before accessing
+            if let Some(first_channel_samples) = data.processed_voltage_samples.get(0) {
+                // Also check if the first channel itself has samples
+                if !first_channel_samples.is_empty() {
+                    println!("  1st Channel (first 5): {:?}", first_channel_samples.iter().take(5).collect::<Vec<_>>());
+                } else {
+                    println!("  1st Channel: (empty)");
+                }
+            } else {
+                 println!("  (No channels available in this packet)");
+            }
             last_time = std::time::Instant::now();
         }
     }

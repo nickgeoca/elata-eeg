@@ -57,6 +57,7 @@ TL;DR: The ADS1299 board is configured for basic EEG acquisition using a unipola
 
 The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the following pinout:
 
+>> NOTE! J4 is reversed!
 | Power Line | ADS1299 Pin (J4) | Raspberry Pi 5 Pin |
 |------------|------------------|-------------------|
 | DVDD 5V | Pin JP4.10 | Pin 2 |

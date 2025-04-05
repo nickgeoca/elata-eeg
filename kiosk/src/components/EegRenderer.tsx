@@ -89,6 +89,10 @@ export const EegRenderer = React.memo(function EegRenderer({
                 }
               });
             }
+            // Also update the main REGL context's viewport
+            if (reglRef.current) {
+              reglRef.current.poll();
+            }
           }
           
           if (!isProduction) {

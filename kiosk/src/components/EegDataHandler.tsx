@@ -469,9 +469,12 @@ export function useEegDataHandler({
    * Set up WebSocket connection with stable lifecycle
    */
   useEffect(() => {
-    // Only connect once on initial mount
-    connectWebSocket();
+    // Connect only when config is available
+    if (config) {
+      connectWebSocket();
+    }
     
+    // Cleanup function remains the same, runs on unmount or when config/connectWebSocket changes
     return () => {
       // Clean up on component unmount - proper cleanup prevents memory leaks
       if (handleMessageRef.current) {
@@ -487,11 +490,18 @@ export function useEegDataHandler({
       }
       
       if (wsRef.current) {
-        wsRef.current.close();
+        // Ensure WebSocket is closed cleanly
+        try {
+          wsRef.current.onclose = null; // Prevent reconnect logic during manual close
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch (e) {
+          // Ignore errors during cleanup close
+        }
         wsRef.current = null;
       }
     };
-  }, []); // Empty dependency array ensures this only runs once on mount
+  }, [config, connectWebSocket]); // Depend on config and the memoized connect function
 
   // Get FPS directly from config with no fallback
   const fps = config?.fps || 0;
