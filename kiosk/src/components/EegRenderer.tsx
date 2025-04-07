@@ -74,9 +74,10 @@ export const EegRenderer = React.memo(function EegRenderer({
           
           // Update offscreen canvas dimensions to match
           if (offscreenCanvasRef.current) {
-            offscreenCanvasRef.current.width = width;
-            offscreenCanvasRef.current.height = height;
-            
+            const devicePixelRatio = window.devicePixelRatio || 1;
+            offscreenCanvasRef.current.width = width * devicePixelRatio;
+            offscreenCanvasRef.current.height = height * devicePixelRatio;
+
             // Reinitialize WebGL contexts when dimensions change
             if (offscreenReglRef.current) {
               offscreenReglRef.current.destroy();
@@ -86,6 +87,13 @@ export const EegRenderer = React.memo(function EegRenderer({
                   antialias: false,
                   depth: false,
                   preserveDrawingBuffer: true
+                },
+                // Set viewport dimensions to match the canvas size
+                viewport: {
+                  x: 0,
+                  y: 0,
+                  width: width * devicePixelRatio,
+                  height: height * devicePixelRatio
                 }
               });
             }
