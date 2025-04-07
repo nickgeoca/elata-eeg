@@ -64,15 +64,15 @@ export const EegRenderer = React.memo(function EegRenderer({
     
     const updateDimensions = () => {
       if (canvasRef.current) {
-        // Get CSS dimensions
+        // Get CSS pixel size of the visible canvas
         const rect = canvasRef.current.getBoundingClientRect();
         const cssWidth = rect.width;
         const cssHeight = rect.height;
         
-        // Get device pixel ratio
+        // Device pixel ratio (DPR), e.g., 2 on Retina screens
         const dpr = window.devicePixelRatio || 1;
         
-        // Calculate physical dimensions
+        // Calculate physical pixel dimensions for crisp rendering
         const physicalWidth = Math.round(cssWidth * dpr);
         const physicalHeight = Math.round(cssHeight * dpr);
 
@@ -84,7 +84,6 @@ export const EegRenderer = React.memo(function EegRenderer({
           
           // Update offscreen canvas dimensions to match
           if (offscreenCanvasRef.current) {
-            // Set canvas attributes to physical dimensions
             offscreenCanvasRef.current.width = physicalWidth;
             offscreenCanvasRef.current.height = physicalHeight;
             
@@ -103,6 +102,13 @@ export const EegRenderer = React.memo(function EegRenderer({
                   antialias: false,
                   depth: false,
                   preserveDrawingBuffer: true
+                },
+                // Set viewport dimensions to match the canvas size
+                viewport: {
+                  x: 0,
+                  y: 0,
+                  width: width * devicePixelRatio,
+                  height: height * devicePixelRatio
                 }
               });
             }
