@@ -46,7 +46,7 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  voltageScaleFactor = 13600
+  voltageScaleFactor = 0.01
 }: EegRendererProps) {
   const reglRef = useRef<any>(null);
   const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -64,18 +64,35 @@ export const EegRenderer = React.memo(function EegRenderer({
     
     const updateDimensions = () => {
       if (canvasRef.current) {
-        const { width, height } = canvasRef.current;
+        // Get CSS dimensions
+        const rect = canvasRef.current.getBoundingClientRect();
+        const cssWidth = rect.width;
+        const cssHeight = rect.height;
         
+        // Get device pixel ratio
+        const dpr = window.devicePixelRatio || 1;
+        
+        // Calculate physical dimensions
+        const physicalWidth = Math.round(cssWidth * dpr);
+        const physicalHeight = Math.round(cssHeight * dpr);
+
         // Only update if dimensions have changed
-        if (width !== canvasDimensionsRef.current.width ||
-            height !== canvasDimensionsRef.current.height) {
+        if (physicalWidth !== canvasDimensionsRef.current.width ||
+            physicalHeight !== canvasDimensionsRef.current.height) {
           
-          canvasDimensionsRef.current = { width, height };
+          canvasDimensionsRef.current = { width: physicalWidth, height: physicalHeight };
           
           // Update offscreen canvas dimensions to match
           if (offscreenCanvasRef.current) {
-            offscreenCanvasRef.current.width = width;
-            offscreenCanvasRef.current.height = height;
+            // Set canvas attributes to physical dimensions
+            offscreenCanvasRef.current.width = physicalWidth;
+            offscreenCanvasRef.current.height = physicalHeight;
+            
+            // Ensure visible canvas also has correct attributes and style
+            canvasRef.current.width = physicalWidth;
+            canvasRef.current.height = physicalHeight;
+            canvasRef.current.style.width = `${cssWidth}px`;
+            canvasRef.current.style.height = `${cssHeight}px`;
             
             // Reinitialize WebGL contexts when dimensions change
             if (offscreenReglRef.current) {
@@ -96,7 +113,7 @@ export const EegRenderer = React.memo(function EegRenderer({
           }
           
           if (!isProduction) {
-            console.log(`Canvas dimensions changed: ${width}x${height}, updated offscreen canvas`);
+            console.log(`Canvas dimensions changed: CSS=${cssWidth}x${cssHeight}, Physical=${physicalWidth}x${physicalHeight} (DPR=${dpr}), updated canvases`);
           }
         }
       }
@@ -305,8 +322,8 @@ export const EegRenderer = React.memo(function EegRenderer({
         VOLTAGE_TICKS.forEach(voltage => {
           // Normalize voltage to [-1, 1] range within channel space
           // Scale based on channel count to prevent overlap with many channels
-          const baseScaleFactor = Math.min(0.1, 0.3 / channelCount);
-          const scaleFactor = baseScaleFactor * voltageScaleFactor;
+          // Consolidated scaling: Base scale allocates space per channel, voltageScaleFactor adjusts amplitude.
+          const scaleFactor = (1 / (channelCount + 1)) * voltageScaleFactor;
           const normalizedVoltage = (voltage / 3) * scaleFactor;
           const y = chOffset + normalizedVoltage;
           
@@ -360,6 +377,29 @@ export const EegRenderer = React.memo(function EegRenderer({
 
     // Render function with time-based scrolling and double buffering
     const render = () => {
+      // --- Initialization Check ---
+      // Ensure data buffers exist and timestamp is a valid positive number
+      const isDataReady = dataRef.current &&
+                          dataRef.current.length > 0 &&
+                          dataRef.current[0] && // Check if at least the first buffer is initialized
+                          typeof latestTimestampRef.current === 'number' &&
+                          latestTimestampRef.current > 0;
+      
+      if (!isDataReady) {
+        // Data not ready, skip this frame
+        if (!isProduction) {
+            // Log detailed status only once per second to avoid flooding console
+            const nowLog = Date.now();
+            // Use a temporary window property for throttling state
+            if (!(window as any)._eegRendererLastLog || nowLog - (window as any)._eegRendererLastLog > 1000) {
+                console.log(`EEG Renderer: Data not ready, skipping frame. Status: dataRef.current=${!!dataRef.current}, length=${dataRef.current?.length}, [0]=${!!dataRef.current?.[0]}, timestamp=${latestTimestampRef.current}`);
+                (window as any)._eegRendererLastLog = nowLog;
+            }
+        }
+        return; // Skip rendering this frame
+      }
+      // --- End Initialization Check ---
+
       // Get current time for logging and other operations
       const now = Date.now();
       
@@ -510,7 +550,8 @@ export const EegRenderer = React.memo(function EegRenderer({
             yOffset: yOffset,
             // Max channel height equation: 100 / (n_channels + 1) (% of total height)
             // Convert percentage to WebGL scale factor and apply user voltage scaling
-            yScale: (100 / (channelCount + 1) / 50) * voltageScaleFactor
+            // Consolidated scaling: Base scale allocates space per channel, voltageScaleFactor adjusts amplitude.
+            yScale: (1 / (channelCount + 1)) * voltageScaleFactor
           });
           
           // Log rendering status in development mode more frequently
