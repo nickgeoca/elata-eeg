@@ -72,3 +72,10 @@ t-SNE plot of residualized PSD features
 
 
 > This tool helps explore EEG data patterns—but it is not a substitute for professional medical advice.
+
+
+### 2-D Data Transform Tests
+1) EEG Data -> 30sec segmentation -> Power Spectrum Density -> Residualize Confounds -> UMAP
+  - seems to work
+2) EEG Data -> 30sec segmentation -> Wave2Vec -> Residualize Confounds
+  - Doesn't do as well (t-sne looks like noise)
