@@ -118,14 +118,17 @@ impl CsvRecorder {
         // Write header row with both voltage and raw samples
         let mut header = vec!["timestamp".to_string()];
         
-        // Add voltage channel headers
-        for i in 1..=4 {
-            header.push(format!("ch{}_voltage", i));
+        // Get the actual number of channels from the ADC configuration
+        let channel_count = self.current_adc_config.channels.len();
+        
+        // Add voltage channel headers using the actual channel indices
+        for &channel_idx in &self.current_adc_config.channels {
+            header.push(format!("ch{}_voltage", channel_idx));
         }
         
-        // Add raw channel headers
-        for i in 1..=4 {
-            header.push(format!("ch{}_raw_sample", i));
+        // Add raw channel headers using the actual channel indices
+        for &channel_idx in &self.current_adc_config.channels {
+            header.push(format!("ch{}_raw_sample", channel_idx));
         }
         
         writer.write_record(&header)?;
@@ -183,24 +186,30 @@ impl CsvRecorder {
             let mut record = Vec::with_capacity(1 + num_channels * 2); // timestamp + voltage channels + raw channels
             record.push(sample_timestamp.to_string());
             
-            // Add voltage values
-            for ch in 0..num_channels {
-                record.push(data.processed_voltage_samples[ch][i].to_string());
+            // Map the data to the correct channel indices
+            // The data comes in as an array where the index is the position in the array
+            // But we need to map it to the specific channel indices in the configuration
+            
+            // Add voltage values for each configured channel
+            for (idx, &channel_idx) in self.current_adc_config.channels.iter().enumerate() {
+                if idx < num_channels {
+                    // We have data for this channel
+                    record.push(data.processed_voltage_samples[idx][i].to_string());
+                } else {
+                    // No data for this channel, pad with zero
+                    record.push("0.0".to_string());
+                }
             }
             
-            // Pad with zeros if we have fewer than 4 voltage channels
-            for _ in num_channels..4 {
-                record.push("0.0".to_string());
-            }
-            
-            // Add raw values
-            for ch in 0..num_channels {
-                record.push(data.raw_samples[ch][i].to_string());
-            }
-            
-            // Pad with zeros if we have fewer than 4 raw channels
-            for _ in num_channels..4 {
-                record.push("0".to_string());
+            // Add raw values for each configured channel
+            for (idx, &channel_idx) in self.current_adc_config.channels.iter().enumerate() {
+                if idx < num_channels {
+                    // We have data for this channel
+                    record.push(data.raw_samples[idx][i].to_string());
+                } else {
+                    // No data for this channel, pad with zero
+                    record.push("0".to_string());
+                }
             }
             
             writer.write_record(&record)?;

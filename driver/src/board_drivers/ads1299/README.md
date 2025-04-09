@@ -46,6 +46,8 @@ TL;DR: The ADS1299 board is configured for basic EEG acquisition using a unipola
 2) JP8 - 2/3
 3) JP23 - 2/3  (TODO, is CLKSEL=1 necessary?)
 4) JP25 - Open
+4) JP4 - Open (connects to VCC 5V)
+4) JP24 - Open (connects to VCC 3.3V)
 
 ### Voltage Values
  - avdd, avdd1 = 5v
@@ -57,12 +59,12 @@ TL;DR: The ADS1299 board is configured for basic EEG acquisition using a unipola
 
 The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the following pinout:
 
->> NOTE! J4 is reversed! Pin 1 is the upper right, Pin 2 is the upper left
-| Power Line | ADS1299 Pin (J4) | Raspberry Pi 5 Pin |
+
+| Power Line | ADS1299 Pin | Raspberry Pi 5 Pin |
 |------------|------------------|-------------------|
-| DVDD 5V | Pin JP4.10 | Pin 2 |
-| DVDD 3V | Pin JP4.9 | Pin 1 |
-| Ground | Pin JP4.5 | Pin 9 |
+| DVDD 5V | JP4, pin next to "JP4" text | Pin 2 |
+| DVDD 3V | JP24, middle pin  | Pin 1 |
+| Ground | JP5, pin next to arrow (ground) symbol | Pin 9 |
 
 
 | SPI Signal | ADS1299 Pin (J3) | Raspberry Pi 5 Pin |

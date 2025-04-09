@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, createContext, useContext } from 'react';
+import { useEffect, useState, createContext, useContext, useRef, useCallback } from 'react';
 
 // Define the EEG configuration interface
 export interface EegConfig {
@@ -31,47 +31,106 @@ export const useEegConfig = () => useContext(EegConfigContext);
 // Provider component
 export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<EegConfig | null>(null);
-  const [status, setStatus] = useState('Connecting...');
+  const [status, setStatus] = useState('Initializing...'); // Start as Initializing
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef<number>(0);
+  const isProduction = process.env.NODE_ENV === 'production';
 
-  useEffect(() => {
+  const connectWebSocket = useCallback(() => {
+    // Clear any existing reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    // Close existing connection if any
+    if (wsRef.current) {
+      try {
+        // Remove listeners before closing to prevent triggering reconnect on manual close
+        wsRef.current.onopen = null;
+        wsRef.current.onmessage = null;
+        wsRef.current.onerror = null;
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      } catch (e) { /* Ignore */ }
+      wsRef.current = null;
+    }
+
+    setStatus('Connecting...');
     const ws = new WebSocket('ws://localhost:8080/config');
-    
+    wsRef.current = ws;
+
     ws.onopen = () => {
-      console.log('Config WebSocket: Connection opened');
+      if (!isProduction) console.log('Config WebSocket: Connection opened');
       setStatus('Connected');
+      reconnectAttemptsRef.current = 0; // Reset attempts on success
     };
-    
+
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
-        // Calculate FPS client-side based on sample rate and batch size
-        const FPS = 60.0;
-        
-        // Add the calculated FPS to the config
-        const configWithFps = {
-          ...data,
-          fps: FPS
-        };
-        
+        const FPS = 60.0; // Keep client-side FPS calculation for now
+        const configWithFps = { ...data, fps: FPS };
         setConfig(configWithFps);
-        console.log('Received EEG configuration:', configWithFps);
+        if (!isProduction) console.log('Received EEG configuration:', configWithFps);
+        // Consider closing the socket here if config is only needed once?
+        // ws.close(); // Optional: close after receiving config
       } catch (error) {
         console.error('Error parsing config data:', error);
+        setStatus('Error parsing data');
       }
     };
-    
-    ws.onclose = () => {
-      console.log('Config WebSocket: Connection closed');
-      setStatus('Disconnected');
+
+    ws.onclose = (event) => {
+      if (!isProduction) console.log(`Config WebSocket: Connection closed (Code: ${event.code}, Reason: ${event.reason})`);
+      // Only attempt reconnect if the closure was unexpected
+      if (wsRef.current === ws) { // Check if this is still the active WebSocket instance
+          setStatus('Disconnected');
+          wsRef.current = null; // Clear the ref
+
+          // Exponential backoff reconnection logic
+          const maxReconnectDelay = 5000; // 5 seconds max
+          const baseDelay = 500; // 0.5 seconds base
+          const reconnectDelay = Math.min(
+              maxReconnectDelay,
+              baseDelay * Math.pow(1.5, reconnectAttemptsRef.current)
+          );
+
+          reconnectAttemptsRef.current++;
+          if (!isProduction) console.log(`Config WebSocket: Attempting reconnect in ${reconnectDelay}ms (Attempt ${reconnectAttemptsRef.current})`);
+
+          reconnectTimeoutRef.current = setTimeout(connectWebSocket, reconnectDelay);
+      }
     };
+
     ws.onerror = (event) => {
       console.error('Config WebSocket: Error occurred:', event);
       setStatus('Error');
+      // The onclose event will usually fire after an error, triggering reconnect logic there.
     };
-    
-    return () => ws.close();
-  }, []);
+
+  }, [isProduction]); // useCallback dependencies
+
+  useEffect(() => {
+    connectWebSocket(); // Initial connection attempt
+
+    // Cleanup function
+    return () => {
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current) {
+        try {
+          // Prevent reconnect logic during cleanup
+          wsRef.current.onclose = null;
+          wsRef.current.onerror = null;
+          wsRef.current.close();
+        } catch (e) { /* Ignore */ }
+        wsRef.current = null;
+      }
+    };
+  }, [connectWebSocket]); // useEffect depends on the stable connectWebSocket callback
 
   return (
     <EegConfigContext.Provider value={{ config, status }}>
