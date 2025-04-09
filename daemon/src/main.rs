@@ -8,6 +8,9 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logger - Reads RUST_LOG environment variable
+    env_logger::init();
+
     // Load daemon configuration
     let daemon_config = config::load_config();
     println!("Daemon configuration:");
@@ -32,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = AdcConfig {
         sample_rate: 250,
         // channels: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
-        channels: vec![0],
+        channels: vec![0, 1],
         // channels: vec![0, 1, 2, 3, 4, 5, 6, 7],
         gain: 24.0,
         board_driver: daemon_config.driver_type,
@@ -66,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("- ws://localhost:8080/command (Recording control)");
 
     // Spawn WebSocket server
-    let server_handle = tokio::spawn(warp::serve(ws_routes).run(([127, 0, 0, 1], 8080)));
+    let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
     // Process EEG data
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(

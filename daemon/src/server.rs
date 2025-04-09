@@ -127,7 +127,7 @@ pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatc
 
 /// Handle WebSocket connection for configuration data
 pub async fn handle_config_websocket(ws: WebSocket, config: AdcConfig) {
-    let (mut tx, _) = ws.split();
+    let (mut tx, mut rx) = ws.split(); // Keep both sender (tx) and receiver (rx)
     
     println!("Configuration WebSocket client connected");
     
@@ -148,9 +148,28 @@ pub async fn handle_config_websocket(ws: WebSocket, config: AdcConfig) {
         println!("Error serializing configuration");
     }
     
-    // Keep the connection open but don't send any more data
-    // The client can disconnect when it's done
-}
+    // Keep the connection alive by processing the receive stream until the client closes it.
+    // This prevents the handler function from exiting immediately after sending the config.
+    while let Some(result) = rx.next().await {
+        match result {
+            Ok(msg) => {
+                // Optional: Log if client sends unexpected messages
+                if !msg.is_close() {
+                    println!("Config WebSocket: Received unexpected message: {:?}", msg);
+                } else {
+                    println!("Config WebSocket: Received close frame");
+                    break; // Exit loop on close frame
+                }
+            }
+            Err(e) => {
+                println!("Config WebSocket: Error receiving message: {}", e);
+                break; // Exit loop on error
+            }
+        }
+    }
+  
+    println!("Config WebSocket: Connection handler finished.");
+  }
 
 /// Handle WebSocket connection for recording control commands
 pub async fn handle_command_websocket(ws: WebSocket, recorder: Arc<Mutex<CsvRecorder>>) {

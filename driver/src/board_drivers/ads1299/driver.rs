@@ -934,7 +934,10 @@ fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {
 /// Convert signed raw ADC value to voltage using VREF and gain
 /// Formula: voltage = (raw * (VREF / Gain)) / 2^23
 fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
-    ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32
+    let voltage = ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32;
+    // Add detailed logging (using debug! instead of trace!)
+    debug!("ch_raw_to_voltage: raw={}, vref={}, gain={}, calculated_voltage={}", raw, vref, gain, voltage);
+    voltage
 }
 
 // Helper function to read data from SPI in continuous mode (RDATAC)
@@ -982,11 +985,14 @@ fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, Dr
         let mid = read_buffer[start_idx + 1];
         let lsb = read_buffer[start_idx + 2];
         
+        // Log raw bytes BEFORE conversion
+        debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}]", ch, msb, mid, lsb);
+        
         // Convert to i32 using the ch_sample_to_raw function
         let value = ch_sample_to_raw(msb, mid, lsb);
         
-        debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}] = {}",
-               ch, msb, mid, lsb, value);
+        // Log converted value
+        debug!("Channel {}: converted raw value = {}", ch, value);
         
         samples.push(value);
     }

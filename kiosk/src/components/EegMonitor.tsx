@@ -17,14 +17,17 @@ export default function EegMonitorWebGL() {
   const dataRef = useRef<ScrollingBuffer[]>([]);
   const [dataReceived, setDataReceived] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
-  const latestTimestampRef = useRef<number>(Date.now());
-  const [canvasDimensions, setCanvasDimensions] = useState({ width: 800, height: 480 });
+  // Ref to hold the last update timestamp for each channel's data chunk
+  const channelTimestampRef = useRef<number[]>([]);
+  // Ref to hold the single latest timestamp of any received data packet
+  const latestTimestampRef = useRef<number>(performance.now());
+  // Removed canvasDimensions state, EegRenderer handles this
   const [showSettings, setShowSettings] = useState(false);
   
   // Get configuration from context
   const { config, status: configStatus } = useEegConfig();
 
-  // Debug info reference
+  // Debug info reference (ensure it's defined)
   const debugInfoRef = useRef<{
     lastPacketTime: number;
     packetsReceived: number;
@@ -46,67 +49,64 @@ export default function EegMonitorWebGL() {
   } = useCommandWebSocket();
 
   // Update canvas dimensions based on container size
+  // Effect to update the windowSizeRef based on config and container width
   useEffect(() => {
-    const updateDimensions = () => {
-      // Ensure config is loaded and container ref exists
-      if (containerRef.current && config) {
+    // Function to calculate and update windowSizeRef
+    const updateWindowSize = () => {
+      if (containerRef.current && config?.sample_rate) {
         const { width } = containerRef.current.getBoundingClientRect();
-        const channelCount = config.channels?.length || 4; // Use loaded config
-        const height = GRAPH_HEIGHT * channelCount;
-        
-        // Update canvas dimensions
-        setCanvasDimensions({ width, height });
-        
-        // Update window size for ScrollingBuffer based on screen width and sample rate
-        const sampleRate = config?.sample_rate || 250;
-        const samplesNeeded = Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000)); // Use loaded config
+        const sampleRate = config.sample_rate;
+        // Calculate samples needed based on container width, sample rate, and window duration
+        const samplesNeeded = Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000));
         windowSizeRef.current = samplesNeeded;
-        
-        console.log(`Canvas dimensions updated: ${width}x${height}, samples needed: ${samplesNeeded}`);
-        
-        // If canvas already exists, update its dimensions
-        if (canvasRef.current) {
-          canvasRef.current.width = width;
-          canvasRef.current.height = height;
-        }
+        console.log(`Window size ref updated: ${samplesNeeded} samples (based on width ${width}, rate ${sampleRate})`);
       }
     };
-
-    // Initial update
-    if (config) { // Only run initial update if config is ready
-      updateDimensions();
-    }
-    // Add resize listener
-    window.addEventListener('resize', updateDimensions);
     
-    // Clean up
-    return () => {
-      window.removeEventListener('resize', updateDimensions);
-    };
-  }, [config]);
+    // Update initially when config is available
+    updateWindowSize();
+    
+    // Optional: Add resize listener if window size should adapt dynamically to container resize
+    // Note: EegRenderer already uses ResizeObserver, so this might be redundant
+    // If needed, consider using the ResizeObserver from EegRenderer or adding one here.
+    // For now, we only update based on config load.
+  }, [config?.sample_rate]); // Depend only on sample rate for window size calculation
 
-  // Handle data updates
-  const handleDataUpdate = (received: boolean) => {
+  // Handle data updates (memoized with useCallback)
+  const handleDataUpdate = useCallback((received: boolean) => {
     setDataReceived(received);
-  };
+  }, [setDataReceived]); // setDataReceived is stable
 
-  // Handle driver errors
-  const handleDriverError = (error: string) => {
+  // Handle driver errors (memoized with useCallback)
+  const handleDriverError = useCallback((error: string) => {
     console.error("Driver error:", error);
     setDriverError(error);
     // Auto-clear error after 10 seconds
-    setTimeout(() => setDriverError(null), 10000);
-  };
+    const timer = setTimeout(() => setDriverError(null), 10000);
+    // Optional: Cleanup timeout if component unmounts or error changes before timeout fires
+    // return () => clearTimeout(timer); // Note: useCallback doesn't directly support cleanup return like useEffect
+  }, [setDriverError]); // setDriverError is stable
+
+  // Effect to initialize/resize channelTimestampRef based on channel count
+  useEffect(() => {
+    const numChannels = config?.channels?.length || 0;
+    if (numChannels > 0 && channelTimestampRef.current.length !== numChannels) {
+      // Initialize or resize the array, filling with the current time
+      channelTimestampRef.current = Array(numChannels).fill(performance.now());
+      console.log(`Initialized/Resized channelTimestampRef for ${numChannels} channels.`);
+    }
+  }, [config?.channels?.length]); // Depend on the number of channels
 
   // Get data handler status and FPS
   const { status, fps } = useEegDataHandler({
     config,
     onDataUpdate: handleDataUpdate,
     onError: handleDriverError,
-    dataRef,
-    windowSizeRef,
-    debugInfoRef,
-    latestTimestampRef
+    linesRef: dataRef, // Pass dataRef as linesRef (assuming dataRef holds the WebglStep instances)
+    lastDataChunkTimeRef: channelTimestampRef, // Pass the array ref for per-channel times
+    latestTimestampRef: latestTimestampRef,     // Pass the single ref for the overall latest time
+    // debugInfoRef is not needed by useEegDataHandler
+    // latestTimestampRef was renamed to channelTimestampRef and is passed as lastDataChunkTimeRef
   });
   
   // Use the FPS from config with no fallback
@@ -221,17 +221,19 @@ export default function EegMonitorWebGL() {
               <div className="relative h-full" ref={containerRef}>
                 {/* Channel labels */}
                 <div className="absolute -left-8 h-full flex flex-col justify-between">
-                  {Array.from({ length: config?.channels?.length || 4 }, (_, i) => i + 1).map(ch => (
-                    <div key={ch} className="text-gray-400 font-medium">Ch{ch}</div>
-                  ))}
+                  {config?.channels && config.channels.length > 0 ? (
+                    config.channels.map((chIdx) => (
+                      <div key={chIdx} className="text-gray-400 font-medium">Ch{chIdx}</div>
+                    ))
+                  ) : (
+                    <div className="text-gray-400 font-medium">No channel info</div>
+                  )}
                 </div>
                 
                 {/* WebGL Canvas - Now using dynamic dimensions and full height */}
                 <canvas
-                  ref={canvasRef}
-                  width={canvasDimensions.width}
-                  height={canvasDimensions.height}
-                  className="w-full h-full border border-gray-700 rounded-lg"
+                  ref={canvasRef} // EegRenderer will set width/height attributes
+                  className="w-full h-full border border-gray-700 rounded-lg" // Style remains
                 />
                 
                 {/* WebGL Renderer (doesn't render anything directly, handles WebGL setup) */}
@@ -239,8 +241,9 @@ export default function EegMonitorWebGL() {
                   canvasRef={canvasRef}
                   dataRef={dataRef}
                   config={config}
-                  latestTimestampRef={latestTimestampRef}
-                  debugInfoRef={debugInfoRef}
+                  latestTimestampRef={latestTimestampRef} // Pass the single timestamp ref
+                  debugInfoRef={debugInfoRef} // Pass debugInfoRef
+                  containerRef={containerRef}
                 />
               </div>
             </div>

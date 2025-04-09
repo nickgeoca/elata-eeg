@@ -12,6 +12,7 @@ serde_json = "1.0"
 futures-util = "0.3"
 csv = "1.2"
 chrono = "0.4"
+env_logger = "0.10" # Added logger
 
 [dev-dependencies]
 tempfile = "3.8"
