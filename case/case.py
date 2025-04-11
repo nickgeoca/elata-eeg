@@ -19,6 +19,7 @@ class Pi5:
     # Calculate offset_y directly
     mount_hole_offset_y = (depth - mount_hole_spacing_y) / 2 # 3.5
     bounding_box = (width, depth, height)
+    underside_clearance = 2.0 # Estimated clearance needed below PCB bottom for components/pins
 
 class LCD:
     board_width = 121.11
@@ -30,11 +31,13 @@ class LCD:
     mount_hole_diameter = 2.5 # Diameter for M2.5 screw clearance
 
     # Inner hole offsets (relative to bottom-left corner of board)
-    inner_x_offset = 15.03
-    inner_y_offset_bottom = 16.50
-    inner_y_offset_top = 77.93 - 2.43 # 75.50
+    inner_x_offset = 43.11 # Offset of the left-most inner holes from the left board edge.
+                           # Derived by ensuring the right-most holes are 20mm from the right edge:
+                           # board_width (121.11) - right_edge_distance (20.0) - inner_x_spacing (58.0) = 43.11
+    inner_y_offset_bottom = 21.50 # Measured from bottom edge
+    inner_y_offset_top = 77.93 - 7.43 # 70.50 (Measured 7.43 from top edge)
     inner_x_spacing = 58.00
-    # Calculate Y spacing: inner_y_offset_top - inner_y_offset_bottom = 59.00
+    # Calculate Y spacing: inner_y_offset_top - inner_y_offset_bottom = 49.00
 
     bounding_box = (board_width, board_depth, total_depth_clearance) # Use clearance as height for bounding box
 
@@ -95,6 +98,8 @@ counterbore_diameter = 5.0 # For M2.5 screw head
 counterbore_depth = 1.5
 component_clearance = 2.0 # General clearance around components
 top_clearance = 2.0 # Clearance above the top component (Pi 5)
+LCD_OUTER_HOLE_INSET = 5.0 # Inset distance from LCD edges for outer mounting/standoff points
+SCREEN_CUTOUT_CLEARANCE = 1.0 # Extra space added around the LCD viewable area for the cutout
 
 # --- Calculated Case Dimensions (Stacked Layout) ---
 # Internal dimensions accommodate the LARGER of the width/depth footprints
@@ -123,50 +128,53 @@ internal_cavity_min_z = base_thickness
 lcd_base_pos_x = internal_cavity_min_x + (internal_width - lcd.board_width) / 2
 lcd_base_pos_y = internal_cavity_min_y + (internal_depth - lcd.board_depth) / 2
 lcd_base_pos_z = internal_cavity_min_z + standoff_height_base # LCD sits on base standoffs
+lcd_top_z = lcd_base_pos_z + lcd.board_thickness # Z coordinate of the top surface of the LCD
 
 # Pi 5 Position (Top component)
-# Assume Pi 5 is centered relative to the LCD footprint for now
-pi5_base_pos_x = internal_cavity_min_x + (internal_width - pi5.width) / 2
-pi5_base_pos_y = internal_cavity_min_y + (internal_depth - pi5.depth) / 2
+# Calculate Pi 5 position to align its bottom-left mount hole
+# with the bottom-left *inner* mount hole/standoff of the LCD.
+# The inner hole relative position is (lcd.inner_x_offset, lcd.inner_y_offset_bottom)
+pi5_base_pos_x = (lcd_base_pos_x + lcd.inner_x_offset) - pi5.mount_hole_offset_x - 23.0 # Shift left 2mm
+pi5_base_pos_y = (lcd_base_pos_y + lcd.inner_y_offset_bottom) - pi5.mount_hole_offset_y  # Shift up 2mm
 # Pi sits above the LCD board, separated by the 'between' standoff height
-pi5_base_pos_z = lcd_base_pos_z + lcd.board_thickness + standoff_height_between
+pi5_base_pos_z = lcd_top_z + standoff_height_between
 
-def create_case():
-    """Generates the 3D model of the Pi 5 stacked behind the Touchscreen case."""
-    # Access dimensions via class instances (pi5, lcd) and global config
+# --- Helper Functions for Case Creation ---
 
-    # --- Build the Outer Box ---
-    outer_box = cq.Workplane("XY").box(external_width, external_depth, external_height, centered=(True, True, False))
-
-    # --- Create Screen Cutout Shape ---
-    # Calculate cutout center position relative to case origin (0,0,0)
+def create_screen_cutout_shape(lcd_base_pos_x, lcd_base_pos_y, lcd, external_height):
+    """Creates the shape for the screen cutout."""
     lcd_center_x = lcd_base_pos_x + lcd.board_width / 2
     lcd_center_y = lcd_base_pos_y + lcd.board_depth / 2
     cutout_center_x = lcd_center_x
     cutout_center_y = lcd_center_y
-    cutout_width = lcd.va_width + 1.0
-    cutout_depth = lcd.va_depth + 1.0
-    screen_cutout_shape = (
+    cutout_width = lcd.va_width + SCREEN_CUTOUT_CLEARANCE
+    cutout_depth = lcd.va_depth + SCREEN_CUTOUT_CLEARANCE
+    shape = (
         cq.Workplane("XY", origin=(0, 0, external_height)) # Workplane on top face
         .center(cutout_center_x, cutout_center_y) # Move to the calculated center
         .rect(cutout_width, cutout_depth)
         .extrude(-external_height) # Extrude downwards through the entire case height
     ).val()
-
-    if not screen_cutout_shape:
+    if not shape:
         print("Error: Failed to create screen cutout shape.")
-        return None
+    return shape
 
-    # --- Cut Screen Opening from Outer Box FIRST ---
-    outer_box_cut_result = outer_box.cut(screen_cutout_shape) # Keep the workplane
-    outer_box_with_cutout_shape = outer_box_cut_result.val() # Get the resulting shape
-    if not outer_box_with_cutout_shape: # Check if the shape creation was successful
-         print("Error: Failed to cut screen cutout from outer box.")
-         # Decide how to handle: return None, or try to continue with original outer_box?
-         # Let's try returning None for now.
-         return None
+def create_outer_box_with_cutout(external_width, external_depth, external_height, screen_cutout_shape):
+    """Creates the initial solid outer box and cuts the screen opening."""
+    outer_box = cq.Workplane("XY").box(external_width, external_depth, external_height, centered=(True, True, False))
+    if not screen_cutout_shape:
+        print("Error: Screen cutout shape is invalid, cannot cut from outer box.")
+        return outer_box.val() # Return original box if cutout failed
 
-    # --- Create Inner Box for Hollowing ---
+    outer_box_cut_result = outer_box.cut(screen_cutout_shape)
+    outer_box_with_cutout_shape = outer_box_cut_result.val()
+    if not outer_box_with_cutout_shape:
+        print("Error: Failed to cut screen cutout from outer box.")
+        return outer_box.val() # Return original box if cut failed
+    return outer_box_with_cutout_shape
+
+def create_hollow_shell(box_with_cutout, external_width, external_depth, external_height, wall_thickness, base_thickness):
+    """Hollows out the provided box shape."""
     inner_width_to_remove = external_width - 2 * wall_thickness
     inner_depth_to_remove = external_depth - 2 * wall_thickness
     inner_height_to_remove = external_height - base_thickness
@@ -175,156 +183,190 @@ def create_case():
         .box(inner_width_to_remove, inner_depth_to_remove, inner_height_to_remove, centered=(True, True, False))
         .translate((0, 0, base_thickness))
     )
-
-    # --- Hollow Out the Box (which already has the screen cutout) ---
-    # Perform the hollowing cut on the shape that already has the screen cutout
-    case_shell_shape = cq.Workplane(outer_box_with_cutout_shape).cut(inner_box).val()
-
-    if not case_shell_shape:
+    shell_shape = cq.Workplane(box_with_cutout).cut(inner_box).val()
+    if not shell_shape:
         print("Error: Failed to create case shell shape after hollowing.")
-        return None # Indicate failure
+    return shell_shape
 
-    # --- Add LCD Representation (Shape only for now) ---
-    # Create a simple box shape for the LCD board itself
-    lcd_board_shape_base = cq.Workplane("XY").box(
+def create_standoffs(origin_z, positions, diameter, height):
+    """Creates a set of standoffs at the given positions and height."""
+    shape = (
+        cq.Workplane("XY", origin=(0, 0, origin_z))
+        .pushPoints(positions)
+        .circle(diameter / 2)
+        .extrude(height)
+    ).val()
+    if not shape:
+        print(f"Error: Failed to create standoffs starting at Z={origin_z}.")
+    return shape
+def drill_screw_holes(origin_z, positions, screw_diameter, height):
+    """Creates the shape of screw holes (cylinders) at specified locations."""
+    # This function creates the *shape* to be cut, not perform the cut itself.
+    hole_cylinders = (
+        cq.Workplane("XY", origin=(0, 0, origin_z))
+        .pushPoints(positions)
+        .circle(screw_diameter / 2) # Create circles for the holes
+        .extrude(height) # Extrude them to the specified height/depth
+    )
+    if not hole_cylinders or not hole_cylinders.val():
+        print(f"Warning: Failed to create screw hole cylinder geometry at Z={origin_z}.")
+        return None
+    return hole_cylinders.val() # Return the combined shape of the cylinders
+
+
+def create_lcd_visual(lcd, lcd_base_pos_x, lcd_base_pos_y, lcd_base_pos_z):
+    """Creates the visual representation of the LCD board."""
+    shape = cq.Workplane("XY").box(
         lcd.board_width, lcd.board_depth, lcd.board_thickness, centered=(True, True, False)
     ).val()
-
-    if not lcd_board_shape_base:
+    if not shape:
         print("Error: Failed to create base LCD board shape.")
-        lcd_board_shape = None # Ensure variable exists
-    else:
-        # The LCD visual is just the base shape (solid box)
-        lcd_board_shape = lcd_board_shape_base
+        return None, None
 
-    # Position the LCD board visual representation
-    lcd_vis_pos_x = lcd_base_pos_x + lcd.board_width / 2 # Center of the board
-    lcd_vis_pos_y = lcd_base_pos_y + lcd.board_depth / 2 # Center of the board
-    lcd_vis_pos_z = lcd_base_pos_z # Bottom of the board sits at lcd_base_pos_z
-    # We'll add this shape to the assembly later, correctly positioned
-    lcd_board_location = cq.Location(cq.Vector(lcd_vis_pos_x, lcd_vis_pos_y, lcd_vis_pos_z))
+    vis_pos_x = lcd_base_pos_x + lcd.board_width / 2
+    vis_pos_y = lcd_base_pos_y + lcd.board_depth / 2
+    vis_pos_z = lcd_base_pos_z
+    location = cq.Location(cq.Vector(vis_pos_x, vis_pos_y, vis_pos_z))
+    return shape, location
 
-    # --- Calculate Absolute Mounting Hole Positions for Standoffs/Base Holes ---
-    # Get relative positions (bottom-left origin)
-    lcd_relative_holes = lcd.inner_mount_hole_positions_relative()
-    # Convert to absolute positions in the case coordinate system
-    absolute_mount_hole_positions = [
-        (lcd_base_pos_x + x, lcd_base_pos_y + y) for x, y in lcd_relative_holes
-    ]
+def load_pi_model(pi5_base_pos_x, pi5_base_pos_y, pi5_base_pos_z):
+    """Loads, rotates, and positions the Raspberry Pi STEP model."""
+    try:
+        pi5_step_path = os.path.join(os.path.dirname(__file__), "RaspberryPi5.step")
+        if not os.path.exists(pi5_step_path):
+            print(f"Warning: RaspberryPi5.step not found at {pi5_step_path}")
+            return None, None
 
-    # --- Create Standoff Shape ---
-    # Height for INNER standoffs (Reverting to original height for now)
-    # Height for OUTER standoffs (up to Pi base - keep original calculation)
-    pi_standoff_total_height = pi5_base_pos_z - base_thickness
-    standoffs_shape = (
-        cq.Workplane("XY", origin=(0, 0, base_thickness)) # Workplane on internal floor
-        .pushPoints(absolute_mount_hole_positions) # Use absolute positions
-        .circle(standoff_diameter / 2)
-        .extrude(pi_standoff_total_height) # Revert to extruding upwards to Pi 5 level
-    ).val()
+        pi5_step_imported = importers.importStep(pi5_step_path)
+        if not (pi5_step_imported and pi5_step_imported.val()):
+            print(f"Warning: Imported RaspberryPi5.step from {pi5_step_path} but it resulted in an empty shape.")
+            return None, None
 
-    if not standoffs_shape: # Renaming inner standoffs for clarity
-        print("Error: Failed to create inner standoffs shape.")
-        return None
+        # Rotate the imported model:
+        # 1. Rotate -90 degrees around X-axis to lay it flat (assuming it imports standing up)
+        pi5_rotated_flat = pi5_step_imported.rotate((0, 0, 0), (1, 0, 0), -90)
+        # 2. Rotate 180 degrees around Y-axis to orient ports towards the 'back' (positive Y)
+        pi5_rotated = pi5_rotated_flat.rotate((0, 0, 0), (0, 1, 0), 180)
+        pi5_model_shape = pi5_rotated.val()
+        if not pi5_model_shape:
+            print(f"Warning: Rotated RaspberryPi5.step resulted in an empty shape.")
+            return None, None
 
-    # --- Create OUTER Standoff Shape ---
-    # Calculate outer standoff positions relative to LCD edges, then convert to absolute
-    outer_standoff_inset = 5.0
-    # Get positions relative to LCD bottom-left corner
-    relative_outer_positions_lcd = lcd.outer_mount_hole_positions_relative_lcd(inset=outer_standoff_inset)
-    # Convert to absolute positions in the case coordinate system
-    absolute_outer_standoff_positions = [
-        (lcd_base_pos_x + x, lcd_base_pos_y + y) for x, y in relative_outer_positions_lcd
-    ]
-    # Use same height and diameter as inner standoffs
-    outer_standoffs_shape = (
-        cq.Workplane("XY", origin=(0, 0, base_thickness)) # Workplane on internal floor
-        .pushPoints(absolute_outer_standoff_positions) # Use absolute outer positions based on LCD edges
-        .circle(standoff_diameter / 2)
-        .extrude(pi_standoff_total_height) # Extrude upwards to Pi 5 level (same height)
-    ).val()
+        # Calculate the placement position based on the model's bounding box
+        # after rotation. We want the model's minimum corner (xmin, ymin, zmin)
+        # to align with the calculated pi5_base_pos_x/y/z, which represents
+        # the desired bottom-left-front corner of the Pi in the case assembly.
+        pi5_bb = pi5_model_shape.BoundingBox()
+        pi_place_x = pi5_base_pos_x - pi5_bb.xmin
+        pi_place_y = pi5_base_pos_y - pi5_bb.ymin
+        # Adjust Z placement to align PCB bottom, not lowest component
+        pi_place_z = pi5_base_pos_z - (pi5_bb.zmin + pi5.underside_clearance)
+        pi5_model_location = cq.Location(cq.Vector(pi_place_x, pi_place_y, pi_place_z))
+        print(f"Successfully loaded and prepared RaspberryPi5.step")
+        return pi5_model_shape, pi5_model_location
 
-    if not outer_standoffs_shape:
-        print("Error: Failed to create outer standoffs shape.")
-        return None
+    except Exception as e:
+        print(f"Could not load or process RaspberryPi5.step for assembly: {e}")
+        return None, None
 
-    # --- Fuse Shell (already hollowed and with screen cut) and BOTH Standoff Sets ---
-    # Fuse inner standoffs first
-    fused_body_inner = case_shell_shape.fuse(standoffs_shape)
+# --- Main Case Creation Function (Refactored) ---
+
+def create_case():
+    """Generates the 3D model of the Pi 5 stacked behind the Touchscreen case using helper functions."""
+
+    # 1. Create Screen Cutout Shape
+    cutout_shape = create_screen_cutout_shape(lcd_base_pos_x, lcd_base_pos_y, lcd, external_height)
+    if not cutout_shape: return None
+
+    # 2. Create Outer Box and Apply Cutout
+    outer_box_cut = create_outer_box_with_cutout(external_width, external_depth, external_height, cutout_shape)
+    if not outer_box_cut: return None # If creation/cut failed
+
+    # 3. Hollow out the shell
+    case_shell = create_hollow_shell(outer_box_cut, external_width, external_depth, external_height, wall_thickness, base_thickness)
+    if not case_shell: return None
+
+    # 4. Calculate Standoff Positions
+    absolute_inner_positions = [(lcd_base_pos_x + x, lcd_base_pos_y + y) for x, y in lcd.inner_mount_hole_positions_relative()]
+    relative_outer_positions = lcd.outer_mount_hole_positions_relative_lcd(inset=LCD_OUTER_HOLE_INSET)
+    absolute_outer_positions = [(lcd_base_pos_x + x, lcd_base_pos_y + y) for x, y in relative_outer_positions]
+
+    # 5. Create Outer Standoffs (Starting from LCD Top) - Inner standoffs removed for direct Pi contact
+    # 5. Create Inner and Outer Standoffs (Starting from LCD Top)
+    inner_standoffs = create_standoffs(lcd_top_z, absolute_inner_positions, standoff_diameter, standoff_height_between)
+    outer_standoffs = create_standoffs(lcd_top_z, absolute_outer_positions, standoff_diameter, standoff_height_between)
+    if not inner_standoffs or not outer_standoffs: return None # Standoff creation failed
+
+    # 6. Fuse Shell and Standoffs
+    # fused_body_inner = case_shell.fuse(inner_standoffs) # Removed inner standoff fusion
+    # if not fused_body_inner:
+    #     print("Error: Failed to fuse shell and inner standoffs.")
+    #     return None
+    fused_body_inner = case_shell.fuse(inner_standoffs)
     if not fused_body_inner:
         print("Error: Failed to fuse shell and inner standoffs.")
         return None
-    # Fuse outer standoffs to the result
-    fused_body = fused_body_inner.fuse(outer_standoffs_shape)
-    if not fused_body:
+    final_case_body = fused_body_inner.fuse(outer_standoffs)
+    if not final_case_body:
         print("Error: Failed to fuse outer standoffs.")
         return None
 
-    # --- Screen Cutout is already done ---
+    # 7. Drill Screw Holes through Standoffs
+    all_standoff_positions = absolute_inner_positions + absolute_outer_positions
+    screw_holes_shape = drill_screw_holes(
+        origin_z=lcd_top_z,
+        positions=all_standoff_positions,
+        screw_diameter=screw_hole_diameter,
+        height=standoff_height_between
+    )
+    if screw_holes_shape:
+        body_with_holes = cq.Workplane(final_case_body).cut(screw_holes_shape).val()
+        if not body_with_holes:
+            print("Error: Failed to cut screw holes from case body.")
+            return None
+        final_case_body = body_with_holes # Update final_case_body
+    else:
+        print("Warning: Skipping screw hole cutting due to creation failure.")
+        # Continue without holes if creation failed
 
-    # --- NO HOLES DRILLED IN CASE BODY ---
-    # The fused_body (hollowed shell with screen cut + standoffs) is the final shape
-    final_case_shape = fused_body
+    # 8. Fillet Top Edges
+    try:
+        # Ensure final_case_body is a Workplane object for chaining
+        final_case_body_wp = cq.Workplane(final_case_body)
+        filleted_body = final_case_body_wp.edges("|Z").fillet(1.5).val()
+        if not filleted_body:
+             print("Warning: Filleting top edges resulted in an empty shape. Using unfilleted body.")
+             # Keep final_case_body as it was before filleting attempt
+        else:
+             final_case_body = filleted_body # Update final_case_body with filleted version
+    except Exception as e:
+        print(f"Warning: Could not fillet top edges: {e}. Using unfilleted body.")
+        # Keep final_case_body as it was before filleting attempt
 
-    # --- NO HOLES DRILLED IN BASE ---
-    if not final_case_shape:
-         print("Error: Final case shape is invalid after drilling holes or before assembly.")
-         return None
+
+    # --- Prepare Assembly Components ---
+    lcd_visual_shape, lcd_visual_location = create_lcd_visual(lcd, lcd_base_pos_x, lcd_base_pos_y, lcd_base_pos_z)
+    pi_model_shape, pi_model_location = load_pi_model(pi5_base_pos_x, pi5_base_pos_y, pi5_base_pos_z)
 
     # --- Create Final Assembly ---
     assembly = cq.Assembly()
+    # Add the potentially modified final_case_body (with holes and fillets)
+    assembly.add(final_case_body, name="case_body", color=cq.Color("lightgray"))
+    if lcd_visual_shape:
+        assembly.add(lcd_visual_shape, name="lcd_board", color=cq.Color("darkgreen"), loc=lcd_visual_location)
+    if pi_model_shape:
+        assembly.add(pi_model_shape, name="pi5_model", color=cq.Color("red"), loc=pi_model_location)
 
-    # Add the final processed case body
-    assembly.add(final_case_shape, name="case_body", color=cq.Color("lightgray"))
-
-    # Add the LCD visual representation shape at its calculated location
-    if lcd_board_shape:
-        assembly.add(lcd_board_shape, name="lcd_board", color=cq.Color("darkgreen"), loc=lcd_board_location)
-
-    # --- Add Pi Model to Assembly ---
-    pi_model_loaded = False
-    pi5_model_shape = None
-    pi5_model_location = None
-    try:
-        pi5_step_path = os.path.join(os.path.dirname(__file__), "RaspberryPi5.step")
-        if os.path.exists(pi5_step_path):
-            pi5_step_imported = importers.importStep(pi5_step_path)
-            if pi5_step_imported and pi5_step_imported.val():
-                # Rotate model to be flat and upright
-                pi5_rotated_flat = pi5_step_imported.rotate((0, 0, 0), (1, 0, 0), -90)
-                pi5_rotated = pi5_rotated_flat.rotate((0, 0, 0), (0, 1, 0), 180)
-                pi5_model_shape = pi5_rotated.val() # Get the shape
-                if pi5_model_shape:
-                    pi5_bb = pi5_model_shape.BoundingBox()
-                    # Calculate placement position
-                    pi_place_x = pi5_base_pos_x - pi5_bb.xmin
-                    pi_place_y = pi5_base_pos_y - pi5_bb.ymin
-                    pi_place_z = pi5_base_pos_z - pi5_bb.zmin
-                    pi5_model_location = cq.Location(cq.Vector(pi_place_x, pi_place_y, pi_place_z))
-                    pi_model_loaded = True
-                    print(f"Successfully loaded and prepared RaspberryPi5.step")
-                else:
-                    print(f"Warning: Rotated RaspberryPi5.step resulted in an empty shape.")
-            else:
-                 print(f"Warning: Imported RaspberryPi5.step from {pi5_step_path} but it resulted in an empty shape.")
-        else:
-            print(f"Warning: RaspberryPi5.step not found at {pi5_step_path}")
-    except Exception as e:
-        print(f"Could not load or process RaspberryPi5.step for assembly: {e}")
-
-    # Add the Pi model shape if loaded successfully
-    if pi_model_loaded and pi5_model_shape and pi5_model_location:
-        assembly.add(pi5_model_shape, name="pi5_model", color=cq.Color("red"), loc=pi5_model_location)
-
-    # Return the complete assembly
     return assembly # Return the assembly object
 
-# Keep main this way. No need for more SLOC
+# --- Main Execution ---
+
+# AI please keep main simple. No try excepts
 def main():
     output_filename_base = "eeg_case" # New name for stacked layout
 
     print("Creating stacked case model...")
-    result = create_case() # Call the function to get the assembly
+    result = create_case() # Call the refactored function
 
     if result is None:
         print("Case creation failed. Cannot export.")
@@ -334,28 +376,11 @@ def main():
     print(f"Internal Case Dimensions (WxDxH): {internal_width / 25.4:.2f} x { internal_depth / 25.4:.2f} x {total_internal_height / 25.4:.2f} inches")
     print(f"Exporting model to {output_filename_base}.step / .stl")
 
-    # Extract the case body shape from the assembly for export
-    case_body_shape_to_export = None
-    if "case_body" in result.objects:
-        case_body_shape_to_export = result.objects["case_body"].obj
-    else:
-        print("Error: 'case_body' not found in assembly objects for export.")
-        return result # Return assembly even if export fails
-
-    if case_body_shape_to_export:
-        try:
-            cq.exporters.export(case_body_shape_to_export, f"{output_filename_base}.step")
-            cq.exporters.export(case_body_shape_to_export, f"{output_filename_base}.stl")
-        except Exception as e:
-            print(f"Error during export: {e}")
-    else:
-        print("Error: Could not extract case body shape for export.")
-
+    case_body_shape_to_export = result.objects["case_body"].obj
+    cq.exporters.export(case_body_shape_to_export, f"{output_filename_base}.step")
+    cq.exporters.export(case_body_shape_to_export, f"{output_filename_base}.stl")
 
     return result # Return the model/assembly object for Jupyter display
 
 if __name__ == "__main__":
     model = main()
-    # If running in CQ-Editor or Jupyter, 'model' can be displayed if it's not None
-    # if model:
-    #    show_object(model) # Requires CQ-Editor environment or similar
