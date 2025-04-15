@@ -126,8 +126,14 @@ Lowest Priority
   - Also some Pi's seem to use Wayland by default and others X11. They switched to wayland on Pi 5 last year.
   - Impact on Pi 5 Behavior (Revised): Yes, the script makes significant changes. Crucially, while the default Raspberry Pi OS (Bookworm) on a Pi 5 uses Wayland (with the Wayfire compositor) for its graphical session, this script overrides that default and forces the system to use X11. It does this by:
 - Should we add 60hz detection? Like your too close to a wall socket
-- Dry vs wet electrodes
-
+- Dry vs wet electrodes- make py notebook?
+- Improve board handling in GUI. 
+- Add studies thing via git clone
+- Data quality accessment- impedance testing, 60/50hz noise measure. step thru (don't need graphing either)
+- Look at signal quality. AVSS vs GND vs DGND vs AGND. 5v powering AVDD
+ - AVSS=AGND (JP25). DGND=AGND (Figure 58)
+ - SPI uses AGND
+ - AGND/AVSS/DGND - Analog ground
 
 
 ## What Can EEG Analysis Tell You?
