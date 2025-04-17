@@ -131,21 +131,31 @@ impl Ads1299Driver {
         // Create channel with validated buffer size
         let (tx, rx) = mpsc::channel(channel_buffer_size);
         
-        let driver = Ads1299Driver {
+        // Create the driver as mutable
+        let mut driver = Ads1299Driver {
             inner: Arc::new(Mutex::new(inner)),
             task_handle: None,
             tx,
             additional_channel_buffering,
-            spi: Some(spi),
-            drdy_pin: Some(drdy_pin),
+            spi: Some(Box::new(spi)),
+            drdy_pin: Some(Box::new(drdy_pin)),
             interrupt_thread: None,
             interrupt_running: Arc::new(AtomicBool::new(false)),
         };
-        
+
+        // Put chip in standby (low power) mode initially
+        {
+            // This block ensures we only mutably borrow driver.spi for this operation
+            let spi_opt = driver.spi.as_mut();
+            if let Some(driver_spi) = spi_opt {
+                let _ = driver_spi.write(&[super::registers::CMD_STANDBY]);
+            }
+        }
+
         info!("Ads1299Driver created with config: {:?}", config);
         info!("Channel buffer size: {} (batch_size: {} + additional_buffering: {})",
               channel_buffer_size, config.batch_size, additional_channel_buffering);
-        
+
         Ok((driver, rx))
     }
     
@@ -338,6 +348,11 @@ impl Ads1299Driver {
         
         // Notify about the status change
         self.notify_status_change().await?;
+        // Put chip in standby (low power) mode on shutdown
+        if let Some(driver_spi) = self.spi.as_mut() {
+            let _ = driver_spi.write(&[super::registers::CMD_STANDBY]);
+        }
+
         info!("Ads1299Driver shutdown complete");
         Ok(())
     }
@@ -572,7 +587,7 @@ impl Drop for Ads1299Driver {
             // This might lead to a thread leak, but it's better than blocking in Drop
             std::thread::spawn(move || {
                 // Try to join with a timeout
-                let join_handle = std::thread::spawn(move || {
+                let _join_handle = std::thread::spawn(move || {
                     let _ = handle.join();
                 });
                 

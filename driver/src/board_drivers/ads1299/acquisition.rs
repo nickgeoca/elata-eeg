@@ -10,7 +10,7 @@ use std::thread; // Add this import
 
 use crate::board_drivers::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent};
 use super::helpers::{ch_raw_to_voltage, current_timestamp_micros, read_data_from_spi};
-use super::registers::{CMD_SDATAC, CMD_RDATAC, CMD_START, CMD_STOP};
+use super::registers::{CMD_SDATAC, CMD_RDATAC, CMD_START, CMD_STOP, CMD_WAKEUP};
 use super::spi::{SpiDevice, InputPinDevice, send_command_to_spi};
 
 /// Data passed from the interrupt handler to the processing task
@@ -59,6 +59,14 @@ pub async fn start_acquisition(
         inner.status = DriverStatus::Running;
     }
     
+    // Wake up ADS1299 from standby before starting
+    if let Some(spi_ref) = spi.as_mut() {
+        if let Err(e) = send_command_to_spi(spi_ref, CMD_WAKEUP) {
+            error!("Failed to send WAKEUP command: {:?}", e);
+            return Err(e);
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+    }
     // Send START command to ADS1299
     if let Some(spi_ref) = spi.as_mut() {
         if let Err(e) = send_command_to_spi(spi_ref, CMD_START) {
