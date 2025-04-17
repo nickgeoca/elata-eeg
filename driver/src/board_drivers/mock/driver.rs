@@ -35,19 +35,6 @@ struct MockInner {
 impl MockDriver {
     /// Create a new instance of the MockDriver.
     ///
-    /// This constructor takes an ADC configuration and an optional additional channel buffering parameter.
-    /// The additional_channel_buffering parameter determines how many extra batches can be buffered in the channel
-    /// beyond the minimum required (which is the batch_size from the config). Setting this to 0 minimizes
-    /// latency but may cause backpressure if the consumer can't keep up.
-    ///
-    /// Returns a tuple containing the driver instance and a receiver for driver events.
-    /// Create a new instance of the MockDriver.
-    ///
-    /// This constructor takes an ADC configuration and an optional additional channel buffering parameter.
-    /// The additional_channel_buffering parameter determines how many extra batches can be buffered in the channel
-    /// beyond the minimum required (which is the batch_size from the config). Setting this to 0 minimizes
-    /// latency but may cause backpressure if the consumer can't keep up.
-    ///
     /// # Important
     /// Users should explicitly call `shutdown()` when done with the driver to ensure proper cleanup.
     /// While the Drop implementation provides some basic cleanup, it cannot perform the full async shutdown sequence.
@@ -57,10 +44,7 @@ impl MockDriver {
     /// A tuple containing the driver instance and a receiver for driver events.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - config.board_driver is not DriverType::Mock
-    /// - config.batch_size is 0 (batch size must be positive)
-    /// - config.batch_size is less than the number of channels (need at least one sample per channel)
+    /// Returns an error if for various reasons
     pub fn new(
         config: AdcConfig,
         additional_channel_buffering: usize
