@@ -26,7 +26,8 @@ export const CommandWebSocketProvider = ({
   const [recordingFilePath, setRecordingFilePath] = useState<string | null>(null);
 
   useEffect(() => {
-    const newWs = new WebSocket('ws://localhost:8080/command');
+    const wsHost = window.location.hostname;
+    const newWs = new WebSocket(`wss://${wsHost}:8080/command`); // Use wss:// for secure connection
 
     newWs.onopen = () => {
       console.log('Command WebSocket connected');

@@ -64,12 +64,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ws_routes = server::setup_websocket_routes(tx_ws, config.clone(), csv_recorder.clone());
 
     println!("WebSocket server starting on:");
-    println!("- ws://localhost:8080/eeg (EEG data)");
-    println!("- ws://localhost:8080/config (Configuration)");
-    println!("- ws://localhost:8080/command (Recording control)");
+    println!("- wss://localhost:8080/eeg (EEG data)");
+    println!("- wss://localhost:8080/config (Configuration)");
+    println!("- wss://localhost:8080/command (Recording control)");
 
-    // Spawn WebSocket server
-    let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
+    // Define certificate paths relative to the daemon's working directory
+    let cert_path = "../kiosk/localhost-cert.pem";
+    let key_path = "../kiosk/localhost-key.pem";
+
+    // Spawn WebSocket server with TLS
+    let server_handle = tokio::spawn(
+        warp::serve(ws_routes)
+            .tls()
+            .cert_path(cert_path)
+            .key_path(key_path)
+            .run(([0, 0, 0, 0], 8080))
+    );
 
     // Process EEG data
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(
