@@ -27,7 +27,9 @@ export const CommandWebSocketProvider = ({
 
   useEffect(() => {
     const wsHost = window.location.hostname;
-    const newWs = new WebSocket(`wss://${wsHost}:8080/command`); // Use wss:// for secure connection
+    // Temporarily use ws:// instead of wss:// when TLS is disabled on the server
+    const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const newWs = new WebSocket(`${protocol}://${wsHost}:8080/command`);
 
     newWs.onopen = () => {
       console.log('Command WebSocket connected');

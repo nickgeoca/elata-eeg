@@ -1,41 +1,78 @@
 use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
 use rppal::gpio::{Gpio, InputPin, Trigger, Event};
-use std::io::Error;
+use std::io::Error as IoError;
 use log::{info, error};
 
 // SPI abstraction trait
 pub trait SpiDevice: Send {
-    fn write(&mut self, data: &[u8]) -> Result<(), Error>;
-    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error>;
+    fn write(&mut self, data: &[u8]) -> Result<(), IoError>;
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), IoError>;
 }
 
 // GPIO abstraction trait
 pub trait InputPinDevice: Send {
-    fn set_interrupt(&mut self, trigger: Trigger, timeout: Option<std::time::Duration>) -> Result<(), Error>;
-    fn poll_interrupt(&mut self, clear: bool, timeout: Option<std::time::Duration>) -> Result<Option<Event>, Error>;
-    fn clear_interrupt(&mut self) -> Result<(), Error>;
+    fn is_high(&self) -> bool;
+    fn set_interrupt(&mut self, trigger: Trigger, timeout: Option<std::time::Duration>) -> Result<(), IoError>;
+    fn poll_interrupt(&mut self, clear: bool, timeout: Option<std::time::Duration>) -> Result<Option<Event>, IoError>;
+    fn clear_interrupt(&mut self) -> Result<(), IoError>;
 }
 
 // Implement SpiDevice for rppal::spi::Spi
 impl SpiDevice for Spi {
-    fn write(&mut self, data: &[u8]) -> Result<(), Error> {
+    fn write(&mut self, data: &[u8]) -> Result<(), IoError> {
         Spi::write(self, data)
+            .map(|_| ())
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))
     }
-    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Error> {
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), IoError> {
         Spi::transfer(self, read, write)
+            .map(|_| ())
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))
     }
 }
 
 // Implement InputPinDevice for rppal::gpio::InputPin
+// Implement SpiDevice for Box<dyn SpiDevice>
+impl<T: SpiDevice + ?Sized> SpiDevice for Box<T> {
+    fn write(&mut self, data: &[u8]) -> Result<(), IoError> {
+        (**self).write(data)
+    }
+    fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), IoError> {
+        (**self).transfer(read, write)
+    }
+}
+
+// Implement InputPinDevice for Box<dyn InputPinDevice>
+impl<T: InputPinDevice + ?Sized> InputPinDevice for Box<T> {
+    fn is_high(&self) -> bool {
+        (**self).is_high()
+    }
+    fn set_interrupt(&mut self, trigger: Trigger, timeout: Option<std::time::Duration>) -> Result<(), IoError> {
+        (**self).set_interrupt(trigger, timeout)
+    }
+    fn poll_interrupt(&mut self, clear: bool, timeout: Option<std::time::Duration>) -> Result<Option<Event>, IoError> {
+        (**self).poll_interrupt(clear, timeout)
+    }
+    fn clear_interrupt(&mut self) -> Result<(), IoError> {
+        (**self).clear_interrupt()
+    }
+}
+
 impl InputPinDevice for InputPin {
-    fn set_interrupt(&mut self, trigger: Trigger, timeout: Option<std::time::Duration>) -> Result<(), Error> {
+    fn is_high(&self) -> bool {
+        InputPin::is_high(self)
+    }
+    fn set_interrupt(&mut self, trigger: Trigger, timeout: Option<std::time::Duration>) -> Result<(), IoError> {
         InputPin::set_interrupt(self, trigger, timeout)
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))
     }
-    fn poll_interrupt(&mut self, clear: bool, timeout: Option<std::time::Duration>) -> Result<Option<Event>, Error> {
+    fn poll_interrupt(&mut self, clear: bool, timeout: Option<std::time::Duration>) -> Result<Option<Event>, IoError> {
         InputPin::poll_interrupt(self, clear, timeout)
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))
     }
-    fn clear_interrupt(&mut self) -> Result<(), Error> {
+    fn clear_interrupt(&mut self) -> Result<(), IoError> {
         InputPin::clear_interrupt(self)
+            .map_err(|e| IoError::new(std::io::ErrorKind::Other, e.to_string()))
     }
 }
 
@@ -107,7 +144,7 @@ pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::board_drivers::
 }
 
 // Helper function to send a command to SPI
-pub fn send_command_to_spi(spi: &mut dyn SpiDevice, command: u8) -> Result<(), crate::board_drivers::types::DriverError> {
+pub fn send_command_to_spi<T: SpiDevice + ?Sized>(spi: &mut T, command: u8) -> Result<(), crate::board_drivers::types::DriverError> {
     let buffer = [command];
     spi.write(&buffer).map_err(|e| crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
         std::io::ErrorKind::Other,
@@ -117,7 +154,7 @@ pub fn send_command_to_spi(spi: &mut dyn SpiDevice, command: u8) -> Result<(), c
 }
 
 // Helper function to write a value to a register in the ADS1299
-pub fn write_register(spi: &mut dyn SpiDevice, register: u8, value: u8) -> Result<(), crate::board_drivers::types::DriverError> {
+pub fn write_register<T: SpiDevice + ?Sized>(spi: &mut T, register: u8, value: u8) -> Result<(), crate::board_drivers::types::DriverError> {
     // Command: WREG (0x40) + register address
     let command = 0x40 | (register & 0x1F);
 

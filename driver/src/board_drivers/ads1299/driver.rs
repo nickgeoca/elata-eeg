@@ -6,11 +6,17 @@ use tokio::task::JoinHandle;
 use log::{info, warn, debug, error};
 use lazy_static::lazy_static;
 
-use crate::board_drivers::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
-use super::acquisition::{start_acquisition, stop_acquisition, InterruptData, SpiType, DrdyPinType};
+use crate::board_drivers::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
+use super::acquisition::{start_acquisition, stop_acquisition, SpiType, DrdyPinType};
 use super::error::HardwareLockGuard;
-use super::helpers::current_timestamp_micros;
-use super::registers::{CMD_RESET, CMD_SDATAC, CMD_RDATAC};
+use super::registers::{
+    CMD_RESET, CMD_SDATAC, REG_ID_ADDR,
+    CONFIG1_ADDR, CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR,
+    LOFF_SENSP_ADDR, MISC1_ADDR, CH1SET_ADDR, BIAS_SENSP_ADDR, BIAS_SENSN_ADDR,
+    config1_reg, config2_reg, config3_reg, config4_reg, loff_sesp_reg, misc1_reg,
+    chn_off, chn_reg, bias_sensp_reg_mask, bias_sensn_reg_mask,
+    gain_to_reg_mask, sps_to_reg_mask
+};
 use super::spi::{SpiDevice, InputPinDevice, init_spi, init_drdy_pin, send_command_to_spi, write_register};
 
 // Static hardware lock to simulate real hardware access constraints
@@ -27,7 +33,7 @@ pub struct Ads1299Driver {
     spi: Option<Box<dyn SpiDevice>>,
     drdy_pin: Option<Box<dyn InputPinDevice>>,
     // New fields for interrupt-driven approach
-    interrupt_task: Option<tokio::task::JoinHandle<()>>,
+    interrupt_thread: Option<std::thread::JoinHandle<()>>,
     interrupt_running: Arc<AtomicBool>,
 }
 
@@ -132,7 +138,7 @@ impl Ads1299Driver {
             additional_channel_buffering,
             spi: Some(spi),
             drdy_pin: Some(drdy_pin),
-            interrupt_task: None,
+            interrupt_thread: None,
             interrupt_running: Arc::new(AtomicBool::new(false)),
         };
         
@@ -154,20 +160,69 @@ impl Ads1299Driver {
     /// This method validates the driver state, initializes the ADS1299 chip,
     /// and spawns a background task that reads data from the chip.
     pub(crate) async fn start_acquisition(&mut self) -> Result<(), DriverError> {
-        let result = start_acquisition(
+        // Check if acquisition is already running
+        {
+            let inner = self.inner.lock().await;
+            if inner.running {
+                return Err(DriverError::ConfigurationError(
+                    "Acquisition already running".to_string()
+                ));
+            }
+        }
+        
+        // Check if we have SPI and DRDY pin
+        if self.spi.is_none() {
+            return Err(DriverError::NotInitialized);
+        }
+        
+        if self.drdy_pin.is_none() {
+            return Err(DriverError::NotInitialized);
+        }
+        
+        // Initialize the chip registers before starting acquisition tasks
+        self.initialize_chip().await?;
+        
+        // Set running flag before starting tasks
+        {
+            let mut inner = self.inner.lock().await;
+            inner.running = true;
+        }
+        
+        // Start the acquisition tasks
+        match start_acquisition(
             self.inner.clone(),
             self.tx.clone(),
             self.interrupt_running.clone(),
             self.spi.take(),
             self.drdy_pin.take(),
-        ).await?;
-        
-        self.interrupt_task = result.0;
-        self.task_handle = result.1;
-        self.spi = Some(result.2);
-        self.drdy_pin = Some(result.3);
-        
-        Ok(())
+        ).await {
+            Ok((interrupt_thread, processing_task)) => {
+                self.interrupt_thread = interrupt_thread;
+                self.task_handle = processing_task;
+                
+                // Notify about the status change
+                self.notify_status_change().await?;
+                
+                info!("Acquisition started successfully");
+                Ok(())
+            },
+            Err(e) => {
+                // Reset running flag on error
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.running = false;
+                    inner.status = DriverStatus::Error;
+                }
+                
+                error!("Failed to start acquisition: {:?}", e);
+                
+                // Try to notify about the status change
+                let _ = self.notify_status_change().await;
+                
+                // Return the original error
+                Err(e)
+            }
+        }
     }
 
     /// Stop data acquisition from the ADS1299.
@@ -175,14 +230,39 @@ impl Ads1299Driver {
     /// This method signals the acquisition task to stop, waits for it to complete,
     /// and updates the driver status.
     pub(crate) async fn stop_acquisition(&mut self) -> Result<(), DriverError> {
-        stop_acquisition(
+        debug!("Driver stop_acquisition called");
+        
+        // First check if acquisition is running
+        let is_running = {
+            let inner = self.inner.lock().await;
+            inner.running
+        };
+        
+        if !is_running {
+            debug!("Acquisition not running, nothing to stop");
+            return Ok(());
+        }
+        
+        // Call the acquisition module's stop function
+        let result = stop_acquisition(
             self.inner.clone(),
             &self.tx,
             &self.interrupt_running,
-            &mut self.interrupt_task,
+            &mut self.interrupt_thread,
             &mut self.task_handle,
             &mut self.spi,
-        ).await
+        ).await;
+        
+        // Ensure we have proper cleanup even if stop_acquisition failed
+        if result.is_err() {
+            error!("Error during stop_acquisition: {:?}", result);
+            // Still update the status to avoid stuck state
+            let mut inner = self.inner.lock().await;
+            inner.running = false;
+            inner.status = DriverStatus::Error;
+        }
+        
+        result
     }
 
     /// Return the current driver status.
@@ -204,29 +284,46 @@ impl Ads1299Driver {
     pub(crate) async fn shutdown(&mut self) -> Result<(), DriverError> {
         debug!("Shutting down Ads1299Driver");
         
-        // First check if running, but don't hold the lock
-        let should_stop = {
-            let inner = self.inner.lock().await;
-            inner.running
-        };
+        // Always try to stop acquisition first, regardless of running state
+        // This ensures a consistent shutdown sequence
+        let stop_result = self.stop_acquisition().await;
+        if let Err(e) = &stop_result {
+            warn!("Error during stop_acquisition in shutdown: {:?}", e);
+            // Continue with shutdown despite errors
+        }
         
-        // Stop acquisition if needed
-        if should_stop {
-            debug!("Stopping acquisition as part of shutdown");
-            self.stop_acquisition().await?;
-        } else {
-            // Even if acquisition is not running, make sure interrupt thread is stopped
-            if self.interrupt_running.load(Ordering::SeqCst) {
-                debug!("Stopping interrupt task as part of shutdown");
-                self.interrupt_running.store(false, Ordering::SeqCst);
-
-                // Wait for the interrupt task to complete
-                if let Some(handle) = self.interrupt_task.take() {
-                    match handle.await {
-                        Ok(_) => debug!("Interrupt task completed successfully during shutdown"),
-                        Err(e) => warn!("Interrupt task terminated with error during shutdown: {:?}", e),
+        // Double-check that interrupt thread is stopped
+        if self.interrupt_running.load(Ordering::SeqCst) {
+            warn!("Interrupt thread still running after stop_acquisition, forcing stop");
+            self.interrupt_running.store(false, Ordering::SeqCst);
+            
+            // Wait for the interrupt thread to complete with timeout
+            if let Some(handle) = self.interrupt_thread.take() {
+                debug!("Joining interrupt thread during shutdown");
+                // Use spawn_blocking to avoid blocking the async runtime
+                match tokio::task::spawn_blocking(move || {
+                    // Use a timeout for joining
+                    let join_handle = std::thread::spawn(move || {
+                        let _ = handle.join();
+                    });
+                    
+                    // Wait up to 2 seconds
+                    if join_handle.join().is_err() {
+                        warn!("Failed to join interrupt thread cleanly");
                     }
+                }).await {
+                    Ok(_) => debug!("Interrupt thread joined during shutdown"),
+                    Err(e) => warn!("Error joining interrupt thread: {}", e),
                 }
+            }
+        }
+        
+        // Check if processing task is still running
+        if let Some(task) = self.task_handle.take() {
+            if !task.is_finished() {
+                warn!("Processing task still running after stop_acquisition, aborting");
+                task.abort();
+                // We don't need to wait for the abort to complete
             }
         }
 
@@ -295,7 +392,47 @@ impl Ads1299Driver {
         let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
 
         // Write registers in the specific order
-        // Implementation details moved to acquisition.rs
+        // Constants are imported from super::registers
+
+        // Calculate masks based on config
+        let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
+        // Use the fully qualified path to call these functions
+        let gain_mask = super::registers::gain_to_reg_mask(config.gain)?;
+        let sps_mask = super::registers::sps_to_reg_mask(config.sample_rate)?;
+
+        // Write registers
+        self.write_register(CONFIG1_ADDR, config1_reg | sps_mask)?;
+        self.write_register(CONFIG2_ADDR, config2_reg)?;
+        self.write_register(CONFIG3_ADDR, config3_reg)?;
+        self.write_register(CONFIG4_ADDR, config4_reg)?;
+        self.write_register(LOFF_SENSP_ADDR, loff_sesp_reg)?; // Assuming LOFF is off
+        self.write_register(MISC1_ADDR, misc1_reg)?;
+        // Turn off all channels first
+        for ch in 0..8 { // Assuming 8 channels max for ADS1299
+            self.write_register(CH1SET_ADDR + ch, chn_off)?;
+        }
+        // Turn on configured channels with correct gain
+        for &ch in &config.channels {
+            if ch < 8 { // Ensure channel index is valid
+                 self.write_register(CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?;
+            } else {
+                 log::warn!("Channel index {} out of range (0-7), skipping configuration.", ch);
+            }
+        }
+        // Configure bias based on active channels
+        self.write_register(BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask as u8)?;
+        self.write_register(BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask as u8)?;
+
+        // Add register dump for verification (optional but helpful)
+        log::info!("----Register Dump After Configuration----");
+        let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
+        for reg in 0..=0x17 {
+            match self.read_register(reg as u8) {
+                Ok(val) => log::info!("Reg 0x{:02X} ({:<12}): 0x{:02X}", reg, names.get(reg).unwrap_or(&"Unknown"), val),
+                Err(e) => log::error!("Failed to read register 0x{:02X}: {}", reg, e),
+            }
+        }
+        log::info!("----End Register Dump----");
         
         // Wait for configuration to settle
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -413,29 +550,37 @@ unsafe impl Sync for Ads1299Driver {}
 /// cannot perform the full async shutdown sequence because Drop is not async.
 impl Drop for Ads1299Driver {
     fn drop(&mut self) {
-        // Since we can't use .await in Drop, we'll just log a warning
+        // Since we can't use .await in Drop, we'll just log a warning and do our best
         error!("Ads1299Driver dropped without calling shutdown() first. This may lead to resource leaks.");
         error!("Always call driver.shutdown().await before dropping the driver.");
         
-        // Note: We can't properly clean up in Drop because we can't use .await
-        // This is why users should call shutdown() explicitly.
+        // Signal all tasks to stop
+        self.interrupt_running.store(false, Ordering::SeqCst);
         
-        // Note: We cannot await the task_handle here because Drop is not async.
-        // This is why users should call shutdown() explicitly.
-        if self.task_handle.is_some() {
-            error!("Background task may still be running. Call shutdown() to properly terminate it.");
+        // Abort any Tokio task that might still be running
+        if let Some(task) = self.task_handle.take() {
+            if !task.is_finished() {
+                error!("Background task still running during Drop. Aborting it.");
+                task.abort();
+            }
         }
         
-        // Check if interrupt task is still running
-        if self.interrupt_running.load(Ordering::SeqCst) {
-            error!("Interrupt task may still be running. Call shutdown() to properly terminate it.");
-            // Try to stop the interrupt task
-            self.interrupt_running.store(false, Ordering::SeqCst);
-        }
-
-        // Try to drop the interrupt task if it exists
-        if let Some(_handle) = self.interrupt_task.take() {
-            // Cannot await in Drop, so just detach
+        // For the interrupt thread, we can't join it properly in Drop
+        if let Some(handle) = self.interrupt_thread.take() {
+            error!("Interrupt thread may still be running during Drop. Detaching it.");
+            // We can't join in Drop, so we have to detach it
+            // This might lead to a thread leak, but it's better than blocking in Drop
+            std::thread::spawn(move || {
+                // Try to join with a timeout
+                let join_handle = std::thread::spawn(move || {
+                    let _ = handle.join();
+                });
+                
+                // Wait up to 100ms
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // After timeout, we just let the thread continue running
+                // The OS will clean it up when the process exits
+            });
         }
         
         // Hardware lock is released automatically by HardwareLockGuard's Drop.

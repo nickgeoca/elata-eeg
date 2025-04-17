@@ -75,9 +75,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn WebSocket server with TLS
     let server_handle = tokio::spawn(
         warp::serve(ws_routes)
-            .tls()
-            .cert_path(cert_path)
-            .key_path(key_path)
+            // .tls()
+            // .cert_path(cert_path)
+            // .key_path(key_path)
             .run(([0, 0, 0, 0], 8080))
     );
 

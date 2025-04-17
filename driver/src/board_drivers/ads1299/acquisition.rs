@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 use log::{info, warn, debug, error};
 use std::collections::VecDeque;
+use std::thread; // Add this import
 
 use crate::board_drivers::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent};
 use super::helpers::{ch_raw_to_voltage, current_timestamp_micros, read_data_from_spi};
@@ -31,52 +32,42 @@ pub type Ads1299Config = AdcConfig;
 
 /// Start data acquisition from the ADS1299.
 ///
-/// This method validates the driver state, initializes the ADS1299 chip,
-/// and spawns a background task that reads data from the chip.
+/// This method configures the device for continuous data mode, sets up the
+/// interrupt handler, and starts the acquisition process.
+
 pub async fn start_acquisition(
     inner_arc: Arc<Mutex<super::driver::Ads1299Inner>>,
     tx: mpsc::Sender<DriverEvent>,
     interrupt_running: Arc<AtomicBool>,
-    mut spi: Option<SpiType>,
-    mut drdy_pin: Option<DrdyPinType>,
-) -> Result<(Option<JoinHandle<()>>, Option<JoinHandle<()>>, SpiType, DrdyPinType), DriverError> {
-    // Check if already running
-    {
-        let inner = inner_arc.lock().await;
-        if inner.running {
-            return Err(DriverError::ConfigurationError(
-                "Acquisition already running".to_string(),
-            ));
-        }
-    }
+    mut spi: Option<SpiType>, // Make spi mutable
+    drdy_pin: Option<DrdyPinType>,
+) -> Result<(Option<thread::JoinHandle<()>>, Option<JoinHandle<()>>), DriverError> {
+    // Note: spi and drdy_pin are moved into the tasks/threads now.
+    // The caller (driver.rs) should set its copies to None.
 
-    // Initialize chip
-    initialize_chip(&mut spi, &inner_arc).await?;
-    
-    // Set start time and update status
-    let start_time = current_timestamp_micros()?;
+    // Set base timestamp
     {
         let mut inner = inner_arc.lock().await;
-        inner.running = true;
+        let timestamp = match current_timestamp_micros() {
+            Ok(ts) => ts,
+            Err(e) => {
+                error!("Failed to get timestamp: {:?}", e);
+                0
+            }
+        };
+        inner.base_timestamp = Some(timestamp);
         inner.status = DriverStatus::Running;
-        inner.base_timestamp = Some(start_time);
-        inner.sample_count = 0;
     }
     
-    // Notify status change
-    notify_status_change(&inner_arc, &tx).await?;
-    
-    // Check DRDY pin state
-    if let Some(drdy_pin_ref) = &drdy_pin {
-        let drdy_state = if drdy_pin_ref.is_high() { "HIGH" } else { "LOW" };
-        debug!("DRDY pin state before starting conversion: {}", drdy_state);
-        if !drdy_pin_ref.is_high() {
-            warn!("DRDY pin is LOW before starting conversion, which is unexpected. This may indicate a hardware issue.");
+    // Send START command to ADS1299
+    if let Some(spi_ref) = spi.as_mut() {
+        if let Err(e) = send_command_to_spi(spi_ref, CMD_START) {
+            error!("Failed to send START command: {:?}", e);
+            return Err(e);
         }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
     }
     
-    // Start conversion
-    start_conversion(&mut spi)?;
     debug!("Conversion started");
     
     // Set up continuous data mode
@@ -117,11 +108,11 @@ pub async fn start_acquisition(
     interrupt_running.store(true, Ordering::SeqCst);
     
     // Take ownership of hardware interfaces
-    let drdy_pin_unwrapped = drdy_pin.take().ok_or(DriverError::NotInitialized)?;
-    let spi_unwrapped = spi.take().ok_or(DriverError::NotInitialized)?;
+    let mut drdy_pin_unwrapped = drdy_pin.ok_or(DriverError::NotInitialized)?;
+    let mut spi_unwrapped = spi.ok_or(DriverError::NotInitialized)?;
     
-    // Spawn tasks
-    let (interrupt_task, processing_task) = spawn_interrupt_and_processing_tasks(
+    // Spawn tasks/threads
+    let (interrupt_thread_handle, processing_task_handle) = spawn_interrupt_and_processing_tasks(
         config,
         batch_size,
         num_channels,
@@ -133,9 +124,10 @@ pub async fn start_acquisition(
         drdy_pin_unwrapped,
         spi_unwrapped,
     );
-    
+
     info!("Ads1299Driver acquisition started");
-    Ok((Some(interrupt_task), Some(processing_task), spi_unwrapped, drdy_pin_unwrapped))
+    // Return the handles
+    Ok((Some(interrupt_thread_handle), Some(processing_task_handle)))
 }
 
 /// Stop data acquisition from the ADS1299.
@@ -146,120 +138,89 @@ pub async fn stop_acquisition(
     inner_arc: Arc<Mutex<super::driver::Ads1299Inner>>,
     tx: &mpsc::Sender<DriverEvent>,
     interrupt_running: &Arc<AtomicBool>,
-    interrupt_task: &mut Option<JoinHandle<()>>,
-    task_handle: &mut Option<JoinHandle<()>>,
+    interrupt_thread: &mut Option<thread::JoinHandle<()>>, // Changed to mutable reference
+    processing_task: &mut Option<JoinHandle<()>>,          // Changed to mutable reference
     spi: &mut Option<SpiType>,
 ) -> Result<(), DriverError> {
-    // Signal the acquisition task to stop
+    debug!("Stopping acquisition");
+    
+    // First, update the inner state to signal stopping
     {
         let mut inner = inner_arc.lock().await;
-        
-        if !inner.running {
-            debug!("Stop acquisition called, but acquisition was not running");
-            return Ok(());
-        }
-        
         inner.running = false;
-        debug!("Signaled acquisition task to stop");
     }
     
-    // Signal the interrupt thread to stop
-    if interrupt_running.load(Ordering::SeqCst) {
-        debug!("Signaling interrupt thread to stop");
-        interrupt_running.store(false, Ordering::SeqCst);
-        
-        // Wait for the interrupt thread to complete
-        if let Some(handle) = interrupt_task.take() {
-            match handle.await {
-                Ok(_) => debug!("Interrupt thread completed successfully"),
-                Err(e) => warn!("Interrupt thread terminated with error: {:?}", e),
+    // Signal the interrupt handler to stop
+    interrupt_running.store(false, Ordering::SeqCst);
+    debug!("Interrupt thread signaled to stop");
+    
+    // Send STOP command to ADS1299 before waiting for threads to complete
+    if let Some(spi_ref) = spi.as_mut() {
+        if let Err(e) = send_command_to_spi(spi_ref, CMD_STOP) {
+            error!("Failed to send STOP command: {:?}", e);
+            // Continue with shutdown despite error
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+        if let Err(e) = send_command_to_spi(spi_ref, CMD_SDATAC) {
+            error!("Failed to send SDATAC command: {:?}", e);
+            // Continue with shutdown despite error
+        }
+    }
+    
+    // Wait for the interrupt thread to complete with a timeout
+    if let Some(handle) = interrupt_thread.take() {
+        debug!("Waiting for interrupt thread to complete...");
+        // Spawn a blocking task to join the thread with timeout
+        match tokio::task::spawn_blocking(move || {
+            // Use a timeout for joining the thread
+            let join_result = std::thread::Builder::new()
+                .name("thread-joiner".into())
+                .spawn(move || handle.join())
+                .expect("Failed to spawn thread joiner")
+                .join();
+                
+            match join_result {
+                Ok(Ok(_)) => debug!("Interrupt thread completed successfully"),
+                Ok(Err(e)) => warn!("Interrupt thread panicked: {:?}", e),
+                Err(e) => warn!("Failed to join interrupt thread: {:?}", e),
+            }
+        }).await {
+            Ok(_) => debug!("Interrupt thread join completed"),
+            Err(e) => warn!("Error joining interrupt thread: {}", e),
+        }
+    }
+    
+    // Now wait for the processing task to complete
+    if let Some(task) = processing_task.take() {
+        debug!("Waiting for processing task to complete...");
+        // Use timeout to avoid blocking indefinitely
+        match tokio::time::timeout(Duration::from_secs(2), task).await {
+            Ok(Ok(_)) => debug!("Processing task completed successfully"),
+            Ok(Err(e)) => warn!("Processing task error: {}", e),
+            Err(_) => {
+                warn!("Processing task did not complete within timeout, aborting it");
+                // We can't really abort the task in a clean way, but it should
+                // terminate on its own when it detects running=false
             }
         }
     }
     
-    // Exit continuous data mode and stop conversion
-    if let Some(spi_ref) = spi.as_mut() {
-        // First exit RDATAC mode
-        if let Err(e) = send_command_to_spi(spi_ref, CMD_SDATAC) {
-            warn!("Failed to send SDATAC command during stop_acquisition: {:?}", e);
-            // Continue anyway to try to stop conversion
-        }
-        
-        // Small delay after sending command
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        
-        // Then stop conversion
-        stop_conversion(spi_ref)?;
-    }
-    
-    // Wait for the task to complete
-    if let Some(handle) = task_handle.take() {
-        match handle.await {
-            Ok(_) => debug!("Acquisition task completed successfully"),
-            Err(e) => warn!("Acquisition task terminated with error: {}", e),
-        }
-    }
+    // SPI commands have already been sent above
     
     // Update driver status
     {
         let mut inner = inner_arc.lock().await;
         inner.status = DriverStatus::Stopped;
-        inner.sample_count = 0;
-        // Keep the base_timestamp as it is - we'll set a new one when acquisition starts again
+        inner.base_timestamp = None;
     }
     
-    // Notify about the status change
-    notify_status_change(&inner_arc, tx).await?;
+    // Send status update event
+    if let Err(e) = tx.send(DriverEvent::StatusChange(DriverStatus::Stopped)).await {
+        error!("Failed to send status update: {}", e);
+    }
+    
     info!("Ads1299Driver acquisition stopped");
     Ok(())
-}
-
-/// Initialize the ADS1299 chip with the current configuration.
-async fn initialize_chip(
-    spi: &mut Option<SpiType>,
-    inner_arc: &Arc<Mutex<super::driver::Ads1299Inner>>,
-) -> Result<(), DriverError> {
-    // Implementation will be added in the driver.rs file
-    // This is a placeholder for now
-    Ok(())
-}
-
-/// Start conversion on the ADS1299.
-fn start_conversion(spi: &mut Option<SpiType>) -> Result<(), DriverError> {
-    // Send START command (0x08)
-    if let Some(spi_ref) = spi.as_mut() {
-        send_command_to_spi(spi_ref, CMD_START)?;
-    }
-    Ok(())
-}
-
-/// Stop conversion on the ADS1299.
-fn stop_conversion(spi: &mut dyn SpiDevice) -> Result<(), DriverError> {
-    // Send STOP command (0x0A)
-    send_command_to_spi(spi, CMD_STOP)?;
-    Ok(())
-}
-
-/// Internal helper to notify status changes over the event channel.
-///
-/// This method sends a status change event to any listeners.
-async fn notify_status_change(
-    inner_arc: &Arc<Mutex<super::driver::Ads1299Inner>>,
-    tx: &mpsc::Sender<DriverEvent>,
-) -> Result<(), DriverError> {
-    // Get current status
-    let status = {
-        let inner = inner_arc.lock().await;
-        inner.status
-    };
-    
-    debug!("Sending status change notification: {:?}", status);
-    
-    // Send the status change event
-    tx
-        .send(DriverEvent::StatusChange(status))
-        .await
-        .map_err(|e| DriverError::Other(format!("Failed to send status change: {}", e)))
 }
 
 /// Spawn the interrupt handler and async processing task
@@ -274,85 +235,121 @@ fn spawn_interrupt_and_processing_tasks(
     interrupt_running: Arc<AtomicBool>,
     mut drdy_pin: DrdyPinType,
     mut spi: SpiType,
-) -> (JoinHandle<()>, JoinHandle<()>) {
+) -> (thread::JoinHandle<()>, JoinHandle<()>) { // Changed return type
     use rppal::gpio::Trigger;
 
-    // Spawn a Tokio task for async interrupt polling and batching
-    let interrupt_task = tokio::spawn(async move {
+    // Spawn a dedicated OS thread for interrupt handling
+    let interrupt_thread_handle = thread::spawn(move || {
         let mut sample_count = 0;
         let mut consecutive_errors = 0;
         const MAX_CONSECUTIVE_ERRORS: usize = 5;
-        let mut ring_buffer: VecDeque<(Vec<i32>, u64)> = VecDeque::with_capacity(batch_size * 2);
 
-        // Poll interval for DRDY pin (short for low latency)
-        let poll_interval = Duration::from_millis(10);
-
-        loop {
-            if !interrupt_running.load(Ordering::SeqCst) {
-                break;
+        // Configure the pin for interrupt
+        match drdy_pin.set_interrupt(Trigger::FallingEdge, None) {
+            Ok(_) => debug!("DRDY pin interrupt configured successfully"),
+            Err(e) => {
+                error!("Failed to configure DRDY pin interrupt: {:?}", e);
+                // Use blocking_send as this is a thread, not async task
+                let _ = data_tx.blocking_send(InterruptData::Error(format!("Failed to configure DRDY interrupt: {}", e)));
+                return; // Exit thread if interrupt setup fails
             }
-            // Poll DRDY pin (simulate async interrupt)
-            match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_millis(10))) {
+        }
+
+        debug!("Interrupt handler thread started");
+
+        // Main interrupt handling loop
+        while interrupt_running.load(Ordering::SeqCst) {
+            // Wait for the interrupt with a timeout (e.g., 1 second)
+            match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
                 Ok(Some(event)) if event.trigger == Trigger::FallingEdge => {
+                    // DRDY pin went low, data is ready
                     match read_data_from_spi(&mut spi, num_channels) {
                         Ok(samples) => {
+                            // Reset error counter on successful read
                             consecutive_errors = 0;
-                            ring_buffer.push_back((samples, sample_count));
-                            sample_count += 1;
-                            // If enough samples for a batch, send them
-                            if ring_buffer.len() >= batch_size {
-                                let mut batch = Vec::with_capacity(batch_size);
-                                for _ in 0..batch_size {
-                                    if let Some((s, c)) = ring_buffer.pop_front() {
-                                        batch.push((s, c));
-                                    }
+
+                            // Send samples and current count through the channel
+                            // Use blocking_send as try_send might drop data under backpressure
+                            if let Err(e) = data_tx.blocking_send(InterruptData::Data(samples, sample_count)) {
+                                error!("Failed to send samples to Tokio task (channel closed?): {}", e);
+                                // If the channel is closed, the processing task likely panicked or exited.
+                                // Check if we should still be running before breaking
+                                if !interrupt_running.load(Ordering::SeqCst) {
+                                    debug!("Channel closed but interrupt_running is false, normal shutdown");
+                                } else {
+                                    error!("Channel closed while interrupt_running is true, abnormal shutdown");
                                 }
-                                // Flatten batch and send to async processor
-                                for (samples, count) in batch {
-                                    if let Err(e) = data_tx.try_send(InterruptData::Data(samples, count)) {
-                                        error!("Sample dropped: channel full in interrupt handler: {}", e);
-                                    }
-                                }
+                                break; // Exit the interrupt loop
                             }
-                        }
+                            sample_count += 1;
+                        },
                         Err(e) => {
                             error!("Error reading data in interrupt handler: {:?}", e);
                             consecutive_errors += 1;
+
+                            // If we've had too many consecutive errors, signal a critical error
                             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                                 error!("Critical error: {} consecutive SPI failures", consecutive_errors);
-                                let _ = data_tx.try_send(InterruptData::Error(format!(
+                                // Send an error event through the data channel
+                                let _ = data_tx.blocking_send(InterruptData::Error(format!(
                                     "Critical error: {} consecutive SPI failures", consecutive_errors
                                 )));
-                                break;
+                                break; // Exit the interrupt loop on persistent errors
                             }
+                            // Continue and try again on next interrupt
                         }
                     }
-                }
+                },
                 Ok(Some(event)) => {
+                    // This shouldn't happen as we're only triggering on falling edge
                     warn!("Unexpected interrupt event: {:?}", event);
-                }
+                },
                 Ok(None) => {
-                    // No data ready, just continue
-                }
+                    // Timeout occurred, no interrupt within 1 second. Check running flag.
+                    if !interrupt_running.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // No need to log timeout every second if running normally
+                    // debug!("Interrupt timeout - no data ready");
+                },
                 Err(e) => {
                     error!("Error polling for interrupt: {:?}", e);
-                    sleep(Duration::from_millis(10)).await;
+                    // Send error and exit thread on poll error
+                     let _ = data_tx.blocking_send(InterruptData::Error(format!(
+                        "Error polling for interrupt: {}", e
+                    )));
+                    break; // Exit loop on poll error
                 }
             }
-            sleep(poll_interval).await;
+            // No sleep needed here, poll_interrupt blocks until event or timeout
         }
-        debug!("Async interrupt handler task terminated");
+
+        debug!("Interrupt handler thread terminated");
+
+        // Clean up by disabling the interrupt
         if let Err(e) = drdy_pin.clear_interrupt() {
             error!("Failed to clear interrupt: {:?}", e);
         }
-    });
+    }); // End of thread::spawn
 
-    // Spawn a Tokio task to process the data from the interrupt handler
-    let processing_task = tokio::spawn(async move {
+    // Spawn a Tokio task to process the data from the interrupt thread
+    let processing_task_handle = tokio::spawn(async move { // Renamed handle
         // Get base timestamp
         let base_timestamp = {
             let inner = inner_arc.lock().await;
-            inner.base_timestamp.expect("Base timestamp should be set")
+            match inner.base_timestamp {
+                Some(ts) => ts,
+                None => {
+                    error!("Base timestamp not set, using current time");
+                    match super::helpers::current_timestamp_micros() {
+                        Ok(ts) => ts,
+                        Err(_) => {
+                            error!("Failed to get current timestamp, using 0");
+                            0
+                        }
+                    }
+                }
+            }
         };
         
         // Main acquisition loop
@@ -364,34 +361,27 @@ fn spawn_interrupt_and_processing_tasks(
         
         debug!("Starting Tokio task to process data from interrupt handler");
         
-        while let Some(interrupt_msg) = data_rx.recv().await {
-            match interrupt_msg {
-                InterruptData::Data(raw_samples, sample_count) => {
-                    // Normal data path
-                    // Check if we should continue running
-                    let should_continue = {
-                        let inner = inner_arc.lock().await;
-                        inner.running
-                    };
-
-                    if !should_continue {
-                        // Send any remaining samples in the buffer before breaking
-                        if !timestamps.is_empty() {
-                            debug!("Sending final batch of {} samples before stopping", timestamps.len());
-
-                            // Create AdcData with the accumulated samples
-                            let data = AdcData {
-                                timestamp: *timestamps.last().unwrap_or(&0),
-                                raw_samples: raw_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-                                voltage_samples: voltage_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-                            };
-
-                            if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
-                                error!("Ads1299Driver event channel closed: {}", e);
-                            }
-                        }
-                        break;
-                    }
+        // Use a timeout on the channel receive to periodically check if we should exit
+        let mut exit_requested = false;
+        while !exit_requested {
+            // Check if we should continue running
+            let should_continue = {
+                let inner = inner_arc.lock().await;
+                inner.running
+            };
+            
+            if !should_continue {
+                debug!("Processing task detected running=false, preparing to exit");
+                exit_requested = true;
+                // Don't break yet - process any remaining messages
+            }
+            
+            // Use timeout to periodically check running state
+            match tokio::time::timeout(Duration::from_millis(100), data_rx.recv()).await {
+                Ok(Some(interrupt_msg)) => {
+                    match interrupt_msg {
+                        InterruptData::Data(raw_samples, sample_count) => {
+                            // Normal data path - process even if exit requested to drain the channel
 
                     // Calculate timestamp
                     let sample_interval = (1_000_000 / config.sample_rate) as u64;
@@ -405,7 +395,7 @@ fn spawn_interrupt_and_processing_tasks(
                             raw_sample_buffer[i].push_back(raw);
                             
                             // Convert raw sample to voltage and add to buffer
-                            let channel_idx = config.channels[i];
+                            // Removed redundant channel_idx lookup
                             let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
                             voltage_sample_buffer[i].push_back(voltage);
                         }
@@ -418,7 +408,7 @@ fn spawn_interrupt_and_processing_tasks(
 
                         // Create AdcData with the accumulated samples
                         let data = AdcData {
-                            timestamp: *timestamps.last().unwrap_or(&0),
+                            timestamp: *timestamps.back().unwrap_or(&0), // Use back for latest timestamp
                             raw_samples: raw_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
                             voltage_samples: voltage_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
                         };
@@ -437,22 +427,99 @@ fn spawn_interrupt_and_processing_tasks(
                         }
                         timestamps.clear();
                     }
-                }
-                InterruptData::Error(msg) => {
-                    error!("Received critical hardware error signal from interrupt thread: {}", msg);
-                    if let Err(e) = tx.send(DriverEvent::Error(msg)).await {
-                        error!("Failed to send error event: {}", e);
+                        }
+                        InterruptData::Error(msg) => {
+                            error!("Received critical hardware error signal from interrupt thread: {}", msg);
+                            if let Err(e) = tx.send(DriverEvent::Error(msg)).await {
+                                error!("Failed to send error event: {}", e);
+                            }
+                            // Update driver status
+                            let mut inner = inner_arc.lock().await;
+                            inner.status = DriverStatus::Error;
+                            exit_requested = true; // Exit after this message
+                        }
                     }
-                    // Update driver status
-                    let mut inner = inner_arc.lock().await;
-                    inner.status = DriverStatus::Error;
-                    break; // Exit the processing loop
+                },
+                Ok(None) => {
+                    // Channel closed by sender
+                    debug!("Data channel closed by sender, exiting processing task");
+                    break;
+                },
+                Err(_) => {
+                    // Timeout - check if we should exit
+                    if exit_requested {
+                        // We've already processed any remaining messages, now we can exit
+                        debug!("Exit requested and timeout reached, exiting processing task");
+                        break;
+                    }
+                    // Otherwise continue waiting for messages
                 }
+            }
+        }
+        
+        // Send any remaining samples in the buffer before exiting
+        if !timestamps.is_empty() {
+            debug!("Sending final batch of {} samples before stopping", timestamps.len());
+
+            // Create AdcData with the accumulated samples
+            let data = AdcData {
+                timestamp: *timestamps.back().unwrap_or(&0),
+                raw_samples: raw_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
+                voltage_samples: voltage_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
+            };
+
+            if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
+                error!("Ads1299Driver event channel closed: {}", e);
             }
         }
         
         debug!("Tokio processing task terminated");
     });
     
-    (interrupt_task, processing_task)
+    (interrupt_thread_handle, processing_task_handle)
+}
+
+// Dummy implementations for cloning
+struct DummySpi {}
+
+impl DummySpi {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl SpiDevice for DummySpi {
+    fn write(&mut self, _data: &[u8]) -> Result<(), std::io::Error> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Dummy SPI device"))
+    }
+    
+    fn transfer(&mut self, _read: &mut [u8], _write: &[u8]) -> Result<(), std::io::Error> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Dummy SPI device"))
+    }
+}
+
+struct DummyInputPin {}
+
+impl DummyInputPin {
+    fn new() -> Self {
+        Self {}
+    }
+}
+
+impl InputPinDevice for DummyInputPin {
+    fn is_high(&self) -> bool {
+        false
+    }
+    
+    fn set_interrupt(&mut self, _trigger: rppal::gpio::Trigger, _timeout: Option<std::time::Duration>) -> Result<(), std::io::Error> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Dummy input pin"))
+    }
+    
+    fn poll_interrupt(&mut self, _clear: bool, _timeout: Option<std::time::Duration>) -> Result<Option<rppal::gpio::Event>, std::io::Error> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Dummy input pin"))
+    }
+    
+    fn clear_interrupt(&mut self) -> Result<(), std::io::Error> {
+        Err(std::io::Error::new(std::io::ErrorKind::Other, "Dummy input pin"))
+    }
 }
