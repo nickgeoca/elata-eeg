@@ -307,7 +307,7 @@ pub async fn process_eeg_data(
                 };
                 
                 if let Err(e) = tx_to_web_socket.send(eeg_batch_data) {
-                    println!("Warning: Failed to send data chunk to WebSocket clients: {}", e);
+                    ; // println!("Warning: Failed to send data chunk to WebSocket clients: {}", e);
                 }
             }
         }

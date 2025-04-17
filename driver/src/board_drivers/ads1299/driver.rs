@@ -82,14 +82,6 @@ impl Ads1299Driver {
             ));
         }
 
-        // Validate batch size relative to channel count
-        if config.batch_size < config.channels.len() {
-            return Err(DriverError::ConfigurationError(
-                format!("Batch size ({}) must be at least equal to the number of channels ({})",
-                        config.batch_size, config.channels.len())
-            ));
-        }
-
         // Validate total buffer size (prevent excessive memory usage)
         const MAX_BUFFER_SIZE: usize = 10000; // Arbitrary limit to prevent excessive memory usage
         let channel_buffer_size = config.batch_size + additional_channel_buffering;

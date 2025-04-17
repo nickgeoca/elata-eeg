@@ -121,7 +121,7 @@ export default function EegMonitorWebGL() {
   // Effect to create WebGL lines when config and CONTAINER SIZE are ready
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const VISUAL_AMPLITUDE_SCALE = 0.00001; // Visual height scale (0-1) - Start with 0.1
+  const VISUAL_AMPLITUDE_SCALE = 0.001; // Visual height scale (0-1) - Start with 0.1
 
   useEffect(() => {
     // --- ResizeObserver Setup ---
