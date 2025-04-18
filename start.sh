@@ -52,9 +52,19 @@ if [ -f "$HOME/.kiosk_dev_mode" ]; then
     rm "$HOME/.kiosk_dev_mode"
 fi
 
+# Create labwc configuration directory
+echo "📝 Setting up labwc configuration for kiosk mode..."
+mkdir -p "/home/elata/.config/labwc"
+
+# Create labwc.yml for cursor hiding in kiosk mode
+cat > "/home/elata/.config/labwc/labwc.yml" <<EOL
+cursor:
+  hide-on-touch: true
+  default-image: none
+EOL
+
 # Create a clean autostart file for labwc (complete replacement)
 echo "📝 Creating labwc autostart file for kiosk mode..."
-mkdir -p "/home/elata/.config/labwc"
 
 # Create a clean autostart file (no markers, complete replacement)
 cat > "/home/elata/.config/labwc/autostart" <<EOL

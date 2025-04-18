@@ -116,7 +116,15 @@ echo "👤 Using username: $CURRENT_USER"
 # Update and install dependencies
 echo "📦 Installing necessary packages..."
 sudo apt update
-sudo apt install -y chromium-browser npm curl git build-essential
+sudo apt install -y chromium-browser npm curl git build-essential seatd libseat1 policykit-1
+
+# Add user to required groups for Wayland/graphics access
+echo "👥 Adding user to required groups for graphics access..."
+sudo usermod -aG video,render $CURRENT_USER
+
+# Enable seatd service for Wayland compositor
+echo "🔄 Enabling seatd service for Wayland compositor..."
+sudo systemctl enable --now seatd
 
 # Install X11 and LXDE
 echo "📦 Installing X11 and LXDE packages..."
@@ -258,8 +266,19 @@ if [ -f "$HOME/.bash_profile" ]; then
     track_modified_file "$HOME/.bash_profile" "Added X11 autostart configuration" "remove" "[\"startx\", \"bash_profile was sourced\", \"Added by EEG System Installer\"]"
 fi
 
-# Add X11 autostart configuration to .bash_profile
-BASH_PROFILE_CONTENT="if [ -z \"\$DISPLAY\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then
+# Add X11 autostart and Wayland environment variables to .bash_profile
+BASH_PROFILE_CONTENT="# Wayland environment variables
+export WLR_BACKENDS=drm
+export XDG_SESSION_TYPE=wayland
+
+# Ensure XDG_RUNTIME_DIR is set properly
+if [ -z \"\$XDG_RUNTIME_DIR\" ]; then
+  export XDG_RUNTIME_DIR=/run/user/\$(id -u)
+  mkdir -p \"\$XDG_RUNTIME_DIR\"
+  chmod 0700 \"\$XDG_RUNTIME_DIR\"
+fi
+
+if [ -z \"\$DISPLAY\" ] && [ \"\$(tty)\" = \"/dev/tty1\" ]; then
     startx
 fi
 [ -f \"\$HOME/.bashrc\" ] && source \"\$HOME/.bashrc\"

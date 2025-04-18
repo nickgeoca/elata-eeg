@@ -33,6 +33,15 @@ echo "📝 Creating new autostart file for development mode..."
 # Create directory if it doesn't exist
 mkdir -p "/home/elata/.config/labwc"
 
+# Create a development-friendly labwc.yml that shows the cursor
+echo "📝 Creating labwc configuration for development mode..."
+cat > "/home/elata/.config/labwc/labwc.yml" <<EOL
+# Development mode configuration - cursor is visible
+cursor:
+  hide-on-touch: false
+  # No default-image setting to use system default cursor
+EOL
+
 # Create a clean autostart file (no markers, complete replacement)
 cat > "/home/elata/.config/labwc/autostart" <<EOL
 #!/bin/sh
