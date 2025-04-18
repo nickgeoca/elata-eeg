@@ -8,3 +8,5 @@ Using python based cadquery to make case
 - Storage for med tape & small amount of paste
 - Open door to wires which are pluuged in?
 - Wires out then under so they dont fall out
+
+- foil shielding accross front of case up to lcd
