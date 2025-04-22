@@ -1,9 +1,7 @@
 import cadquery as cq
+from OCP.gp import gp_XYZ # Import gp_XYZ
 
-# Model origin and orientation:
 # (0, 0, 0) is the center of the top face of the LCD board.
-# X and Y axes are centered; board extends equally in both directions from center.
-# Z = 0 is the top face, Z = -7.7 mm is the bottom face.
 
 # LCD board parameters
 # PCB dimensions (board under LCD panel)
@@ -19,98 +17,125 @@ PANEL_THICKNESS = 6.1
 MOUNT_HOLE_DIAMETER = 2.5
 STUD_DIAMETER = 5.0
 STUD_HEIGHT = 4.0
-DEFAULT_OUTER_HOLE_INSET = 5.0
 
-def inner_mount_hole_positions():
-    # Returns list of (x, y) tuples for inner holes relative to board bottom-left corner
-    inner_x_offset = 20
-    inner_y_offset_bottom = 21.50
-    inner_y_offset_top = 77.93 - 7.43  # 70.50
-    inner_x_spacing = 58.00
-    return [
-        (inner_x_offset, inner_y_offset_top),  # Top-Left
-        (inner_x_offset + inner_x_spacing, inner_y_offset_top),  # Top-Right
-        (inner_x_offset, inner_y_offset_bottom),  # Bottom-Left
-        (inner_x_offset + inner_x_spacing, inner_y_offset_bottom),  # Bottom-Right
-    ]
+SCREEN_WIDTH = 109.2 + 0.2  # 109.4 mm
+SCREEN_HEIGHT = 66.05 + 0.2  # 66.25 mm
+SCREEN_X_OFFSET = 5.65  # from left and right (unused currently, but kept for reference)
+SCREEN_Y_OFFSET_TOP = 2.7  # from top
 
-def outer_mount_hole_positions(inset=DEFAULT_OUTER_HOLE_INSET):
-    # Returns list of (x, y) tuples for outer holes relative to board bottom-left corner
-    return [
-        (inset, inset),  # Bottom-Left
-        (PCB_WIDTH - inset, inset),  # Bottom-Right
-        (inset, PCB_HEIGHT - inset),  # Top-Left
-        (PCB_WIDTH - inset, PCB_HEIGHT - inset),  # Top-Right
-    ]
-
-def create_lcd_step():
+# --- Combined and Transformed Positions Class ---
+class TransformedPositions:
     """
-    Generates and exports a STEP file for the LCD assembly (Panel + PCB).
-    Adds mount holes and studs to the PCB.
-    Adds a screen feature to the Panel.
-    Returns a CadQuery Assembly for visualization with separate colors.
+    Defines key positions
     """
-    # Screen parameters
-    SCREEN_WIDTH = 109.2 + 0.2  # 109.4 mm
-    SCREEN_HEIGHT = 66.05 + 0.2  # 66.25 mm
-    SCREEN_X_OFFSET = 5.65  # from left and right (unused currently, but kept for reference)
-    SCREEN_Y_OFFSET_TOP = 2.7  # from top
+    def __init__(self, xyzθ=None): 
+        self.xyzθ: cq.Location = xyzθ or cq.Location()
 
+    def _to_transformed(self, vecs):
+        new_vecs = []
+        for vec in vecs:
+            print(vec)
+            point_xyz = gp_XYZ(vec[0], vec[1], vec[2])
+            self.xyzθ.wrapped.Transformation().Transforms(point_xyz)
+            new_vecs.append(cq.Vector(point_xyz.X(), point_xyz.Y(), point_xyz.Z()))
+        return new_vecs
+
+    def update(self, loc) -> cq.Location:
+        self.xyzθ = cq.Location(loc) if isinstance(loc, cq.Vector) else loc
+
+    def loc_add(self, vec) -> cq.Location:
+        new_loc = cq.Location(self.xyzθ.position() + vec)
+        new_loc.wrapped.SetRotation(self.xyzθ.wrapped.Transformation().GetRotation())
+        self.xyzθ = new_loc
+
+    # --- Properties return transformed vectors ---
+    @property
+    def inner_mount_holes(self) -> list[cq.Vector]:
+        x_offset = 20  - PCB_WIDTH / 2
+        y_bottom = 21.50 - PCB_HEIGHT / 2
+        y_top = PCB_HEIGHT - 7.43 - PCB_HEIGHT / 2
+        x_spacing = 58.00
+        z = -PANEL_THICKNESS
+        return self._to_transformed([
+            (x_offset, y_top, z),  # Top-Left
+            (x_offset + x_spacing, y_top, z),  # Top-Right
+            (x_offset, y_bottom, z),  # Bottom-Left
+            (x_offset + x_spacing, y_bottom, z),  # Bottom-Right
+        ])
+
+    @property
+    def outer_mount_holes(self) -> list[cq.Vector]:
+        # Reduced Form:
+        inset = 5.0
+        z = -PANEL_THICKNESS
+
+        # Calculate half-dimensions and the effective offset from the center
+        half_width = PCB_WIDTH / 2
+        half_height = PCB_HEIGHT / 2
+        x_rel = half_width - inset  # x-distance from center to inset edge
+        y_rel = half_height - inset # y-distance from center to inset edge
+
+        # Define points relative to the center (0,0) using the calculated offsets
+        return self._to_transformed([
+            (-x_rel, -y_rel, z),  # Bottom-Left
+            ( x_rel, -y_rel, z),  # Bottom-Right
+            (-x_rel,  y_rel, z),  # Top-Left
+            ( x_rel,  y_rel, z),  # Top-Right
+        ])
+
+    @property
+    def top_panel(self) -> list[cq.Vector]:
+        y_top = PCB_HEIGHT / 2
+        y_bottom = y_top - PANEL_HEIGHT
+        x_left = -PANEL_WIDTH / 2
+        x_right = PANEL_WIDTH / 2
+        z = 0
+        return self._to_transformed([
+            (x_left, y_top, z),     # Top-Left
+            (x_right, y_top, z),    # Top-Right
+            (x_left, y_bottom, z),  # Bottom-Left
+            (x_right, y_bottom, z), # Bottom-Right            
+        ])
+
+_p = TransformedPositions()
+
+def create():
+    """
+    Generates the LCD assembly (Panel + PCB), adds features, exports a STEP file,
+    and returns the CadQuery Assembly and its initial location (identity).
+    """
+    # Get hole vectors from positions object
+    inner_holes = _p.inner_mount_holes
+    outer_holes = _p.outer_mount_holes
+    all_hole_vectors = inner_holes + outer_holes
     # Calculate required Y offset to align panel top with PCB top
     panel_y_offset = (PCB_HEIGHT / 2) - (PANEL_HEIGHT / 2)
 
     # --- Create Base Parts ---
-    # LCD panel (top) - Origin at top center (Z=0), shifted up to align top edges
     lcd_panel = cq.Workplane("XY").box(
         PANEL_WIDTH, PANEL_HEIGHT, PANEL_THICKNESS, centered=(True, True, False)
     ).translate((0, panel_y_offset, -PANEL_THICKNESS)).val() # Apply Y offset
 
-    # PCB (bottom) - Origin at its top center (Z=-PANEL_THICKNESS)
     pcb = cq.Workplane("XY").box(
         PCB_WIDTH, PCB_HEIGHT, PCB_THICKNESS, centered=(True, True, False)
     ).translate((0, 0, -(PANEL_THICKNESS + PCB_THICKNESS))).val()
 
     # --- Modify PCB ---
-    # Mount hole positions (inner + outer)
-    inner_positions = inner_mount_hole_positions()
-    outer_positions = outer_mount_hole_positions()
-    all_positions = inner_positions + outer_positions
-
-    # Center the positions relative to the PCB's center
-    centered_positions = [
-        (x - PCB_WIDTH / 2, y - PCB_HEIGHT / 2) for (x, y) in all_positions
-    ]
-
-    # Create through-holes in PCB
-    hole_cylinders = (
-        cq.Workplane("XY")
-        .pushPoints(centered_positions)
-        .circle(MOUNT_HOLE_DIAMETER / 2)
-        .extrude(-PCB_THICKNESS) # Only extrude through PCB thickness
-        .translate((0, 0, -PANEL_THICKNESS)) # Start holes at top of PCB layer
-    )
-    pcb_with_holes = cq.Workplane(pcb).cut(hole_cylinders).val()
-
-    # Create studs at all mount hole positions, protruding from the bottom face of PCB
     studs = (
-        cq.Workplane("XY")
-        .pushPoints(centered_positions)
+        cq.Workplane("XY", origin=(0, 0, 0)) # Workplane at PCB bottom
+        .pushPoints([vec.toTuple() for vec in all_hole_vectors]) # Pass vectors as tuples
         .circle(STUD_DIAMETER / 2)
-        .extrude(-STUD_HEIGHT)
-        .translate((0, 0, -(PANEL_THICKNESS + PCB_THICKNESS))) # Position studs at PCB bottom
+        .extrude(-STUD_HEIGHT) # Extrude downwards
         .val()
     )
-    pcb_with_holes_and_studs = cq.Workplane(pcb_with_holes).union(studs).val()
-
-    # Drill holes through the studs
+    pcb_with_studs = cq.Workplane(pcb).union(studs).val()
     stud_hole_cylinders = (
-        cq.Workplane("XY")
-        .pushPoints(centered_positions)
+        cq.Workplane("XY", origin=(0, 0, 0)) # Workplane at PCB bottom
+        .pushPoints([vec.toTuple() for vec in all_hole_vectors]) # Pass vectors as tuples
         .circle(MOUNT_HOLE_DIAMETER / 2)
         .extrude(-STUD_HEIGHT) # Extrude downwards through stud height
-        .translate((0, 0, -(PANEL_THICKNESS + PCB_THICKNESS))) # Start holes at bottom face of PCB
     )
-    final_pcb = cq.Workplane(pcb_with_holes_and_studs).cut(stud_hole_cylinders).val()
+    final_pcb = cq.Workplane(pcb_with_studs).cut(stud_hole_cylinders).val()
 
     # --- Modify Panel ---
     # Calculate screen center position
@@ -122,10 +147,6 @@ def create_lcd_step():
     screen_bottom_edge_y_rel_pcb_center = screen_top_edge_y_rel_pcb_center - SCREEN_HEIGHT
     screen_center_y_rel_pcb_center = (screen_top_edge_y_rel_pcb_center + screen_bottom_edge_y_rel_pcb_center) / 2
 
-    # Calculate screen center Y relative to the *panel's* center
-    # The panel's center is now at (0, panel_y_offset, -PANEL_THICKNESS/2)
-    # The workplane for cutting is centered on the panel's top face: (0, panel_y_offset, 0)
-    # We need the screen center relative to this workplane origin.
     screen_center_y_rel_panel_center = screen_center_y_rel_pcb_center - panel_y_offset
 
     # Add a shallow pocket (0.2mm deep) to represent the screen on the panel's top face
@@ -163,11 +184,8 @@ def create_lcd_step():
          combined_shape_for_export = final_panel # Export something at least
 
     cq.exporters.export(combined_shape_for_export, "lcd.step")
-    print("Exported lcd.step with PCB (green) and Panel (darkgreen), mount holes, studs, and screen pocket")
-
-    return assembly
+    return assembly # Only return assembly
 
 if __name__ == "__main__":
-    assembly_result = create_lcd_step()
-    # If running interactively (e.g., in CQ-Editor or Jupyter), you might want to show the assembly:
-    # show_object(assembly_result) # Requires show_object to be defined/imported
+    # Call the updated create function and unpack results
+    lcd_assembly = create() # Only one return value now
