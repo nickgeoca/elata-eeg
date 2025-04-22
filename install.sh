@@ -116,6 +116,8 @@ echo "👤 Using username: $CURRENT_USER"
 # Update and install dependencies
 echo "📦 Installing necessary packages..."
 sudo apt update
+sudo apt remove chromium  # this fixes cpu rendering at 40% usage
+sudo apt install mesa-utils vulkan-tools mesa-vulkan-drivers
 sudo apt install -y chromium-browser npm curl git build-essential seatd libseat1 policykit-1
 
 # Add user to required groups for Wayland/graphics access
