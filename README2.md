@@ -96,6 +96,7 @@ Priorites
 - Remove printlns?
 - Fix readmes
 - MVP push. add /boot/firmware/config.txt line? dtparam=spi=on
+- Manual - include the http://raspberrypi.local:3000/ thing
 
 Lowest Priority
 - Production ready task items
@@ -134,7 +135,8 @@ Lowest Priority
  - AVSS=AGND (JP25). DGND=AGND (Figure 58)
  - SPI uses AGND
  - AGND/AVSS/DGND - Analog ground
-
+ - Stimulus response- Problem: There is a delay between pi 5 recording data and mac emitting stimulus. Solution: have the daemon and webclient (Pi 5 and Mac) sync clocks (NTP/PTP)
+- Change sample rate and channel count in the browser. Batch size configurable in browser?
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).
