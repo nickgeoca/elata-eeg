@@ -8,6 +8,11 @@
 | Header wires | ? | ? | ? | ? |
 | 3-d printed case | ? | ? | ? | ? |
 
+Electrode Adapter
+https://shop.openbci.com/products/touch-proof-electrode-cable-adapter
+Price + Shipping
+$39.99 + $6.99 = $46.98
+
 Mouser Basket Sharing Link - https://www.mouser.com/Cart/
 
 Vilros Free Shipping- Pi 5 + SDCard
@@ -21,3 +26,6 @@ Total Price: $321.99
 
 https://www.adafruit.com/product/5815
 pi 5 cooler
+
+### TODO
+- Decide what electrodes to recomend
