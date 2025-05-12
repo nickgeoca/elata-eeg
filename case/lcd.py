@@ -34,7 +34,6 @@ class TransformedPositions:
     def _to_transformed(self, vecs):
         new_vecs = []
         for vec in vecs:
-            print(vec)
             point_xyz = gp_XYZ(vec[0], vec[1], vec[2])
             self.xyzθ.wrapped.Transformation().Transforms(point_xyz)
             new_vecs.append(cq.Vector(point_xyz.X(), point_xyz.Y(), point_xyz.Z()))
@@ -55,19 +54,19 @@ class TransformedPositions:
         y_bottom = 21.50 - PCB_HEIGHT / 2
         y_top = PCB_HEIGHT - 7.43 - PCB_HEIGHT / 2
         x_spacing = 58.00
-        z = -PANEL_THICKNESS
+        z = -PANEL_THICKNESS - PCB_THICKNESS
         return self._to_transformed([
             (x_offset, y_top, z),  # Top-Left
             (x_offset + x_spacing, y_top, z),  # Top-Right
-            (x_offset, y_bottom, z),  # Bottom-Left
             (x_offset + x_spacing, y_bottom, z),  # Bottom-Right
+            (x_offset, y_bottom, z),  # Bottom-Left
         ])
 
     @property
     def outer_mount_holes(self) -> list[cq.Vector]:
         # Reduced Form:
         inset = 5.0
-        z = -PANEL_THICKNESS
+        z = -PANEL_THICKNESS - PCB_THICKNESS
 
         # Calculate half-dimensions and the effective offset from the center
         half_width = PCB_WIDTH / 2
@@ -77,14 +76,15 @@ class TransformedPositions:
 
         # Define points relative to the center (0,0) using the calculated offsets
         return self._to_transformed([
-            (-x_rel, -y_rel, z),  # Bottom-Left
-            ( x_rel, -y_rel, z),  # Bottom-Right
             (-x_rel,  y_rel, z),  # Top-Left
             ( x_rel,  y_rel, z),  # Top-Right
+            ( x_rel, -y_rel, z),  # Bottom-Right
+            (-x_rel, -y_rel, z),  # Bottom-Left
         ])
 
     @property
     def top_panel(self) -> list[cq.Vector]:
+        # Top of the glass panel corners
         y_top = PCB_HEIGHT / 2
         y_bottom = y_top - PANEL_HEIGHT
         x_left = -PANEL_WIDTH / 2
@@ -93,8 +93,19 @@ class TransformedPositions:
         return self._to_transformed([
             (x_left, y_top, z),     # Top-Left
             (x_right, y_top, z),    # Top-Right
-            (x_left, y_bottom, z),  # Bottom-Left
             (x_right, y_bottom, z), # Bottom-Right            
+            (x_left, y_bottom, z),  # Bottom-Left
+        ])
+
+    @property
+    def bottom_pcb(self) -> list[cq.Vector]:
+        # bottom of the pcb corners
+        z = -PANEL_THICKNESS
+        return self._to_transformed([
+            (PCB_WIDTH / 2, 0, z),     # Top-Left
+            (-PCB_WIDTH / 2, 0, z),    # Top-Right
+            (-PCB_WIDTH / 2, -PCB_HEIGHT, z), # Bottom-Right            
+            (PCB_WIDTH / 2, -PCB_HEIGHT, z),  # Bottom-Left
         ])
 
 _p = TransformedPositions()
@@ -130,7 +141,7 @@ def create():
     )
     pcb_with_studs = cq.Workplane(pcb).union(studs).val()
     stud_hole_cylinders = (
-        cq.Workplane("XY", origin=(0, 0, 0)) # Workplane at PCB bottom
+        cq.Workplane("XY", origin=(0, 0, -PCB_THICKNESS)) # Workplane at PCB bottom
         .pushPoints([vec.toTuple() for vec in all_hole_vectors]) # Pass vectors as tuples
         .circle(MOUNT_HOLE_DIAMETER / 2)
         .extrude(-STUD_HEIGHT) # Extrude downwards through stud height
@@ -149,16 +160,6 @@ def create():
 
     screen_center_y_rel_panel_center = screen_center_y_rel_pcb_center - panel_y_offset
 
-    # Add a shallow pocket (0.2mm deep) to represent the screen on the panel's top face
-    final_panel = (
-        cq.Workplane(lcd_panel)
-        .faces(">Z") # Select the top face of the panel
-        .workplane(centerOption="CenterOfMass") # Workplane centered on the top face's CoM
-        .center(screen_center_x, screen_center_y_rel_panel_center) # Center relative to panel workplane
-        .rect(SCREEN_WIDTH, SCREEN_HEIGHT)
-        .cutBlind(-0.2) # Cut 0.2mm into the panel
-    ).val()
-
     # --- Create Screen Overlay ---
     screen_overlay = (
         cq.Workplane("XY")
@@ -171,19 +172,11 @@ def create():
 
     # --- Create Assembly for Visualization ---
     assembly = cq.Assembly()
-    assembly.add(final_panel, name="lcd_panel", color=cq.Color("darkgreen"))
+    assembly.add(lcd_panel, name="lcd_panel", color=cq.Color("darkgreen"))
     assembly.add(final_pcb, name="pcb", color=cq.Color("green"))
     assembly.add(screen_overlay, name="screen_overlay", color=cq.Color("blue"))
+    assembly.save('lcd.step')
 
-    # --- Export Combined Shape as STEP ---
-    # Union the final parts for a single STEP file export
-    combined_shape_for_export = cq.Workplane(final_panel).union(final_pcb).val()
-    if not combined_shape_for_export:
-         print("Failed to create combined shape for STEP export.")
-         # Optionally add fallback or error handling
-         combined_shape_for_export = final_panel # Export something at least
-
-    cq.exporters.export(combined_shape_for_export, "lcd.step")
     return assembly # Only return assembly
 
 if __name__ == "__main__":
