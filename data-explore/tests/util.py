@@ -41,6 +41,41 @@ def add_time_and_raw_voltage_columns(df, fname):
     return df
 
 
+def remove_powerline_noise(df, cols, fs=500, f0=60.0, q=60):
+    from scipy.signal import iirnotch, sosfiltfilt, tf2sos, freqz
+    import numpy as np
+    """Zero‑phase 60 Hz biquad notch with ≈80 dB depth."""
+    b, a   = iirnotch(w0=f0, Q=q, fs=fs)
+    sos    = tf2sos(b, a)          # safer numerics
+    df_out = df.copy()
+    df_out[cols] = df[cols].apply(lambda c: sosfiltfilt(sos, c.values), axis=0)
+    return df_out
+
+
+def downsample_by_half(df, voltage_columns, fs_in=500):
+    """
+    Half‑band FIR + zero‑phase filtfilt + stride‑2 decimation.
+    """
+    from scipy import signal
+
+    factor   = 2
+    cutoff   = 0.45                # 0.45·Nyquist_in → ≈110 Hz
+    att_db   = 60                  # desired stop‑band
+    # taps from Kaiser estimate
+    numtaps  = int(np.ceil((att_db - 8) / (2.285 * (0.15)))) | 1  # ensure odd
+    beta     = signal.kaiser_beta(att_db)
+
+    b = signal.firwin(numtaps, cutoff, window=('kaiser', beta))
+
+    def run(col):
+        filt = signal.filtfilt(b, [1], col.values)
+        return filt[::factor]
+
+    df_ds = df[voltage_columns].apply(run, axis=0)
+    df_ds.index = df.index[::factor]        # preserves original time base
+    return df_ds
+
+
 def get_fft(signal, Fs):
     N = len(signal)
     fft_vals = np.fft.fft(signal)
@@ -85,13 +120,13 @@ def plot_power_spectrum_welch(df, channels, Fs, lowcut, highcut, order, max_x_ax
     
     # Process and plot each channel
     for col in channels:
-        voltage_filtered = butter_bandpass_filter(df[col].values, Fs, lowcut, highcut, order)
+        voltage = df[col].values
         freq, psd = welch(
-            voltage_filtered,
+            voltage,
             fs=Fs,
             window='hamming',
-            nperseg=min(4096, len(voltage_filtered)),  # Ensure nperseg is not larger than signal
-            noverlap=min(2048, len(voltage_filtered)//2),  # Adjust overlap accordingly
+            nperseg=min(4096, len(voltage)),  # Ensure nperseg is not larger than signal
+            noverlap=min(2048, len(voltage)//2),  # Adjust overlap accordingly
             scaling='density'
         )
         plt.semilogy(freq, psd, label=col)
@@ -102,7 +137,7 @@ def plot_power_spectrum_welch(df, channels, Fs, lowcut, highcut, order, max_x_ax
         "Theta (4–8 Hz)": (4, 8),
         "Alpha (8–13 Hz)": (8, 13),
         "Beta (13–30 Hz)": (13, 30),
-        "Gamma (30–45 Hz)": (30, 45),
+        "Gamma (30–125 Hz)": (30, 125),
     }
     colors = ['gray', 'purple', 'green', 'orange', 'red']
     for (label, (f_min, f_max)), color in zip(eeg_bands.items(), colors):
