@@ -1,158 +1,66 @@
 'use client';
 
-import React, { useState, useEffect, useCallback } from 'react';
+import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 
-interface RecordingStatus {
-  isRecording: boolean;
-  filePath: string | null;
-  message: string;
-}
-
-export function EegRecordingControls() {
-  const [status, setStatus] = useState<RecordingStatus>({
-    isRecording: false,
-    filePath: null,
-    message: 'Not recording'
-  });
-  const [connected, setConnected] = useState(false);
-  const [wsRef, setWsRef] = useState<WebSocket | null>(null);
-
-  // Connect to the command WebSocket
-  useEffect(() => {
-    const ws = new WebSocket('ws://localhost:8080/command');
-    setWsRef(ws);
-    
-    ws.onopen = () => {
-      console.log('Command WebSocket connected');
-      setConnected(true);
-    };
-    
-    ws.onmessage = (event) => {
-      try {
-        const response = JSON.parse(event.data);
-        
-        if (response.status === 'ok') {
-          // Parse the message to determine recording status
-          const isRecording = response.message.startsWith('Currently recording');
-          let filePath = null;
-          
-          if (isRecording) {
-            // Extract file path from message
-            const match = response.message.match(/Currently recording to (.+)/);
-            if (match && match[1]) {
-              filePath = match[1];
-            }
-          }
-          
-          setStatus({
-            isRecording,
-            filePath,
-            message: response.message
-          });
-        } else {
-          console.error('Command error:', response.message);
-        }
-      } catch (error) {
-        console.error('Error parsing command response:', error);
-      }
-    };
-    
-    ws.onclose = () => {
-      console.log('Command WebSocket disconnected');
-      setConnected(false);
-    };
-    
-    ws.onerror = (error) => {
-      console.error('Command WebSocket error:', error);
-      setConnected(false);
-    };
-    
-    return () => {
-      ws.close();
-    };
-  }, []);
-
-  // Send command to start recording
-  const startRecording = useCallback(() => {
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
-      wsRef.send(JSON.stringify({ command: 'start' }));
-    }
-  }, [wsRef]);
-
-  // Send command to stop recording
-  const stopRecording = useCallback(() => {
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
-      wsRef.send(JSON.stringify({ command: 'stop' }));
-    }
-  }, [wsRef]);
-
-  // Request status update
-  const requestStatus = useCallback(() => {
-    if (wsRef && wsRef.readyState === WebSocket.OPEN) {
-      wsRef.send(JSON.stringify({ command: 'status' }));
-    }
-  }, [wsRef]);
+export default function EegRecordingControls() {
+  const {
+    wsConnected,
+    startRecording,
+    stopRecording,
+    recordingStatus,
+    recordingFilePath,
+  } = useCommandWebSocket();
 
   return (
-    <div className="p-4 bg-gray-900 text-white rounded-lg mb-4">
-      <h2 className="text-xl font-bold mb-2">Recording Controls</h2>
+    <div className="flex flex-col w-full">
+      {/* Recording controls */}
+      <div className="flex items-center justify-between mb-2">
+        <div className="text-white font-medium">Recording Controls</div>
+        <button
+          onClick={recordingStatus.startsWith('Currently recording') ? stopRecording : startRecording}
+          disabled={!wsConnected}
+          className={`px-4 py-2 rounded-md flex items-center ${
+            !wsConnected
+              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+              : recordingStatus.startsWith('Currently recording')
+                ? 'bg-red-600 hover:bg-red-700 text-white'
+                : 'bg-green-600 hover:bg-green-700 text-white'
+          }`}
+        >
+          {recordingStatus.startsWith('Currently recording') ? (
+            <>
+              <span className="inline-block w-2 h-2 rounded-full bg-white mr-2"></span>
+              Stop Recording
+            </>
+          ) : (
+            <>
+              <span className="inline-block w-2 h-2 rounded-full bg-white mr-2"></span>
+              Start Recording
+            </>
+          )}
+        </button>
+      </div>
       
-      <div className="mb-4">
-        <div className="flex items-center mb-2">
-          <div className="mr-2">Status:</div>
-          <div className="flex items-center">
-            <span className={`inline-block w-3 h-3 rounded-full mr-2 ${status.isRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-500'}`}></span>
-            <span>{status.message}</span>
-          </div>
+      {/* Recording status indicator */}
+      <div className={`p-3 rounded-md ${recordingStatus.startsWith('Currently recording') ? 'bg-red-900/30' : 'bg-gray-800'}`}>
+        <div className="flex items-center">
+          {recordingStatus.startsWith('Currently recording') ? (
+            <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2"></span>
+          ) : (
+            <span className="inline-block w-2 h-2 rounded-full bg-gray-500 mr-2"></span>
+          )}
+          <span className="text-white">{recordingStatus}</span>
         </div>
         
-        {status.filePath && (
-          <div className="text-sm text-gray-400 mb-2 truncate">
-            File: {status.filePath}
+        {recordingFilePath && (
+          <div className="text-gray-300 text-sm mt-1 truncate">
+            File: {recordingFilePath}
           </div>
         )}
-      </div>
-      
-      <div className="flex space-x-2">
-        <button
-          onClick={startRecording}
-          disabled={status.isRecording || !connected}
-          className={`px-4 py-2 rounded-md ${
-            status.isRecording || !connected
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : 'bg-green-600 hover:bg-green-700 text-white'
-          }`}
-        >
-          Start Recording
-        </button>
         
-        <button
-          onClick={stopRecording}
-          disabled={!status.isRecording || !connected}
-          className={`px-4 py-2 rounded-md ${
-            !status.isRecording || !connected
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : 'bg-red-600 hover:bg-red-700 text-white'
-          }`}
-        >
-          Stop Recording
-        </button>
-        
-        <button
-          onClick={requestStatus}
-          disabled={!connected}
-          className={`px-4 py-2 rounded-md ${
-            !connected
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : 'bg-blue-600 hover:bg-blue-700 text-white'
-          }`}
-        >
-          Refresh Status
-        </button>
-      </div>
-      
-      <div className="mt-2 text-xs text-gray-500">
-        {connected ? 'Connected to server' : 'Disconnected from server'}
+        <div className="text-gray-400 text-xs mt-2">
+          Note: Configuration changes are blocked while recording is in progress.
+        </div>
       </div>
     </div>
   );

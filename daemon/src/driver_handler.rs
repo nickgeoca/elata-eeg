@@ -7,6 +7,7 @@ use csv::Writer;
 use std::time::Instant;
 use serde::Serialize;
 use tokio::sync::Mutex;
+use futures;
 
 use crate::config::DaemonConfig;
 
@@ -30,10 +31,11 @@ pub struct CsvRecorder {
     recording_start_time: Option<Instant>,
     config: Arc<DaemonConfig>,
     current_adc_config: AdcConfig,
+    is_recording_shared: Arc<Mutex<bool>>,
 }
 
 impl CsvRecorder {
-    pub fn new(sample_rate: u32, config: Arc<DaemonConfig>, adc_config: AdcConfig) -> Self {
+    pub fn new(sample_rate: u32, config: Arc<DaemonConfig>, adc_config: AdcConfig, is_recording_shared: Arc<Mutex<bool>>) -> Self {
         Self {
             writer: None,
             file_path: None,
@@ -44,7 +46,13 @@ impl CsvRecorder {
             recording_start_time: None,
             config,
             current_adc_config: adc_config,
+            is_recording_shared,
         }
+    }
+    
+    /// Update the ADC configuration
+    pub fn update_config(&mut self, new_config: AdcConfig) {
+        self.current_adc_config = new_config;
     }
     
     /// Start recording to a new CSV file
@@ -52,6 +60,14 @@ impl CsvRecorder {
         if self.is_recording {
             return Ok(format!("Already recording to {}", self.file_path.clone().unwrap_or_default()));
         }
+        
+        // Update shared recording state
+        let _ = tokio::task::block_in_place(|| {
+            futures::executor::block_on(async {
+                let mut is_recording_guard = self.is_recording_shared.lock().await;
+                *is_recording_guard = true;
+            })
+        });
         
         // Debug: Print the recordings directory path from config
         println!("DEBUG: Recordings directory from config: {}", self.config.recordings_directory);
@@ -157,6 +173,14 @@ impl CsvRecorder {
         self.is_recording = false;
         self.start_timestamp = None;
         
+        // Update shared recording state
+        let _ = tokio::task::block_in_place(|| {
+            futures::executor::block_on(async {
+                let mut is_recording_guard = self.is_recording_shared.lock().await;
+                *is_recording_guard = false;
+            })
+        });
+        
         Ok(format!("Stopped recording to {}", file_path))
     }
     
@@ -241,6 +265,7 @@ pub async fn process_eeg_data(
     mut rx_data_from_adc: tokio::sync::mpsc::Receiver<ProcessedData>,
     tx_to_web_socket: tokio::sync::broadcast::Sender<EegBatchData>,
     csv_recorder: Arc<Mutex<CsvRecorder>>,
+    is_recording: Arc<Mutex<bool>>,
 ) {
     let mut count = 0;
     let mut last_time = std::time::Instant::now();

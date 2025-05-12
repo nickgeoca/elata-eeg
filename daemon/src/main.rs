@@ -3,7 +3,7 @@ mod driver_handler;
 mod server;
 
 use eeg_driver::{AdcConfig, EegSystem, DriverType};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, mpsc};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tx_ws = tx.clone();
 
     // Create the ADC configuration
-    let config = AdcConfig {
+    let initial_config = AdcConfig {
         sample_rate: 500,
         // channels: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
         channels: vec![0, 1],
@@ -44,24 +44,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         dsp_high_pass_cutoff_hz: daemon_config.dsp_high_pass_cutoff_hz,
         dsp_low_pass_cutoff_hz: daemon_config.dsp_low_pass_cutoff_hz,
     };
+    
+    // Create shared state
+    let config = Arc::new(Mutex::new(initial_config.clone()));
+    let is_recording = Arc::new(Mutex::new(false));
 
     println!("Starting EEG system...");
     
     // Create and start the EEG system
-    let (mut eeg_system, data_rx) = EegSystem::new(config.clone()).await?;
-    eeg_system.start(config.clone()).await?;
+    let (mut eeg_system, data_rx) = EegSystem::new(initial_config.clone()).await?;
+    eeg_system.start(initial_config.clone()).await?;
 
     println!("EEG system started. Waiting for data...");
 
     // Create CSV recorder with daemon config and ADC config
     let csv_recorder = Arc::new(Mutex::new(driver_handler::CsvRecorder::new(
-        config.sample_rate,
+        initial_config.sample_rate,
         daemon_config.clone(),
-        config.clone()
+        initial_config.clone(),
+        is_recording.clone()
     )));
 
-    // Set up WebSocket routes
-    let ws_routes = server::setup_websocket_routes(tx_ws, config.clone(), csv_recorder.clone());
+    // Set up WebSocket routes and get config update channel
+    let (ws_routes, config_update_rx) = server::setup_websocket_routes(
+        tx_ws,
+        config.clone(),
+        csv_recorder.clone(),
+        is_recording.clone()
+    );
 
     println!("WebSocket server starting on:");
     println!("- ws://localhost:8080/eeg (EEG data)");
@@ -75,13 +85,84 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(
         data_rx,
         tx,
-        csv_recorder.clone()
+        csv_recorder.clone(),
+        is_recording.clone()
     ));
 
-    // Wait for tasks to complete
-    tokio::select! {
-        _ = processing_handle => println!("Processing task completed"),
-        _ = server_handle => println!("Server task completed"),
+    // Create a loop to handle configuration updates
+    let mut current_processing_handle = processing_handle;
+    let mut current_eeg_system = eeg_system;
+    
+    loop {
+        tokio::select! {
+            _ = &mut current_processing_handle => {
+                println!("Processing task completed");
+                break;
+            },
+            _ = server_handle => {
+                println!("Server task completed");
+                break;
+            },
+            config_update = config_update_rx.recv() => {
+                if let Some(new_config) = config_update {
+                    println!("Received configuration update: {:?}", new_config.channels);
+                    
+                    // Check if recording is in progress
+                    let recording_in_progress = {
+                        let is_recording_guard = is_recording.lock().await;
+                        *is_recording_guard
+                    };
+                    
+                    if recording_in_progress {
+                        println!("Warning: Cannot update configuration during recording");
+                    } else {
+                        println!("Stopping current EEG system...");
+                        // Stop current EEG system
+                        if let Err(e) = current_eeg_system.stop().await {
+                            println!("Error stopping EEG system: {}", e);
+                        }
+                        
+                        // Abort current processing task
+                        current_processing_handle.abort();
+                        
+                        println!("Starting new EEG system with updated configuration...");
+                        // Create and start new EEG system with updated configuration
+                        let (new_eeg_system, new_data_rx) = EegSystem::new(new_config.clone()).await?;
+                        if let Err(e) = new_eeg_system.start(new_config.clone()).await {
+                            println!("Error starting new EEG system: {}", e);
+                            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other,
+                                format!("Failed to start new EEG system: {}", e))));
+                        }
+                        
+                        // Update the shared config
+                        {
+                            let mut config_guard = config.lock().await;
+                            *config_guard = new_config.clone();
+                        }
+                        
+                        // Update CSV recorder with new config
+                        {
+                            let mut recorder_guard = csv_recorder.lock().await;
+                            recorder_guard.update_config(new_config.clone());
+                        }
+                        
+                        // Start new processing task
+                        let new_processing_handle = tokio::spawn(driver_handler::process_eeg_data(
+                            new_data_rx,
+                            tx.clone(),
+                            csv_recorder.clone(),
+                            is_recording.clone()
+                        ));
+                        
+                        // Update variables for next iteration
+                        current_eeg_system = new_eeg_system;
+                        current_processing_handle = new_processing_handle;
+                        
+                        println!("EEG system restarted with new configuration");
+                    }
+                }
+            }
+        }
     }
 
     // Cleanup
