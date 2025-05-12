@@ -1,5 +1,6 @@
 use eeg_driver::{AdcConfig, ProcessedData};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::fs::File;
 use std::io::{self, Write};
 use chrono::{Local, DateTime};
@@ -7,7 +8,7 @@ use csv::Writer;
 use std::time::Instant;
 use serde::Serialize;
 use tokio::sync::Mutex;
-use futures;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::DaemonConfig;
 
@@ -31,11 +32,11 @@ pub struct CsvRecorder {
     recording_start_time: Option<Instant>,
     config: Arc<DaemonConfig>,
     current_adc_config: AdcConfig,
-    is_recording_shared: Arc<Mutex<bool>>,
+    is_recording_shared: Arc<AtomicBool>,
 }
 
 impl CsvRecorder {
-    pub fn new(sample_rate: u32, config: Arc<DaemonConfig>, adc_config: AdcConfig, is_recording_shared: Arc<Mutex<bool>>) -> Self {
+    pub fn new(sample_rate: u32, config: Arc<DaemonConfig>, adc_config: AdcConfig, is_recording_shared: Arc<AtomicBool>) -> Self {
         Self {
             writer: None,
             file_path: None,
@@ -56,18 +57,13 @@ impl CsvRecorder {
     }
     
     /// Start recording to a new CSV file
-    pub fn start_recording(&mut self) -> io::Result<String> {
+    pub async fn start_recording(&mut self) -> io::Result<String> {
         if self.is_recording {
             return Ok(format!("Already recording to {}", self.file_path.clone().unwrap_or_default()));
         }
         
         // Update shared recording state
-        let _ = tokio::task::block_in_place(|| {
-            futures::executor::block_on(async {
-                let mut is_recording_guard = self.is_recording_shared.lock().await;
-                *is_recording_guard = true;
-            })
-        });
+        self.is_recording_shared.store(true, Ordering::Relaxed);
         
         // Debug: Print the recordings directory path from config
         println!("DEBUG: Recordings directory from config: {}", self.config.recordings_directory);
@@ -160,7 +156,7 @@ impl CsvRecorder {
     }
     
     /// Stop recording and close the CSV file
-    pub fn stop_recording(&mut self) -> io::Result<String> {
+    pub async fn stop_recording(&mut self) -> io::Result<String> {
         if !self.is_recording {
             return Ok("Not currently recording".to_string());
         }
@@ -174,12 +170,7 @@ impl CsvRecorder {
         self.start_timestamp = None;
         
         // Update shared recording state
-        let _ = tokio::task::block_in_place(|| {
-            futures::executor::block_on(async {
-                let mut is_recording_guard = self.is_recording_shared.lock().await;
-                *is_recording_guard = false;
-            })
-        });
+        self.is_recording_shared.store(false, Ordering::Relaxed);
         
         Ok(format!("Stopped recording to {}", file_path))
     }
@@ -265,13 +256,16 @@ pub async fn process_eeg_data(
     mut rx_data_from_adc: tokio::sync::mpsc::Receiver<ProcessedData>,
     tx_to_web_socket: tokio::sync::broadcast::Sender<EegBatchData>,
     csv_recorder: Arc<Mutex<CsvRecorder>>,
-    is_recording: Arc<Mutex<bool>>,
+    is_recording: Arc<AtomicBool>,
+    cancellation_token: CancellationToken,
 ) {
     let mut count = 0;
     let mut last_time = std::time::Instant::now();
     let mut last_timestamp = None;
     
-    while let Some(data) = rx_data_from_adc.recv().await {
+    loop {
+        tokio::select! {
+            Some(data) = rx_data_from_adc.recv() => {
         // Write to CSV if recording is active - write the full ProcessedData
         if let Ok(mut recorder) = csv_recorder.try_lock() {
             match recorder.write_data(&data) {
@@ -380,6 +374,13 @@ pub async fn process_eeg_data(
                  println!("  (No channels available in this packet)");
             }
             last_time = std::time::Instant::now();
+        }
+            },
+            _ = cancellation_token.cancelled() => {
+                println!("Processing task cancellation requested, cleaning up...");
+                // Perform any necessary cleanup here
+                break;
+            }
         }
     }
 }

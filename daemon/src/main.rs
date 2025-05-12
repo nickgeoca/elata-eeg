@@ -5,6 +5,8 @@ mod server;
 use eeg_driver::{AdcConfig, EegSystem, DriverType};
 use tokio::sync::{broadcast, Mutex, mpsc};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -47,7 +49,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Create shared state
     let config = Arc::new(Mutex::new(initial_config.clone()));
-    let is_recording = Arc::new(Mutex::new(false));
+    let is_recording = Arc::new(AtomicBool::new(false));
 
     println!("Starting EEG system...");
     
@@ -81,17 +83,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spawn WebSocket server
     let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
+    // Create a cancellation token for the processing task
+    let processing_token = CancellationToken::new();
+    let processing_token_clone = processing_token.clone();
+
     // Process EEG data
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(
         data_rx,
         tx,
         csv_recorder.clone(),
-        is_recording.clone()
+        is_recording.clone(),
+        processing_token
     ));
 
     // Create a loop to handle configuration updates
     let mut current_processing_handle = processing_handle;
     let mut current_eeg_system = eeg_system;
+    let mut current_token = processing_token_clone;
     
     loop {
         tokio::select! {
@@ -108,10 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Received configuration update: {:?}", new_config.channels);
                     
                     // Check if recording is in progress
-                    let recording_in_progress = {
-                        let is_recording_guard = is_recording.lock().await;
-                        *is_recording_guard
-                    };
+                    let recording_in_progress = is_recording.load(Ordering::Relaxed);
                     
                     if recording_in_progress {
                         println!("Warning: Cannot update configuration during recording");
@@ -122,8 +127,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             println!("Error stopping EEG system: {}", e);
                         }
                         
-                        // Abort current processing task
-                        current_processing_handle.abort();
+                        // Check if the new config is actually different from the current one
+                        let current_config = {
+                            let config_guard = config.lock().await;
+                            config_guard.clone()
+                        };
+                        
+                        // If the config hasn't changed, skip the restart
+                        if new_config == current_config {
+                            println!("Configuration unchanged, skipping restart");
+                            continue;
+                        }
+                        
+                        // Signal cancellation to the processing task
+                        current_token.cancel();
+                        
+                        // Wait for the task to complete gracefully with a longer timeout
+                        // This allows time for CSV flushing and other cleanup operations
+                        if let Err(e) = tokio::time::timeout(
+                            tokio::time::Duration::from_secs(10), // Increased from 2s to 10s
+                            &mut current_processing_handle
+                        ).await {
+                            println!("Warning: Processing task did not complete in time, forcing abort: {}", e);
+                            current_processing_handle.abort();
+                        }
                         
                         println!("Starting new EEG system with updated configuration...");
                         // Create and start new EEG system with updated configuration
@@ -146,17 +173,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             recorder_guard.update_config(new_config.clone());
                         }
                         
+                        // Create a new cancellation token
+                        let new_token = CancellationToken::new();
+                        
                         // Start new processing task
                         let new_processing_handle = tokio::spawn(driver_handler::process_eeg_data(
                             new_data_rx,
                             tx.clone(),
                             csv_recorder.clone(),
-                            is_recording.clone()
+                            is_recording.clone(),
+                            new_token.clone()
                         ));
                         
                         // Update variables for next iteration
                         current_eeg_system = new_eeg_system;
                         current_processing_handle = new_processing_handle;
+                        current_token = new_token;
                         
                         println!("EEG system restarted with new configuration");
                     }
