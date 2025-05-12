@@ -128,7 +128,7 @@ Lowest Priority
   - Impact on Pi 5 Behavior (Revised): Yes, the script makes significant changes. Crucially, while the default Raspberry Pi OS (Bookworm) on a Pi 5 uses Wayland (with the Wayfire compositor) for its graphical session, this script overrides that default and forces the system to use X11. It does this by:
 - Should we add 60hz detection? Like your too close to a wall socket
 - Dry vs wet electrodes- make py notebook?
-- Improve board handling in GUI. 
+- Improve board handling in GUI.
 - Add studies thing via git clone
 - Data quality accessment- impedance testing, 60/50hz noise measure. step thru (don't need graphing either)
 - Look at signal quality. AVSS vs GND vs DGND vs AGND. 5v powering AVDD
@@ -136,7 +136,12 @@ Lowest Priority
  - SPI uses AGND
  - AGND/AVSS/DGND - Analog ground
  - Stimulus response- Problem: There is a delay between pi 5 recording data and mac emitting stimulus. Solution: have the daemon and webclient (Pi 5 and Mac) sync clocks (NTP/PTP)
-- Change sample rate and channel count in the browser. Batch size configurable in browser?
+- Change sample rate and channel count in the browser. session name too (need to have keyboard popup then). Batch size configurable in browser?
+- name the age or something in the file name? how do we key subject/their-data to the file recorded?
+ - session number on screen, then on pen and paper "session #35, age 24, name Bob Dylan, etc"
+  - then multiple eegs, makes it hard to do
+  - maybe study number in config.json and eeg number in config.json... then write that to file
+  - file name = "study4_eeg2_recording24_datetime_..."
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).
