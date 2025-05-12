@@ -64,17 +64,16 @@ The ADS1299EEG_FE board connects to the Raspberry Pi 5 via SPI with the followin
 |------------|------------------|-------------------|
 | DVDD 5V | JP4, pin next to "JP4" text | Pin 2 |
 | DVDD 3V | JP24, middle pin  | Pin 1 |
-| Ground | JP5, pin next to arrow (ground) symbol | Pin 9 |
+| Ground | JP5, pin next to arrow (ground) symbol | Pin 6 |
 
 
 | SPI Signal | ADS1299 Pin (J3) | Raspberry Pi 5 Pin |
 |------------|------------------|-------------------|
+| CS (Chip Select) | Pin 1 | Pin 24 (CE0) |
 | SCLK (Clock) | Pin 3 | Pin 23 |
 | MOSI (DIN) | Pin 11 | Pin 19 |
 | MISO (DOUT) | Pin 13 | Pin 21 |
-| CS (Chip Select) | Pin 1 | Pin 24 (CE0) |
 | DRDYB (Data Ready) | Pin 15 | Pin 22 (GPIO25) |
-| GND (DGND) | Pin 4, 10, 18 | Pin 6 |
 
 ### Channel 1 Electrode Connection
 - Bias Electrode -> JP25 Pin 4
