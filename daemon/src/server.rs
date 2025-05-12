@@ -181,7 +181,7 @@ pub async fn handle_config_websocket(
                     
                     // Try to parse as ConfigMessage
                     match serde_json::from_str::<ConfigMessage>(text) {
-                        Ok(config_msg) => {
+                        Ok(mut config_msg) => {
                             // Check if recording is in progress
                             if is_recording.load(Ordering::Relaxed) {
                                 // Cannot change config during recording
@@ -204,8 +204,11 @@ pub async fn handle_config_websocket(
                             let mut config_changed = false;
                             let mut update_message = String::new();
                             
+                            // Check if both parameters are None before processing
+                            let no_params_provided = config_msg.channels.is_none() && config_msg.sample_rate.is_none();
+                            
                             // Process channel updates if provided
-                            if let Some(new_channels) = config_msg.channels {
+                            if let Some(new_channels) = config_msg.channels.take() {
                                 // 1. Check if channel list is empty
                                 if new_channels.is_empty() {
                                     let response = CommandResponse {
@@ -258,10 +261,13 @@ pub async fn handle_config_websocket(
                                 }
                                 
                                 // Update channels in the new config
-                                if updated_config.channels != new_channels {
-                                    updated_config.channels = new_channels.clone();
+                                // Convert new_channels from Vec<u32> to Vec<usize> for comparison
+                                let new_channels_usize: Vec<usize> = new_channels.iter().map(|&x| x as usize).collect();
+                                
+                                if updated_config.channels != new_channels_usize {
+                                    updated_config.channels = new_channels_usize;
                                     config_changed = true;
-                                    update_message = format!("channels: {:?}", new_channels);
+                                    update_message = format!("channels: {:?}", updated_config.channels);
                                 }
                             }
                             
@@ -298,7 +304,7 @@ pub async fn handle_config_websocket(
                             
                             // If nothing changed or no parameters were provided, send an error
                             if !config_changed {
-                                if config_msg.channels.is_none() && config_msg.sample_rate.is_none() {
+                                if no_params_provided {
                                     let response = CommandResponse {
                                         status: "error".to_string(),
                                         message: "No channels or sample rate provided in configuration update".to_string(),
@@ -428,6 +434,9 @@ pub async fn handle_command_websocket(
     let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<String>(32);
     let status_tx_clone = status_tx.clone();
     
+    // Clone is_recording before moving it into the task
+    let is_recording_clone = is_recording.clone();
+    
     // Spawn a task to handle periodic status updates
     let status_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
@@ -439,7 +448,7 @@ pub async fn handle_command_websocket(
                 let recorder_guard = recorder_clone.lock().await;
                 CommandResponse {
                     status: "ok".to_string(),
-                    message: if is_recording.load(Ordering::Relaxed) {
+                    message: if is_recording_clone.load(Ordering::Relaxed) {
                         format!("Currently recording to {}", recorder_guard.file_path.clone().unwrap_or_default())
                     } else {
                         "Not recording".to_string()
@@ -475,11 +484,14 @@ pub async fn handle_command_websocket(
                 }
                 
                 let text = msg.to_str().unwrap_or_default();
+                // Clone is_recording for use in the match block
+                let is_recording_local = is_recording.clone();
+                
                 let response = match serde_json::from_str::<CommandMessage>(text) {
                     Ok(cmd) => {
                         match cmd.command.as_str() {
                             "start" => {
-                                if is_recording.load(Ordering::Relaxed) {
+                                if is_recording_local.load(Ordering::Relaxed) {
                                     CommandResponse {
                                         status: "error".to_string(),
                                         message: "Already recording".to_string(),

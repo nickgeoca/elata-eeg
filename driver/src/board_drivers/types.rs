@@ -35,7 +35,7 @@ pub enum DriverType {
 }
 
 // ADC configuration
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AdcConfig {
     pub sample_rate: u32,
     pub gain: f32,

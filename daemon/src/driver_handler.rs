@@ -2,7 +2,7 @@ use eeg_driver::{AdcConfig, ProcessedData};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use chrono::{Local, DateTime};
 use csv::Writer;
 use std::time::Instant;
@@ -131,7 +131,7 @@ impl CsvRecorder {
         let mut header = vec!["timestamp".to_string()];
         
         // Get the actual number of channels from the ADC configuration
-        let channel_count = self.current_adc_config.channels.len();
+        let _channel_count = self.current_adc_config.channels.len();
         
         // Add voltage channel headers using the actual channel indices
         for &channel_idx in &self.current_adc_config.channels {
@@ -176,7 +176,7 @@ impl CsvRecorder {
     }
     
     /// Write a batch of processed EEG data to the CSV file
-    pub fn write_data(&mut self, data: &ProcessedData) -> io::Result<String> {
+    pub async fn write_data(&mut self, data: &ProcessedData) -> io::Result<String> {
         if !self.is_recording || self.writer.is_none() {
             return Ok("Not recording".to_string());
         }
@@ -240,9 +240,9 @@ impl CsvRecorder {
         // Check if we've exceeded the maximum recording length
         if let Some(start_time) = self.recording_start_time {
             if now.duration_since(start_time).as_secs() >= (self.config.max_recording_length_minutes * 60) as u64 {
-                // Stop current recording and start a new one
-                let old_file = self.stop_recording()?;
-                let new_file = self.start_recording()?;
+                // Now that we're in an async function, we can properly handle rotation
+                let old_file = self.stop_recording().await?;
+                let new_file = self.start_recording().await?;
                 return Ok(format!("Maximum recording length reached. Stopped recording to {} and started new recording to {}", old_file, new_file));
             }
         }
@@ -268,7 +268,7 @@ pub async fn process_eeg_data(
             Some(data) = rx_data_from_adc.recv() => {
         // Write to CSV if recording is active - write the full ProcessedData
         if let Ok(mut recorder) = csv_recorder.try_lock() {
-            match recorder.write_data(&data) {
+            match recorder.write_data(&data).await {
                 Ok(msg) => {
                     // Only log if something interesting happened (like auto-rotating files)
                     if msg != "Data written successfully" && msg != "Not recording" {

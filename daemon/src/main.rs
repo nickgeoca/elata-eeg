@@ -3,13 +3,31 @@ mod driver_handler;
 mod server;
 
 use eeg_driver::{AdcConfig, EegSystem, DriverType};
-use tokio::sync::{broadcast, Mutex, mpsc};
+use tokio::sync::{broadcast, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio_util::sync::CancellationToken;
+use std::fmt;
+
+// Define a custom error type that implements Send + Sync
+#[derive(Debug)]
+struct DaemonError(String);
+
+impl fmt::Display for DaemonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for DaemonError {}
+
+// Helper function to convert any error to our custom error type
+fn to_daemon_error<E: std::fmt::Display>(e: E) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(DaemonError(e.to_string()))
+}
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logger - Reads RUST_LOG environment variable
     env_logger::init();
 
@@ -36,9 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the ADC configuration
     let initial_config = AdcConfig {
         sample_rate: 500,
-        // channels: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
         channels: vec![0, 1],
-        // channels: vec![0, 1, 2, 3, 4, 5, 6, 7],
         gain: 24.0,
         board_driver: daemon_config.driver_type,
         batch_size: daemon_config.batch_size,
@@ -54,8 +70,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting EEG system...");
     
     // Create and start the EEG system
-    let (mut eeg_system, data_rx) = EegSystem::new(initial_config.clone()).await?;
-    eeg_system.start(initial_config.clone()).await?;
+    let (mut eeg_system, data_rx) = EegSystem::new(initial_config.clone()).await
+        .map_err(to_daemon_error)?;
+    
+    eeg_system.start(initial_config.clone()).await
+        .map_err(to_daemon_error)?;
 
     println!("EEG system started. Waiting for data...");
 
@@ -68,7 +87,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )));
 
     // Set up WebSocket routes and get config update channel
-    let (ws_routes, config_update_rx) = server::setup_websocket_routes(
+    let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         tx_ws,
         config.clone(),
         csv_recorder.clone(),
@@ -90,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Process EEG data
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(
         data_rx,
-        tx,
+        tx.clone(),
         csv_recorder.clone(),
         is_recording.clone(),
         processing_token
@@ -101,15 +120,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut current_eeg_system = eeg_system;
     let mut current_token = processing_token_clone;
     
-    loop {
+    // Create a oneshot channel to signal when the server is done
+    let (server_tx, mut server_rx) = tokio::sync::oneshot::channel();
+    
+    // Spawn a task to wait for the server to complete and send a signal
+    tokio::spawn(async move {
+        let _ = server_handle.await;
+        let _ = server_tx.send(());
+    });
+    
+    let mut server_done = false;
+    let mut processing_done = false;
+    
+    while !server_done && !processing_done {
         tokio::select! {
-            _ = &mut current_processing_handle => {
-                println!("Processing task completed");
-                break;
+            result = &mut current_processing_handle => {
+                println!("Processing task completed: {:?}", result);
+                processing_done = true;
             },
-            _ = server_handle => {
+            _ = &mut server_rx => {
                 println!("Server task completed");
-                break;
+                server_done = true;
             },
             config_update = config_update_rx.recv() => {
                 if let Some(new_config) = config_update {
@@ -154,11 +185,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         println!("Starting new EEG system with updated configuration...");
                         // Create and start new EEG system with updated configuration
-                        let (new_eeg_system, new_data_rx) = EegSystem::new(new_config.clone()).await?;
+                        let (mut new_eeg_system, new_data_rx) = match EegSystem::new(new_config.clone()).await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                println!("Error creating new EEG system: {}", e);
+                                return Err(to_daemon_error(e));
+                            }
+                        };
+                        
                         if let Err(e) = new_eeg_system.start(new_config.clone()).await {
                             println!("Error starting new EEG system: {}", e);
-                            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other,
-                                format!("Failed to start new EEG system: {}", e))));
+                            return Err(to_daemon_error(e));
                         }
                         
                         // Update the shared config
@@ -198,7 +235,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Cleanup
-    eeg_system.stop().await?;
+    if let Err(e) = current_eeg_system.stop().await {
+        println!("Error stopping EEG system during cleanup: {}", e);
+    }
     
     Ok(())
 }
+
