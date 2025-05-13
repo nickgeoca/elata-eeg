@@ -1,14 +1,23 @@
+//! Main driver implementation for the ADS1299 chip.
+
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Duration};
-use async_trait::async_trait;
-use log::{info, warn, debug, trace, error};
+use log::{info, warn, debug, error};
 use lazy_static::lazy_static;
-use rppal::spi::{Spi, Bus, SlaveSelect, Mode};
-use rppal::gpio::{Gpio, InputPin, Trigger, Event};
-use std::thread;
-use super::super::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent, DriverType};
+
+use crate::board_drivers::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
+use super::acquisition::{start_acquisition, stop_acquisition, SpiType, DrdyPinType};
+use super::error::HardwareLockGuard;
+use super::registers::{
+    CMD_RESET, CMD_SDATAC, REG_ID_ADDR,
+    CONFIG1_ADDR, CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR,
+    LOFF_SENSP_ADDR, MISC1_ADDR, CH1SET_ADDR, BIAS_SENSP_ADDR, BIAS_SENSN_ADDR,
+    config1_reg, config2_reg, config3_reg, config4_reg, loff_sesp_reg, misc1_reg,
+    chn_off, chn_reg, bias_sensp_reg_mask, bias_sensn_reg_mask,
+    gain_to_reg_mask, sps_to_reg_mask
+};
+use super::spi::{SpiDevice, InputPinDevice, init_spi, init_drdy_pin, send_command_to_spi, write_register};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -21,158 +30,80 @@ pub struct Ads1299Driver {
     task_handle: Option<JoinHandle<()>>,
     tx: mpsc::Sender<DriverEvent>,
     additional_channel_buffering: usize,
-    spi: Option<Spi>,
-    drdy_pin: Option<InputPin>,
+    spi: Option<Box<dyn SpiDevice>>,
+    drdy_pin: Option<Box<dyn InputPinDevice>>,
     // New fields for interrupt-driven approach
-    interrupt_thread: Option<thread::JoinHandle<()>>,
+    interrupt_thread: Option<std::thread::JoinHandle<()>>,
     interrupt_running: Arc<AtomicBool>,
 }
 
 /// Internal state for the Ads1299Driver.
-struct Ads1299Inner {
-    config: AdcConfig,
-    running: bool,
-    status: DriverStatus,
+pub struct Ads1299Inner {
+    pub config: AdcConfig,
+    pub running: bool,
+    pub status: DriverStatus,
     // Base timestamp for calculating sample timestamps (microseconds since epoch)
-    base_timestamp: Option<u64>,
+    pub base_timestamp: Option<u64>,
     // Total samples generated since acquisition started
-    sample_count: u64,
+    pub sample_count: u64,
     // Cache of register values
-    registers: [u8; 24],
+    pub registers: [u8; 24],
 }
 
-// ADS1299 Register Value Constants
-const MUX_NORMAL: u8 = 0 << 0;
-const PD_REFBUF: u8 = 1 << 7;      // 1 : Enable internal reference buffer
-const BIAS_MEAS: u8 = 1 << 4;      // 1 : BIAS_IN signal is routed to the channel that has the MUX_Setting 010 (VREF)
-const BIASREF_INT: u8 = 1 << 3;    // 1 : BIASREF signal (AVDD + AVSS) / 2 generated internally
-const PD_BIAS: u8 = 1 << 2;        // 1 : BIAS buffer is enabled
-const BIAS_LOFF_SENS: u8 = 1 << 1; // 1 : BIAS sense is enabled
-const SRB1: u8 = 1 << 5;           // 1 : Switches closed.. This bit connects the SRB1 to all 4, 6, or 8 channels inverting inputs
-const DC_TEST: u8 = 3 << 0;
-const POWER_OFF_CH: u8 = 0x81;
-const BIAS_SENS_OFF_MASK: u8 = 0x00;
-
-// Register Setup
-const REG_ID_ADDR    : u8 = 0x00;
-const CONFIG1_ADDR   : u8 = 0x01; const config1_reg: u8 = 0x90;
-const CONFIG2_ADDR   : u8 = 0x02; const config2_reg: u8 = 0xD0 | DC_TEST;
-const CONFIG3_ADDR   : u8 = 0x03; const config3_reg: u8 = 0x60 | BIASREF_INT | PD_BIAS | PD_REFBUF;
-const LOFF_ADDR      : u8 = 0x04;
-const CH1SET_ADDR    : u8 = 0x05; const chn_reg    : u8 = 0x00 | MUX_NORMAL;
-                                  const chn_off    : u8 = 0x00 | POWER_OFF_CH;
-const BIAS_SENSP_ADDR: u8 = 0x0D; const bias_sensp_reg_mask : u8 = BIAS_SENS_OFF_MASK;
-const BIAS_SENSN_ADDR: u8 = 0x0E; const bias_sensn_reg_mask : u8 = BIAS_SENS_OFF_MASK;
-const LOFF_SENSP_ADDR: u8 = 0x0F; const loff_sesp_reg: u8 = 0x00;
-const MISC1_ADDR     : u8 = 0x15; const misc1_reg   : u8 = 0x00 | SRB1;
-const CONFIG4_ADDR   : u8 = 0x17; const config4_reg : u8 = 0x00;
-
-
-// ADS1299 Commands
-const CMD_WAKEUP: u8 = 0x02;
-const CMD_STANDBY: u8 = 0x04;
-const CMD_RESET: u8 = 0x06;
-const CMD_START: u8 = 0x08;
-const CMD_STOP: u8 = 0x0A;
-const CMD_RDATAC: u8 = 0x10;
-const CMD_SDATAC: u8 = 0x11;
-const CMD_RDATA: u8 = 0x12;
-
-
 impl Ads1299Driver {
-    /// Create a new instance of the Ads1299Driver.
+    /// Creates a new Ads1299Driver with the given ADC config and optional extra channel buffering.
+    /// `additional_channel_buffering` sets extra buffered batches (0 = lowest latency, but may cause backpressure).
     ///
-    /// This constructor takes an ADC configuration and an optional additional channel buffering parameter.
-    /// The additional_channel_buffering parameter determines how many extra batches can be buffered in the channel
-    /// beyond the minimum required (which is the batch_size from the config). Setting this to 0 minimizes
-    /// latency but may cause backpressure if the consumer can't keep up.
-    ///
-    /// # Important
-    /// Users should explicitly call `shutdown()` when done with the driver to ensure proper cleanup.
-    /// While the Drop implementation provides some basic cleanup, it cannot perform the full async shutdown sequence.
-    ///
+    /// # Note
+    /// Call `shutdown()` when done to ensure proper async cleanup; `Drop` only handles basic cleanup.
     /// # Returns
     /// A tuple containing the driver instance and a receiver for driver events.
     ///
     /// # Errors
-    /// Returns an error if:
-    /// - config.board_driver is not DriverType::Ads1299
-    /// - config.batch_size is 0 (batch size must be positive)
-    /// - config.batch_size is less than the number of channels (need at least one sample per channel)
-    /// - SPI or GPIO initialization fails
+    /// Returns an error under various conditions
     pub fn new(
         config: AdcConfig,
         additional_channel_buffering: usize
     ) -> Result<(Self, mpsc::Receiver<DriverEvent>), DriverError> {
-        // Try to acquire the hardware lock to simulate real hardware access constraints
-        let mut hardware_in_use = HARDWARE_LOCK.lock()
-            .map_err(|_| DriverError::Other("Failed to acquire hardware lock".to_string()))?;
-            
-        if *hardware_in_use {
-            return Err(DriverError::HardwareNotFound(
-                "Hardware already in use by another driver instance".to_string()
-            ));
-        }
-        
-        // Mark hardware as in use
-        *hardware_in_use = true;
-        
+        // Acquire the hardware lock using RAII guard
+        let _hardware_lock_guard = HardwareLockGuard::new(&HARDWARE_LOCK)?;
+
         // Validate config
         if config.board_driver != DriverType::Ads1299 {
-            // Release the lock if we're returning an error
-            *hardware_in_use = false;
             return Err(DriverError::ConfigurationError(
                 "Ads1299Driver requires config.board_driver=DriverType::Ads1299".to_string()
             ));
         }
-        
+
         // Validate batch size
         if config.batch_size == 0 {
-            // Release the lock if we're returning an error
-            *hardware_in_use = false;
             return Err(DriverError::ConfigurationError(
                 "Batch size must be greater than 0".to_string()
             ));
         }
-        
-        // Validate batch size relative to channel count
-        if config.batch_size < config.channels.len() {
-            // Release the lock if we're returning an error
-            *hardware_in_use = false;
-            return Err(DriverError::ConfigurationError(
-                format!("Batch size ({}) must be at least equal to the number of channels ({})",
-                        config.batch_size, config.channels.len())
-            ));
-        }
-        
+
         // Validate total buffer size (prevent excessive memory usage)
         const MAX_BUFFER_SIZE: usize = 10000; // Arbitrary limit to prevent excessive memory usage
         let channel_buffer_size = config.batch_size + additional_channel_buffering;
         if channel_buffer_size > MAX_BUFFER_SIZE {
-            // Release the lock if we're returning an error
-            *hardware_in_use = false;
             return Err(DriverError::ConfigurationError(
                 format!("Total buffer size ({}) exceeds maximum allowed ({})",
                         channel_buffer_size, MAX_BUFFER_SIZE)
             ));
         }
-        
+
         // Initialize SPI
-        let spi = match Self::init_spi() {
+        let spi = match init_spi() {
             Ok(spi) => spi,
             Err(e) => {
-                // Release the lock if we're returning an error
-                *hardware_in_use = false;
                 return Err(e);
             }
         };
-        
+
         // Initialize DRDY pin
-        let drdy_pin = match Self::init_drdy_pin() {
+        let drdy_pin = match init_drdy_pin() {
             Ok(pin) => pin,
             Err(e) => {
-                // Release the lock if we're returning an error
-                *hardware_in_use = false;
                 return Err(e);
             }
         };
@@ -192,21 +123,31 @@ impl Ads1299Driver {
         // Create channel with validated buffer size
         let (tx, rx) = mpsc::channel(channel_buffer_size);
         
-        let driver = Ads1299Driver {
+        // Create the driver as mutable
+        let mut driver = Ads1299Driver {
             inner: Arc::new(Mutex::new(inner)),
             task_handle: None,
             tx,
             additional_channel_buffering,
-            spi: Some(spi),
-            drdy_pin: Some(drdy_pin),
+            spi: Some(Box::new(spi)),
+            drdy_pin: Some(Box::new(drdy_pin)),
             interrupt_thread: None,
             interrupt_running: Arc::new(AtomicBool::new(false)),
         };
-        
+
+        // Put chip in standby (low power) mode initially
+        {
+            // This block ensures we only mutably borrow driver.spi for this operation
+            let spi_opt = driver.spi.as_mut();
+            if let Some(driver_spi) = spi_opt {
+                let _ = driver_spi.write(&[super::registers::CMD_STANDBY]);
+            }
+        }
+
         info!("Ads1299Driver created with config: {:?}", config);
         info!("Channel buffer size: {} (batch_size: {} + additional_buffering: {})",
               channel_buffer_size, config.batch_size, additional_channel_buffering);
-        
+
         Ok((driver, rx))
     }
     
@@ -221,290 +162,69 @@ impl Ads1299Driver {
     /// This method validates the driver state, initializes the ADS1299 chip,
     /// and spawns a background task that reads data from the chip.
     pub(crate) async fn start_acquisition(&mut self) -> Result<(), DriverError> {
-        // Check preconditions without holding the lock for too long
+        // Check if acquisition is already running
         {
             let inner = self.inner.lock().await;
-                
             if inner.running {
-                return Err(DriverError::ConfigurationError("Acquisition already running".to_string()));
+                return Err(DriverError::ConfigurationError(
+                    "Acquisition already running".to_string()
+                ));
             }
         }
         
-        // Initialize the chip
+        // Check if we have SPI and DRDY pin
+        if self.spi.is_none() {
+            return Err(DriverError::NotInitialized);
+        }
+        
+        if self.drdy_pin.is_none() {
+            return Err(DriverError::NotInitialized);
+        }
+        
+        // Initialize the chip registers before starting acquisition tasks
         self.initialize_chip().await?;
         
-        // Get the initial timestamp
-        let start_time = current_timestamp_micros()?;
-        
-        // Update state to running
+        // Set running flag before starting tasks
         {
             let mut inner = self.inner.lock().await;
             inner.running = true;
-            inner.status = DriverStatus::Running;
-            inner.base_timestamp = Some(start_time);
-            inner.sample_count = 0;
         }
         
-        // Notify about the status change
-        self.notify_status_change().await?;
-        
-        // Check DRDY pin state before starting
-        if let Some(drdy_pin) = &self.drdy_pin {
-            let drdy_state = if drdy_pin.is_high() { "HIGH" } else { "LOW" };
-            debug!("DRDY pin state before starting conversion: {}", drdy_state);
-            
-            // DRDY should be high when idle
-            if !drdy_pin.is_high() {
-                warn!("DRDY pin is LOW before starting conversion, which is unexpected. This may indicate a hardware issue.");
-            }
-        }
-        
-        // Start conversion
-        self.start_conversion()?;
-        debug!("Conversion started");
-        
-        // Prepare for background task
-        let inner_arc = self.inner.clone();
-        let tx = self.tx.clone();
-        
-        // Make sure we're in SDATAC mode before starting
-        if let Some(spi) = self.spi.as_mut() {
-            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
-                error!("Failed to send SDATAC command: {:?}", e);
-                return Err(e);
-            }
-            
-            // Small delay after sending command
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-            
-            // Enter continuous data mode (RDATAC)
-            if let Err(e) = send_command_to_spi(spi, CMD_RDATAC) {
-                error!("Failed to send RDATAC command: {:?}", e);
-                return Err(e);
-            }
-            
-            // Small delay after sending command
-            tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
-        }
-        
-        debug!("Starting acquisition using hardware interrupts in continuous data mode");
-        
-        // Get configuration
-        let config = {
-            let inner = inner_arc.lock().await;
-            inner.config.clone()
-        };
-        
-        // Get batch size from config
-        let batch_size = config.batch_size;
-        let num_channels = config.channels.len();
-        
-        info!("Starting acquisition with batch size: {}, sample rate: {} Hz",
-               batch_size, config.sample_rate);
-        info!("Buffering {} samples before sending batches", batch_size);
-        
-        // Create a channel for sending data from the interrupt handler to the Tokio task
-        let (data_tx, mut data_rx) = mpsc::channel::<(Vec<i32>, u64)>(batch_size);
-        
-        // Set the interrupt running flag
-        self.interrupt_running.store(true, Ordering::SeqCst);
-        let interrupt_running = self.interrupt_running.clone();
-        
-        // Take ownership of the DRDY pin and SPI
-        let mut drdy_pin = self.drdy_pin.take().ok_or(DriverError::NotInitialized)?;
-        let mut spi = self.spi.take().ok_or(DriverError::NotInitialized)?;
-        
-        // Create a thread for handling the hardware interrupt
-        // Note: Hardware interrupts must be handled in a native thread, not a Tokio task
-        let interrupt_thread = thread::spawn(move || {
-            // Configure the pin for interrupt
-            match drdy_pin.set_interrupt(Trigger::FallingEdge, None) {
-                Ok(_) => debug!("DRDY pin interrupt configured successfully"),
-                Err(e) => {
-                    error!("Failed to configure DRDY pin interrupt: {:?}", e);
-                    return;
-                }
-            }
-            
-            debug!("Interrupt handler thread started");
-            
-            // Sample counter for the interrupt thread
-            let mut sample_count = 0;
-            
-            // Error tracking for detecting persistent issues
-            let mut consecutive_errors = 0;
-            const MAX_CONSECUTIVE_ERRORS: usize = 5; // Threshold for considering a persistent error
-            
-            // Main interrupt handling loop
-            while interrupt_running.load(Ordering::SeqCst) {
-                // Wait for the interrupt with a timeout
-                match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
-                    Ok(Some(event)) if event.trigger == Trigger::FallingEdge => {
-                        // DRDY pin went low, data is ready
-                        match read_data_from_spi(&mut spi, num_channels) {
-                            Ok(samples) => {
-                                // Reset error counter on successful read
-                                consecutive_errors = 0;
-                                
-                                // Send samples and current count through the channel
-                                if let Err(e) = data_tx.blocking_send((samples, sample_count)) {
-                                    error!("Failed to send samples to Tokio task: {}", e);
-                                    // If the channel is closed, exit the loop
-                                    break;
-                                }
-                                sample_count += 1;
-                            },
-                            Err(e) => {
-                                error!("Error reading data in interrupt handler: {:?}", e);
-                                consecutive_errors += 1;
-                                
-                                // If we've had too many consecutive errors, signal a critical error
-                                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                                    error!("Critical error: {} consecutive SPI failures", consecutive_errors);
-                                    // Send an error event through the data channel using a special marker
-                                    let _ = data_tx.blocking_send((Vec::new(), u64::MAX));
-                                    break; // Exit the interrupt loop on persistent errors
-                                }
-                                // Continue and try again on next interrupt
-                            }
-                        }
-                    },
-                    Ok(Some(event)) => {
-                        // This shouldn't happen as we're only triggering on falling edge
-                        warn!("Unexpected interrupt event: {:?}", event);
-                    },
-                    Ok(None) => {
-                        // Timeout occurred, no interrupt
-                        debug!("Interrupt timeout - no data ready");
-                    },
-                    Err(e) => {
-                        error!("Error polling for interrupt: {:?}", e);
-                        // Sleep a bit to avoid tight loop on error
-                        thread::sleep(std::time::Duration::from_millis(100));
-                    }
-                }
-            }
-            
-            debug!("Interrupt handler thread terminated");
-            
-            // Clean up by disabling the interrupt
-            if let Err(e) = drdy_pin.clear_interrupt() {
-                error!("Failed to clear interrupt: {:?}", e);
-            }
-        });
-        
-        // Store the interrupt thread handle
-        self.interrupt_thread = Some(interrupt_thread);
-        
-        // Spawn a Tokio task to process the data from the interrupt handler
-        let handle = tokio::spawn(async move {
-            // Get base timestamp
-            let base_timestamp = {
-                let inner = inner_arc.lock().await;
-                inner.base_timestamp.expect("Base timestamp should be set")
-            };
-            
-            // Main acquisition loop
-            // Buffer to accumulate raw samples and timestamps before creating AdcData
-            // Each inner Vec will store batch_size samples for a single channel
-            let mut raw_sample_buffer: Vec<Vec<i32>> = vec![Vec::with_capacity(batch_size); num_channels];
-            let mut voltage_sample_buffer: Vec<Vec<f32>> = vec![Vec::with_capacity(batch_size); num_channels];
-            let mut timestamps: Vec<u64> = Vec::with_capacity(batch_size);
-            
-            debug!("Starting Tokio task to process data from interrupt handler");
-            
-            while let Some((raw_samples, sample_count)) = data_rx.recv().await {
-                // Check for error signal from interrupt thread
-                if sample_count == u64::MAX {
-                    error!("Received critical hardware error signal from interrupt thread");
-                    if let Err(e) = tx.send(DriverEvent::Error("Critical hardware error detected".to_string())).await {
-                        error!("Failed to send error event: {}", e);
-                    }
-                    // Update driver status
-                    let mut inner = inner_arc.lock().await;
+        // Start the acquisition tasks
+        match start_acquisition(
+            self.inner.clone(),
+            self.tx.clone(),
+            self.interrupt_running.clone(),
+            self.spi.take(),
+            self.drdy_pin.take(),
+        ).await {
+            Ok((interrupt_thread, processing_task)) => {
+                self.interrupt_thread = interrupt_thread;
+                self.task_handle = processing_task;
+                
+                // Notify about the status change
+                self.notify_status_change().await?;
+                
+                info!("Acquisition started successfully");
+                Ok(())
+            },
+            Err(e) => {
+                // Reset running flag on error
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.running = false;
                     inner.status = DriverStatus::Error;
-                    break; // Exit the processing loop
                 }
                 
-                // Check if we should continue running
-                let should_continue = {
-                    let inner = inner_arc.lock().await;
-                    inner.running
-                };
+                error!("Failed to start acquisition: {:?}", e);
                 
-                if !should_continue {
-                    // Send any remaining samples in the buffer before breaking
-                    if !timestamps.is_empty() {
-                        debug!("Sending final batch of {} samples before stopping", timestamps.len());
-                        
-                        // Create AdcData with the accumulated samples
-                        let data = AdcData {
-                            timestamp: *timestamps.last().unwrap_or(&0),
-                            raw_samples: raw_sample_buffer.clone(),
-                            voltage_samples: voltage_sample_buffer.clone(),
-                        };
-                        
-                        if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
-                            error!("Ads1299Driver event channel closed: {}", e);
-                        }
-                    }
-                    break;
-                }
+                // Try to notify about the status change
+                let _ = self.notify_status_change().await;
                 
-                // Calculate timestamp
-                let sample_interval = (1_000_000 / config.sample_rate) as u64;
-                let timestamp = base_timestamp + sample_count * sample_interval;
-                timestamps.push(timestamp);
-                
-                // CAUTION: While inner_arc.lock().await is async, the processing within the lock is synchronous CPU work.
-                // For simple voltage conversion, this is fine, but more complex processing here could block the Tokio executor.
-                // Process raw samples and add to buffers (transposed structure)
-                for (i, &raw) in raw_samples.iter().enumerate() {
-                    if i < num_channels {
-                        // Add raw sample to buffer
-                        raw_sample_buffer[i].push(raw);
-                        
-                        // Convert raw sample to voltage and add to buffer
-                        let channel_idx = config.channels[i];
-                        let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
-                        voltage_sample_buffer[i].push(voltage);
-                    }
-                }
-                
-                // Send the batch when we've collected batch_size samples
-                if timestamps.len() >= batch_size {
-                    debug!("Sending batch of {} samples (sample_count: {})",
-                          timestamps.len(), sample_count);
-                    
-                    // Create AdcData with the accumulated samples
-                    let data = AdcData {
-                        timestamp: *timestamps.last().unwrap_or(&0),
-                        raw_samples: raw_sample_buffer.clone(),
-                        voltage_samples: voltage_sample_buffer.clone(),
-                    };
-                    
-                    if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
-                        error!("Ads1299Driver event channel closed: {}", e);
-                        break;
-                    }
-                    
-                    // Clear buffers for next batch
-                    for channel in &mut raw_sample_buffer {
-                        channel.clear();
-                    }
-                    for channel in &mut voltage_sample_buffer {
-                        channel.clear();
-                    }
-                    timestamps.clear();
-                }
+                // Return the original error
+                Err(e)
             }
-            
-            debug!("Tokio processing task terminated");
-        });
-        
-        self.task_handle = Some(handle);
-        info!("Ads1299Driver acquisition started");
-        Ok(())
+        }
     }
 
     /// Stop data acquisition from the ADS1299.
@@ -512,68 +232,39 @@ impl Ads1299Driver {
     /// This method signals the acquisition task to stop, waits for it to complete,
     /// and updates the driver status.
     pub(crate) async fn stop_acquisition(&mut self) -> Result<(), DriverError> {
-        // Signal the acquisition task to stop
-        {
+        debug!("Driver stop_acquisition called");
+        
+        // First check if acquisition is running
+        let is_running = {
+            let inner = self.inner.lock().await;
+            inner.running
+        };
+        
+        if !is_running {
+            debug!("Acquisition not running, nothing to stop");
+            return Ok(());
+        }
+        
+        // Call the acquisition module's stop function
+        let result = stop_acquisition(
+            self.inner.clone(),
+            &self.tx,
+            &self.interrupt_running,
+            &mut self.interrupt_thread,
+            &mut self.task_handle,
+            &mut self.spi,
+        ).await;
+        
+        // Ensure we have proper cleanup even if stop_acquisition failed
+        if result.is_err() {
+            error!("Error during stop_acquisition: {:?}", result);
+            // Still update the status to avoid stuck state
             let mut inner = self.inner.lock().await;
-            
-            if !inner.running {
-                debug!("Stop acquisition called, but acquisition was not running");
-                return Ok(());
-            }
-            
             inner.running = false;
-            debug!("Signaled acquisition task to stop");
+            inner.status = DriverStatus::Error;
         }
         
-        // Signal the interrupt thread to stop
-        if self.interrupt_running.load(Ordering::SeqCst) {
-            debug!("Signaling interrupt thread to stop");
-            self.interrupt_running.store(false, Ordering::SeqCst);
-            
-            // Wait for the interrupt thread to complete
-            if let Some(handle) = self.interrupt_thread.take() {
-                match handle.join() {
-                    Ok(_) => debug!("Interrupt thread completed successfully"),
-                    Err(e) => warn!("Interrupt thread terminated with error: {:?}", e),
-                }
-            }
-        }
-        
-        // Exit continuous data mode and stop conversion
-        if let Some(spi) = self.spi.as_mut() {
-            // First exit RDATAC mode
-            if let Err(e) = send_command_to_spi(spi, CMD_SDATAC) {
-                warn!("Failed to send SDATAC command during stop_acquisition: {:?}", e);
-                // Continue anyway to try to stop conversion
-            }
-            
-            // Small delay after sending command
-            std::thread::sleep(std::time::Duration::from_millis(5));
-            
-            // Then stop conversion
-            self.stop_conversion()?;
-        }
-        
-        // Wait for the task to complete
-        if let Some(handle) = self.task_handle.take() {
-            match handle.await {
-                Ok(_) => debug!("Acquisition task completed successfully"),
-                Err(e) => warn!("Acquisition task terminated with error: {}", e),
-            }
-        }
-        
-        // Update driver status
-        {
-            let mut inner = self.inner.lock().await;
-            inner.status = DriverStatus::Stopped;
-            inner.sample_count = 0;
-            // Keep the base_timestamp as it is - we'll set a new one when acquisition starts again
-        }
-        
-        // Notify about the status change
-        self.notify_status_change().await?;
-        info!("Ads1299Driver acquisition stopped");
-        Ok(())
+        result
     }
 
     /// Return the current driver status.
@@ -595,29 +286,46 @@ impl Ads1299Driver {
     pub(crate) async fn shutdown(&mut self) -> Result<(), DriverError> {
         debug!("Shutting down Ads1299Driver");
         
-        // First check if running, but don't hold the lock
-        let should_stop = {
-            let inner = self.inner.lock().await;
-            inner.running
-        };
+        // Always try to stop acquisition first, regardless of running state
+        // This ensures a consistent shutdown sequence
+        let stop_result = self.stop_acquisition().await;
+        if let Err(e) = &stop_result {
+            warn!("Error during stop_acquisition in shutdown: {:?}", e);
+            // Continue with shutdown despite errors
+        }
         
-        // Stop acquisition if needed
-        if should_stop {
-            debug!("Stopping acquisition as part of shutdown");
-            self.stop_acquisition().await?;
-        } else {
-            // Even if acquisition is not running, make sure interrupt thread is stopped
-            if self.interrupt_running.load(Ordering::SeqCst) {
-                debug!("Stopping interrupt thread as part of shutdown");
-                self.interrupt_running.store(false, Ordering::SeqCst);
-                
-                // Wait for the interrupt thread to complete
-                if let Some(handle) = self.interrupt_thread.take() {
-                    match handle.join() {
-                        Ok(_) => debug!("Interrupt thread completed successfully during shutdown"),
-                        Err(e) => warn!("Interrupt thread terminated with error during shutdown: {:?}", e),
+        // Double-check that interrupt thread is stopped
+        if self.interrupt_running.load(Ordering::SeqCst) {
+            warn!("Interrupt thread still running after stop_acquisition, forcing stop");
+            self.interrupt_running.store(false, Ordering::SeqCst);
+            
+            // Wait for the interrupt thread to complete with timeout
+            if let Some(handle) = self.interrupt_thread.take() {
+                debug!("Joining interrupt thread during shutdown");
+                // Use spawn_blocking to avoid blocking the async runtime
+                match tokio::task::spawn_blocking(move || {
+                    // Use a timeout for joining
+                    let join_handle = std::thread::spawn(move || {
+                        let _ = handle.join();
+                    });
+                    
+                    // Wait up to 2 seconds
+                    if join_handle.join().is_err() {
+                        warn!("Failed to join interrupt thread cleanly");
                     }
+                }).await {
+                    Ok(_) => debug!("Interrupt thread joined during shutdown"),
+                    Err(e) => warn!("Error joining interrupt thread: {}", e),
                 }
+            }
+        }
+        
+        // Check if processing task is still running
+        if let Some(task) = self.task_handle.take() {
+            if !task.is_finished() {
+                warn!("Processing task still running after stop_acquisition, aborting");
+                task.abort();
+                // We don't need to wait for the abort to complete
             }
         }
 
@@ -632,85 +340,117 @@ impl Ads1299Driver {
         
         // Notify about the status change
         self.notify_status_change().await?;
+        // Put chip in standby (low power) mode on shutdown
+        if let Some(driver_spi) = self.spi.as_mut() {
+            let _ = driver_spi.write(&[super::registers::CMD_STANDBY]);
+        }
+
         info!("Ads1299Driver shutdown complete");
         Ok(())
-    }
-
-    /// Initialize SPI communication with the ADS1299.
-    fn init_spi() -> Result<Spi, DriverError> {
-        // Use SPI0 with CS0 at 500kHz (matching the working Python script)
-        // ADS1299 datasheet specifies CPOL=0, CPHA=1 (Mode 1)
-        let spi_speed = 500_000; // 500kHz - confirmed working with Python script
-        info!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
-        
-        // For debugging, try to create a mock SPI device if the real one fails
-        match Spi::new(
-            Bus::Spi0,
-            SlaveSelect::Ss0,
-            spi_speed,
-            Mode::Mode1,  // CPOL=0, CPHA=1 for ADS1299
-        ) {
-            Ok(spi) => {
-                info!("SPI initialization successful");
-                Ok(spi)
-            },
-            Err(e) => {
-                error!("SPI initialization error: {}", e);
-                error!("This could be because the SPI device is not available or the user doesn't have permission to access it.");
-                error!("Make sure the SPI interface is enabled and the user has permission to access it.");
-                
-                // Return the error
-                Err(DriverError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("SPI initialization error: {}", e)
-                )))
-            }
-        }
-    }
-
-    /// Initialize the DRDY pin for detecting when new data is available.
-    fn init_drdy_pin() -> Result<InputPin, DriverError> {
-        info!("Initializing GPIO for DRDY pin (GPIO25)");
-        
-        match Gpio::new() {
-            Ok(gpio) => {
-                info!("GPIO initialization successful");
-                
-                // GPIO25 (Pin 22) is used for DRDY
-                match gpio.get(25) {
-                    Ok(pin) => {
-                        info!("GPIO pin 25 acquired successfully");
-                        Ok(pin.into_input_pullup())
-                    },
-                    Err(e) => {
-                        error!("GPIO pin 25 error: {}", e);
-                        error!("This could be because the GPIO pin is already in use or the user doesn't have permission to access it.");
-                        error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
-                        
-                        Err(DriverError::IoError(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            format!("GPIO pin error: {}", e)
-                        )))
-                    }
-                }
-            },
-            Err(e) => {
-                error!("GPIO initialization error: {}", e);
-                error!("This could be because the GPIO interface is not available or the user doesn't have permission to access it.");
-                error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
-                
-                Err(DriverError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("GPIO initialization error: {}", e)
-                )))
-            }
-        }
     }
 
     /// Send a command to the ADS1299.
     fn send_command(&mut self, command: u8) -> Result<(), DriverError> {
         let spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-        send_command_to_spi(spi, command)
+        send_command_to_spi(spi.as_mut(), command)
+    }
+
+    /// Reset the ADS1299 chip.
+    fn reset_chip(&mut self) -> Result<(), DriverError> {
+        // Send RESET command (0x06)
+        self.send_command(CMD_RESET)?;
+        
+        // Wait for reset to complete (recommended 18 tCLK cycles, ~4.5µs at 4MHz)
+        std::thread::sleep(std::time::Duration::from_micros(10));
+        
+        Ok(())
+    }
+
+    /// Initialize the ADS1299 chip with the current configuration.
+    async fn initialize_chip(&mut self) -> Result<(), DriverError> {
+        let config = {
+            let inner = self.inner.lock().await;
+            inner.config.clone()
+        };
+        
+        // Power-up sequence following the working Python script pattern:
+        
+        // 1. Send RESET command (0x06)
+        self.send_command(CMD_RESET)?;
+        
+        // 2. Send zeros
+        if let Some(spi) = self.spi.as_mut() {
+            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::IoError(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("SPI write error: {}", e)
+            )))?;
+        }
+        
+        // 3. Send SDATAC command to stop continuous data acquisition mode
+        self.send_command(CMD_SDATAC)?;
+        
+        // Check device ID to verify communication
+        let id = self.read_register(REG_ID_ADDR)?;
+        if id != 0x3E {
+            return Err(DriverError::Other(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id)));
+        }
+        
+        // Setup registers for CH1 mode (working configuration)
+        let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
+
+        // Write registers in the specific order
+        // Constants are imported from super::registers
+
+        // Calculate masks based on config
+        let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
+        // Use the fully qualified path to call these functions
+        let gain_mask = super::registers::gain_to_reg_mask(config.gain)?;
+        let sps_mask = super::registers::sps_to_reg_mask(config.sample_rate)?;
+
+        // Write registers
+        self.write_register(CONFIG1_ADDR, config1_reg | sps_mask)?;
+        self.write_register(CONFIG2_ADDR, config2_reg)?;
+        self.write_register(CONFIG3_ADDR, config3_reg)?;
+        self.write_register(CONFIG4_ADDR, config4_reg)?;
+        self.write_register(LOFF_SENSP_ADDR, loff_sesp_reg)?; // Assuming LOFF is off
+        self.write_register(MISC1_ADDR, misc1_reg)?;
+        // Turn off all channels first
+        for ch in 0..8 { // Assuming 8 channels max for ADS1299
+            self.write_register(CH1SET_ADDR + ch, chn_off)?;
+        }
+        // Turn on configured channels with correct gain
+        for &ch in &config.channels {
+            if ch < 8 { // Ensure channel index is valid
+                 self.write_register(CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?;
+            } else {
+                 log::warn!("Channel index {} out of range (0-7), skipping configuration.", ch);
+            }
+        }
+        // Configure bias based on active channels
+        self.write_register(BIAS_SENSP_ADDR, active_ch_mask as u8)?;
+        self.write_register(BIAS_SENSN_ADDR, bias_sensn_reg_mask)?;
+
+        // Add register dump for verification (optional but helpful)
+        log::info!("----Register Dump After Configuration----");
+        let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
+        for reg in 0..=0x17 {
+            match self.read_register(reg as u8) {
+                Ok(val) => log::info!("Reg 0x{:02X} ({:<12}): 0x{:02X}", reg, names.get(reg).unwrap_or(&"Unknown"), val),
+                Err(e) => log::error!("Failed to read register 0x{:02X}: {}", reg, e),
+            }
+        }
+        log::info!("----End Register Dump----");
+        
+        // Wait for configuration to settle
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        
+        // Update status
+        {
+            let mut inner = self.inner.lock().await;
+            inner.status = DriverStatus::Ok;
+        }
+        
+        Ok(())
     }
 
     /// Read a register from the ADS1299.
@@ -760,140 +500,6 @@ impl Ads1299Driver {
         Ok(())
     }
 
-    /// Read data from the ADS1299.
-    fn read_data(&mut self) -> Result<Vec<i32>, DriverError> {
-        // Get the number of channels
-        let num_channels = {
-            let inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
-            inner.config.channels.len()
-        };
-        
-        // Get SPI and read data
-        let spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-        read_data_from_spi(spi, num_channels)
-    }
-
-    /// Reset the ADS1299 chip.
-    fn reset_chip(&mut self) -> Result<(), DriverError> {
-        // Send RESET command (0x06)
-        self.send_command(CMD_RESET)?;
-        
-        // Wait for reset to complete (recommended 18 tCLK cycles, ~4.5µs at 4MHz)
-        std::thread::sleep(std::time::Duration::from_micros(10));
-        
-        Ok(())
-    }
-
-    /// Start conversion on the ADS1299.
-    fn start_conversion(&mut self) -> Result<(), DriverError> {
-        // Send START command (0x08)
-        self.send_command(CMD_START)?;
-        Ok(())
-    }
-
-    /// Stop conversion on the ADS1299.
-    fn stop_conversion(&mut self) -> Result<(), DriverError> {
-        // Send STOP command (0x0A)
-        self.send_command(CMD_STOP)?;
-        Ok(())
-    }
-
-    /// Convert gain value to register mask.
-    fn gain_to_reg_mask(&self, gain: f32) -> Result<u8, DriverError> {
-        match gain as u8 {
-            1 => Ok(0 << 4),
-            2 => Ok(1 << 4),
-            4 => Ok(2 << 4),
-            6 => Ok(3 << 4),
-            8 => Ok(4 << 4),
-            12 => Ok(5 << 4),
-            24 => Ok(6 << 4),
-            _ => Err(DriverError::ConfigurationError(
-                format!("Unsupported gain: {}. Supported gains: 1, 2, 4, 6, 8, 12, 24", gain)
-            )),
-        }
-    }
-
-    /// Convert samples per second value to register mask.
-    fn sps_to_reg_mask(&self, sps: u32) -> Result<u8, DriverError> {
-        match sps {
-            250 => Ok(6 << 0),
-            500 => Ok(5 << 0),
-            1000 => Ok(4 << 0),
-            2000 => Ok(3 << 0),
-            4000 => Ok(2 << 0),
-            8000 => Ok(1 << 0),
-            16_000 => Ok(0 << 0),
-            _ => Err(DriverError::ConfigurationError(
-                format!("Unsupported samples per second: {}. Supported sps: 250, 500, 1000, 2000, 4000, 8000, 16000", sps)
-            )),
-        }
-    }
-
-    /// Initialize the ADS1299 chip with the current configuration.
-    async fn initialize_chip(&mut self) -> Result<(), DriverError> {
-        let config = {
-            let inner = self.inner.lock().await;
-            inner.config.clone()
-        };
-        let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
-        let gain_mask = self.gain_to_reg_mask(config.gain)?;
-        let sps_mask = self.sps_to_reg_mask(config.sample_rate)?;
-
-        // Power-up sequence following the working Python script pattern:
-        
-        // 1. Send RESET command (0x06)
-        self.send_command(CMD_RESET)?;
-        
-        // 2. Send zeros
-        if let Some(spi) = self.spi.as_mut() {
-            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI write error: {}", e)
-            )))?;
-        }
-        
-        // 3. Send SDATAC command to stop continuous data acquisition mode
-        self.send_command(CMD_SDATAC)?;
-        
-        // Check device ID to verify communication
-        let id = self.read_register(REG_ID_ADDR)?;
-        if id != 0x3E {
-            return Err(DriverError::Other(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id)));
-        }
-        
-        // Setup registers for CH1 mode (working configuration)
-        let mut spi = self.spi.as_mut().ok_or(DriverError::NotInitialized)?;
-
-        // Write registers in the specific order
-        write_register(&mut spi, CONFIG1_ADDR, config1_reg | sps_mask)?;
-        write_register(&mut spi, CONFIG2_ADDR, config2_reg)?;
-        write_register(&mut spi, CONFIG3_ADDR, config3_reg)?;
-        write_register(&mut spi, CONFIG4_ADDR, config4_reg)?;
-        write_register(&mut spi, LOFF_SENSP_ADDR, loff_sesp_reg)?;
-        write_register(&mut spi, MISC1_ADDR, misc1_reg)?;
-        for ch in 0..=7             { write_register(&mut spi, CH1SET_ADDR + ch, chn_off)?; }
-        for &ch in &config.channels { write_register(&mut spi, CH1SET_ADDR + ch as u8, chn_reg | gain_mask)?; }
-        write_register(&mut spi, BIAS_SENSP_ADDR, bias_sensp_reg_mask & active_ch_mask)?;
-        write_register(&mut spi, BIAS_SENSN_ADDR, bias_sensn_reg_mask & active_ch_mask)?;
-        
-        // Wait for configuration to settle
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        
-        println!("----Register Dump----");
-        let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
-        for reg in 0..=0x17 {println!("0x{:02X} - 0x{:02X} {}", reg, self.read_register(reg as u8)?, names[reg]);}
-        println!("----Register Dump----");
-        
-        // Update status
-        {
-            let mut inner = self.inner.lock().await;
-            inner.status = DriverStatus::Ok;
-        }
-        
-        Ok(())
-    }
-
     /// Internal helper to notify status changes over the event channel.
     ///
     /// This method sends a status change event to any listeners.
@@ -914,120 +520,8 @@ impl Ads1299Driver {
     }
 }
 
-// Helper function to send a command to SPI
-fn send_command_to_spi(spi: &mut Spi, command: u8) -> Result<(), DriverError> {
-    let buffer = [command];
-    spi.write(&buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
-    Ok(())
-}
-
-
-/// Convert 24-bit SPI data to a signed 32-bit integer (sign-extended)
-fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {
-    let raw_value = ((msb as u32) << 16) | ((mid as u32) << 8) | (lsb as u32);
-    ((raw_value as i32) << 8) >> 8
-}
-
-/// Convert signed raw ADC value to voltage using VREF and gain
-/// Formula: voltage = (raw * (VREF / Gain)) / 2^23
-fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
-    let voltage = ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32;
-    // Add detailed logging (using debug! instead of trace!)
-    debug!("ch_raw_to_voltage: raw={}, vref={}, gain={}, calculated_voltage={}", raw, vref, gain, voltage);
-    voltage
-}
-
-// Helper function to read data from SPI in continuous mode (RDATAC)
-fn read_data_from_spi(spi: &mut Spi, num_channels: usize) -> Result<Vec<i32>, DriverError> {
-    debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
-    
-    // In continuous mode (RDATAC), we don't need to send RDATA command before each read
-    // We just read the data directly when DRDY goes low
-    
-    // Calculate total bytes to read: 3 status bytes + (3 bytes per channel * num_channels)
-    let total_bytes = 3 + (3 * num_channels);
-    debug!("Reading {} total bytes (3 status + {} data bytes)", total_bytes, 3 * num_channels);
-    
-    // Prepare buffers for SPI transfer
-    let mut read_buffer = vec![0u8; total_bytes];
-    let write_buffer = vec![0u8; total_bytes];
-    
-    // Perform SPI transfer
-    match spi.transfer(&mut read_buffer, &write_buffer) {
-        Ok(_) => debug!("SPI transfer successful, read {} bytes", read_buffer.len()),
-        Err(e) => {
-            error!("SPI transfer error: {}", e);
-            return Err(DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI transfer error: {}", e)
-            )));
-        }
-    }
-    
-    // Log raw data for debugging
-    debug!("Raw SPI data: {:02X?}", read_buffer);
-    
-    // Log status bytes
-    debug!("Status bytes: [{:02X} {:02X} {:02X}]",
-           read_buffer[0], read_buffer[1], read_buffer[2]);
-    
-    // Parse the data (skip the first 3 status bytes)
-    let mut samples = Vec::with_capacity(num_channels);
-    
-    for ch in 0..num_channels {
-        let start_idx = 3 + (ch * 3); // Skip 3 status bytes, then 3 bytes per channel
-        
-        // Extract the 3 bytes for this channel
-        let msb = read_buffer[start_idx];
-        let mid = read_buffer[start_idx + 1];
-        let lsb = read_buffer[start_idx + 2];
-        
-        // Log raw bytes BEFORE conversion
-        debug!("Channel {}: raw bytes [{:02X} {:02X} {:02X}]", ch, msb, mid, lsb);
-        
-        // Convert to i32 using the ch_sample_to_raw function
-        let value = ch_sample_to_raw(msb, mid, lsb);
-        
-        // Log converted value
-        debug!("Channel {}: converted raw value = {}", ch, value);
-        
-        samples.push(value);
-    }
-    
-    Ok(samples)
-}
-
-// Helper function to get current timestamp in microseconds
-fn current_timestamp_micros() -> Result<u64, DriverError> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_micros() as u64)
-        .map_err(|e| DriverError::Other(format!("Failed to get timestamp: {}", e)))
-}
-
-// Helper function to write a value to a register in the ADS1299
-fn write_register(spi: &mut Spi, register: u8, value: u8) -> Result<(), DriverError> {
-    // Command: WREG (0x40) + register address
-    let command = 0x40 | (register & 0x1F);
-    
-    // First byte: command, second byte: number of registers to write minus 1 (0 for single register)
-    // Third byte: value to write
-    let write_buffer = [command, 0x00, value];
-    
-    spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
-    
-    Ok(())
-}
-
-
 // Implement the AdcDriver trait
-#[async_trait]
+#[async_trait::async_trait]
 impl super::super::types::AdcDriver for Ads1299Driver {
     async fn shutdown(&mut self) -> Result<(), DriverError> {
         self.shutdown().await
@@ -1063,40 +557,39 @@ unsafe impl Sync for Ads1299Driver {}
 /// cannot perform the full async shutdown sequence because Drop is not async.
 impl Drop for Ads1299Driver {
     fn drop(&mut self) {
-        // Since we can't use .await in Drop, we'll just log a warning
+        // Since we can't use .await in Drop, we'll just log a warning and do our best
         error!("Ads1299Driver dropped without calling shutdown() first. This may lead to resource leaks.");
         error!("Always call driver.shutdown().await before dropping the driver.");
         
-        // Note: We can't properly clean up in Drop because we can't use .await
-        // This is why users should call shutdown() explicitly.
+        // Signal all tasks to stop
+        self.interrupt_running.store(false, Ordering::SeqCst);
         
-        // Note: We cannot await the task_handle here because Drop is not async.
-        // This is why users should call shutdown() explicitly.
-        if self.task_handle.is_some() {
-            error!("Background task may still be running. Call shutdown() to properly terminate it.");
-        }
-        
-        // Check if interrupt thread is still running
-        if self.interrupt_running.load(Ordering::SeqCst) {
-            error!("Interrupt thread may still be running. Call shutdown() to properly terminate it.");
-            // Try to stop the interrupt thread
-            self.interrupt_running.store(false, Ordering::SeqCst);
-        }
-        
-        // Try to join the interrupt thread if it exists
-        if let Some(handle) = self.interrupt_thread.take() {
-            match handle.join() {
-                Ok(_) => debug!("Interrupt thread joined successfully in Drop implementation"),
-                Err(e) => error!("Failed to join interrupt thread in Drop implementation: {:?}", e),
+        // Abort any Tokio task that might still be running
+        if let Some(task) = self.task_handle.take() {
+            if !task.is_finished() {
+                error!("Background task still running during Drop. Aborting it.");
+                task.abort();
             }
         }
         
-        // Release the hardware lock
-        if let Ok(mut lock) = HARDWARE_LOCK.lock() {
-            *lock = false;
-            debug!("Hardware lock released in Drop implementation");
-        } else {
-            error!("Failed to release hardware lock in Drop implementation");
+        // For the interrupt thread, we can't join it properly in Drop
+        if let Some(handle) = self.interrupt_thread.take() {
+            error!("Interrupt thread may still be running during Drop. Detaching it.");
+            // We can't join in Drop, so we have to detach it
+            // This might lead to a thread leak, but it's better than blocking in Drop
+            std::thread::spawn(move || {
+                // Try to join with a timeout
+                let _join_handle = std::thread::spawn(move || {
+                    let _ = handle.join();
+                });
+                
+                // Wait up to 100ms
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // After timeout, we just let the thread continue running
+                // The OS will clean it up when the process exits
+            });
         }
+        
+        // Hardware lock is released automatically by HardwareLockGuard's Drop.
     }
 }
