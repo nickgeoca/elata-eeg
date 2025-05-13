@@ -18,11 +18,13 @@ export interface EegConfig {
 interface EegConfigContextType {
   config: EegConfig | null;
   status: string;
+  refreshConfig: () => void; // Added refreshConfig
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
   config: null,
-  status: 'Initializing...'
+  status: 'Initializing...',
+  refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
 });
 
 // Hook to use the EEG configuration
@@ -132,8 +134,15 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [connectWebSocket]); // useEffect depends on the stable connectWebSocket callback
 
+  const refreshConfig = useCallback(() => {
+    if (!isProduction) console.log('EegConfigContext: refreshConfig called, re-initiating WebSocket connection.');
+    // connectWebSocket is already stable due to its own useCallback,
+    // so it's safe to call here. It will close existing and open new.
+    connectWebSocket();
+  }, [connectWebSocket, isProduction]);
+
   return (
-    <EegConfigContext.Provider value={{ config, status }}>
+    <EegConfigContext.Provider value={{ config, status, refreshConfig }}>
       {children}
     </EegConfigContext.Provider>
   );

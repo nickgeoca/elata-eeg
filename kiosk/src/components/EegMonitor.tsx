@@ -2,7 +2,8 @@
 
 import { useRef, useState, useEffect, useCallback, useLayoutEffect } from 'react';
 import { useEegConfig } from './EegConfig';
-import EegConfigDisplay from './EegConfig';
+// EegConfigDisplay is removed as we are inlining and modifying its logic.
+// EegChannelConfig is also not used in the settings panel.
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
@@ -30,9 +31,134 @@ export default function EegMonitorWebGL() {
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
-  
+  const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null);
+  const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null);
+
   // Get configuration from context
-  const { config, status: configStatus } = useEegConfig();
+  const { config, status: configStatus, refreshConfig } = useEegConfig(); // Added refreshConfig
+
+  // State for UI selections, initialized from config when available
+  const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
+  const [selectedSampleRate, setSelectedSampleRate] = useState<string | undefined>(undefined);
+
+  useEffect(() => {
+    if (config) {
+      if (config.channels?.length !== undefined) {
+        setSelectedChannelCount(String(config.channels.length));
+      }
+      if (config.sample_rate !== undefined) {
+        setSelectedSampleRate(String(config.sample_rate));
+      }
+    }
+  }, [config]);
+
+  // Effect to manage the /config WebSocket connection
+  useEffect(() => {
+    if (showSettings) {
+      console.log('Attempting to connect to /config WebSocket');
+      const newConfigWs = new WebSocket('ws://localhost:8080/config');
+      setConfigWebSocket(newConfigWs);
+      setConfigUpdateStatus('Connecting to config service...');
+
+      newConfigWs.onopen = () => {
+        console.log('/config WebSocket connected');
+        setConfigUpdateStatus('Connected to config service. Ready to send updates.');
+      };
+
+      newConfigWs.onmessage = (event) => {
+        console.log('/config WebSocket message:', event.data);
+        try {
+          const response = JSON.parse(event.data as string);
+          // Check if it's a CommandResponse (status and message)
+          if (response.status && response.message) {
+            if (response.status === 'ok') {
+              setConfigUpdateStatus(`Config update successful: ${response.message}`);
+              refreshConfig(); // Refresh the global config state
+            } else {
+              setConfigUpdateStatus(`Config update error: ${response.message}`);
+            }
+          } else {
+            // It might be the initial full config object, or an updated one
+            // For now, we primarily care about command responses here.
+            // The EegConfig context handles receiving the main config.
+            console.log('Received config object via /config WebSocket:', response);
+          }
+        } catch (e) {
+          console.error('Error parsing /config WebSocket message:', e);
+          setConfigUpdateStatus('Error processing message from config service.');
+        }
+      };
+
+      newConfigWs.onclose = () => {
+        console.log('/config WebSocket disconnected');
+        setConfigWebSocket(null);
+        setConfigUpdateStatus('Disconnected from config service.');
+      };
+
+      newConfigWs.onerror = (error) => {
+        console.error('/config WebSocket error:', error);
+        setConfigWebSocket(null);
+        setConfigUpdateStatus('Error connecting to config service.');
+      };
+
+      return () => {
+        console.log('Closing /config WebSocket');
+        newConfigWs.close();
+        setConfigWebSocket(null);
+        setConfigUpdateStatus(null);
+      };
+    } else {
+      // If settings are hidden, ensure WebSocket is closed and status cleared
+      if (configWebSocket) {
+        console.log('Closing /config WebSocket because settings are hidden');
+        configWebSocket.close();
+        setConfigWebSocket(null);
+      }
+      setConfigUpdateStatus(null);
+    }
+  }, [showSettings, refreshConfig]); // Added refreshConfig dependency
+
+
+  const handleUpdateConfig = () => {
+    if (!configWebSocket || configWebSocket.readyState !== WebSocket.OPEN) {
+      console.error('Config WebSocket not connected or not ready.');
+      setConfigUpdateStatus('Error: Config service not connected. Cannot send update.');
+      return;
+    }
+
+    if (!selectedChannelCount && !selectedSampleRate) {
+      setConfigUpdateStatus('No changes selected to update.');
+      console.log('No changes to send for config update.');
+      return;
+    }
+    
+    const newConfig: { channels?: number[]; sample_rate?: number } = {};
+
+    if (selectedChannelCount !== undefined) {
+      const numChannels = parseInt(selectedChannelCount, 10);
+      // Create an array of channel indices [0, 1, ..., numChannels-1]
+      // The daemon expects actual channel indices, not just the count.
+      // However, the UI currently only allows selecting the *number* of channels.
+      // For now, let's assume if user selects "N channels", they mean channels 0 to N-1.
+      // This might need refinement based on how channel selection is truly intended.
+      if (!isNaN(numChannels) && numChannels > 0) {
+        newConfig.channels = Array.from({ length: numChannels }, (_, i) => i);
+      } else if (numChannels === 0) {
+         newConfig.channels = []; // Send empty array if 0 channels selected
+      }
+    }
+
+    if (selectedSampleRate !== undefined) {
+      const rate = parseInt(selectedSampleRate, 10);
+      if (!isNaN(rate)) {
+        newConfig.sample_rate = rate;
+      }
+    }
+    
+    console.log('Sending config update:', newConfig);
+    setConfigUpdateStatus('Sending configuration update...');
+    configWebSocket.send(JSON.stringify(newConfig));
+  };
 
   // Debug info reference (ensure it's defined)
   const debugInfoRef = useRef<{
@@ -195,22 +321,18 @@ export default function EegMonitorWebGL() {
       // }
 
       if (numChannels === 0) {
-          console.warn("[EegMonitor] Skipping line creation - zero channels.");
+          console.warn("[EegMonitor LineEffect] Zero channels configured. Clearing lines.");
+          if (dataRef.current.length > 0 || linesReady) {
+            dataRef.current = [];
+            setLinesReady(false);
+            setDataVersion(v => v + 1);
+          }
           return;
       }
 
-      // Avoid recreating if lines seem to match current config
-      // Avoid recreating if lines seem to match current config AND point count
-      console.log(`[EegMonitor LineEffect] Checking skip condition. Current lines: ${dataRef.current?.length}, Required: ${numChannels}. Current points: ${dataRef.current?.[0]?.numPoints}, Required: ${initialNumPoints}`);
-      if (dataRef.current?.length === numChannels && dataRef.current[0]?.numPoints === initialNumPoints) {
-          console.log("[EegMonitor LineEffect] Skipping line update - config and points match.");
-          // Ensure lines are marked ready even if we skip update
-          if (!linesReady) {
-              console.log("[EegMonitor LineEffect] Marking linesReady=true because skip condition met.");
-              setLinesReady(true);
-          }
-          return; // Skip if everything matches
-      }
+      // Skip condition removed to ensure lines are always reconfigured when config.channels changes.
+      // The useEffect dependency on config.channels handles triggering this.
+      console.log(`[EegMonitor LineEffect] Proceeding to create/update lines. Current lines: ${dataRef.current?.length}, Required: ${numChannels}. Current points: ${dataRef.current?.[0]?.numPoints}, Required: ${initialNumPoints}`);
 
       console.log(`[EegMonitor] Creating/Updating ${numChannels} WebGL lines with ${initialNumPoints} points each (Width: ${width}).`);
 
@@ -374,8 +496,82 @@ export default function EegMonitorWebGL() {
       {/* Main content area */}
       <div className="flex-grow overflow-hidden">
         {showSettings ? (
-          <div className="h-full p-4 overflow-auto">
-            <EegConfigDisplay />
+          <div className="h-full p-4 overflow-auto space-y-8">
+            <div>
+              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">EEG Configuration & Setup</h2>
+              <div className="mb-2 mt-4">
+                <span className="font-medium text-gray-400">Connection Status:</span>
+                <span className={`ml-2 px-2 py-0.5 rounded-full text-sm ${
+                  configStatus === 'Connected' ? 'bg-green-700 text-green-100' :
+                  configStatus === 'Connecting...' || configStatus === 'Initializing...' ? 'bg-yellow-700 text-yellow-100' :
+                  'bg-red-700 text-red-100'
+                }`}>
+                  {configStatus}
+                </span>
+              </div>
+
+              {config ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 mt-4 text-gray-300">
+                  {/* Sample Rate */}
+                  <div className="md:col-span-2 flex items-center space-x-4">
+                    <label htmlFor="sampleRate" className="block text-sm font-medium text-gray-400 w-48">Sample Rate (SPS):</label>
+                    <select
+                      id="sampleRate"
+                      name="sampleRate"
+                      value={selectedSampleRate || ''}
+                      onChange={(e) => setSelectedSampleRate(e.target.value)}
+                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
+                    >
+                      <option value="250">250 SPS</option>
+                      <option value="500">500 SPS</option>
+                    </select>
+                    <span className="text-sm text-gray-500">(Currently: {config.sample_rate} Hz)</span>
+                  </div>
+
+                  {/* Number of Active Channels */}
+                  <div className="md:col-span-2 flex items-center space-x-4">
+                    <label htmlFor="channelCount" className="block text-sm font-medium text-gray-400 w-48">Number of Active Channels:</label>
+                    <select
+                      id="channelCount"
+                      name="channelCount"
+                      value={selectedChannelCount || ''}
+                      onChange={(e) => setSelectedChannelCount(e.target.value)}
+                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
+                    >
+                      {[...Array(9).keys()].map(i => (
+                        <option key={i} value={String(i)}>{i} Channels</option>
+                      ))}
+                    </select>
+                    <span className="text-sm text-gray-500">(Currently: {config.channels?.length} channels - [{config.channels?.join(', ')}])</span>
+                  </div>
+                  
+                  {/* Other Config Items - Display Only */}
+                  <div className="text-sm"><span className="font-medium text-gray-400">Gain:</span> {config.gain}</div>
+                  <div className="text-sm"><span className="font-medium text-gray-400">Board Driver:</span> {config.board_driver}</div>
+                  <div className="text-sm"><span className="font-medium text-gray-400">Batch Size:</span> {config.batch_size} samples</div>
+                  <div className="text-sm"><span className="font-medium text-gray-400">Effective FPS:</span> {config.fps?.toFixed(2)} frames/sec</div>
+
+                  {/* Update Config Button */}
+                  <div className="md:col-span-2 mt-6">
+                    <button
+                      onClick={handleUpdateConfig}
+                      className="px-6 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                    >
+                      Update Config
+                    </button>
+                    {configUpdateStatus && (
+                      <p className={`mt-2 text-xs ${configUpdateStatus.includes('error') ? 'text-red-400' : 'text-gray-400'}`}>
+                        {configUpdateStatus}
+                      </p>
+                    )}
+                    <p className="mt-2 text-xs text-gray-500">Note: Updating configuration may restart the data stream if successful.</p>
+                  </div>
+                </div>
+              ) : (
+                <p className="text-gray-500 mt-4">Waiting for configuration data...</p>
+              )}
+            </div>
+            {/* EegChannelConfig (Per-Channel Settings) section remains removed */}
           </div>
         ) : (
           <div className="h-full p-4">
