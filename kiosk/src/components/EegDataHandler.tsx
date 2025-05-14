@@ -68,8 +68,9 @@ export function useEegDataHandler({
         console.warn("connectWebSocket called without config.");
         return;
     }
-
-    const ws = new WebSocket('ws://localhost:8080/eeg');
+ 
+    const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+    const ws = new WebSocket(`ws://${wsHost}:8080/eeg`);
     wsRef.current = ws;
     
     // Set binary type for WebSocket

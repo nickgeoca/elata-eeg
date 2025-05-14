@@ -95,9 +95,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     println!("WebSocket server starting on:");
-    println!("- ws://localhost:8080/eeg (EEG data)");
-    println!("- ws://localhost:8080/config (Configuration)");
-    println!("- ws://localhost:8080/command (Recording control)");
+    println!("- ws://0.0.0.0:8080/eeg (EEG data) - accessible via this machine's IP address");
+    println!("- ws://0.0.0.0:8080/config (Configuration) - accessible via this machine's IP address");
+    println!("- ws://0.0.0.0:8080/command (Recording control) - accessible via this machine's IP address");
 
     // Spawn WebSocket server
     let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
@@ -143,8 +143,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 server_done = true;
             },
             config_update = config_update_rx.recv() => {
-                if let Some(new_config) = config_update {
-                    println!("Received configuration update: {:?}", new_config.channels);
+                if let Some(new_config_from_channel) = config_update {
+                    println!("Received configuration update: {:?}", new_config_from_channel.channels);
                     
                     // Check if recording is in progress
                     let recording_in_progress = is_recording.load(Ordering::Relaxed);
@@ -152,22 +152,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     if recording_in_progress {
                         println!("Warning: Cannot update configuration during recording");
                     } else {
-                        println!("Stopping current EEG system...");
-                        // Stop current EEG system
-                        if let Err(e) = current_eeg_system.stop().await {
-                            println!("Error stopping EEG system: {}", e);
-                        }
-                        
-                        // Check if the new config is actually different from the current one
-                        let current_config = {
+                        // IMPORTANT: First check if the new config is actually different from the current one
+                        // This must happen BEFORE stopping the system and BEFORE updating the shared config
+                        let current_shared_config = {
                             let config_guard = config.lock().await;
                             config_guard.clone()
                         };
                         
                         // If the config hasn't changed, skip the restart
-                        if new_config == current_config {
-                            println!("Configuration unchanged, skipping restart");
+                        if new_config_from_channel == current_shared_config {
+                            println!("Proposed configuration is the same as the current active configuration. Skipping restart.");
                             continue;
+                        }
+                        
+                        println!("Stopping current EEG system...");
+                        // Stop current EEG system
+                        if let Err(e) = current_eeg_system.stop().await {
+                            println!("Error stopping EEG system: {}", e);
                         }
                         
                         // Signal cancellation to the processing task
@@ -185,7 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         
                         println!("Starting new EEG system with updated configuration...");
                         // Create and start new EEG system with updated configuration
-                        let (mut new_eeg_system, new_data_rx) = match EegSystem::new(new_config.clone()).await {
+                        let (mut new_eeg_system, new_data_rx) = match EegSystem::new(new_config_from_channel.clone()).await {
                             Ok(result) => result,
                             Err(e) => {
                                 println!("Error creating new EEG system: {}", e);
@@ -193,21 +194,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             }
                         };
                         
-                        if let Err(e) = new_eeg_system.start(new_config.clone()).await {
+                        if let Err(e) = new_eeg_system.start(new_config_from_channel.clone()).await {
                             println!("Error starting new EEG system: {}", e);
                             return Err(to_daemon_error(e));
                         }
                         
-                        // Update the shared config
+                        // Update the shared config with the new configuration from the channel
                         {
                             let mut config_guard = config.lock().await;
-                            *config_guard = new_config.clone();
+                            *config_guard = new_config_from_channel.clone();
                         }
+                        println!("Shared configuration updated to: {:?}", new_config_from_channel.channels);
                         
                         // Update CSV recorder with new config
                         {
                             let mut recorder_guard = csv_recorder.lock().await;
-                            recorder_guard.update_config(new_config.clone());
+                            recorder_guard.update_config(new_config_from_channel.clone());
                         }
                         
                         // Create a new cancellation token

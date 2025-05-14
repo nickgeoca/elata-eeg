@@ -9,7 +9,7 @@ export default function Home() {
     <div className="min-h-screen bg-gray-900 text-white">
       <EegConfigProvider>
         <CommandWebSocketProvider>
-          <div className="container mx-auto p-4">
+          <div>
             {/* EEG Monitor is now the main and only view */}
             <EegMonitor />
           </div>

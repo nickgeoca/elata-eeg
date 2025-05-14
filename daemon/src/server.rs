@@ -330,11 +330,12 @@ pub async fn handle_config_websocket(
                                 continue;
                             }
                             
-                            // Update the shared config
-                            *config_guard = updated_config.clone();
+                            // No longer update the shared config here - let main.rs handle it
+                            // This prevents the race condition where main.rs compares against
+                            // a config that was already updated
                             drop(config_guard); // Release the lock
                             
-                            // Send the updated config via the channel
+                            // Send the proposed config via the channel for main.rs to process
                             if let Err(e) = config_update_tx.send(updated_config.clone()).await {
                                 println!("Error sending config update: {}", e);
                                 
@@ -352,7 +353,7 @@ pub async fn handle_config_websocket(
                                 // Send success response
                                 let response = CommandResponse {
                                     status: "ok".to_string(),
-                                    message: format!("Configuration updated with {}", update_message),
+                                    message: format!("Configuration request for {} received and sent for processing", update_message),
                                 };
                                 
                                 if let Ok(response_json) = serde_json::to_string(&response) {

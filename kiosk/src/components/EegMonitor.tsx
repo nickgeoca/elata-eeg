@@ -33,6 +33,10 @@ export default function EegMonitorWebGL() {
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null);
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null);
+  const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.5); // Added for UI Voltage Scaling
+  const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
+  const [canScrollSettings, setCanScrollSettings] = useState(false); // True if settings panel has enough content to scroll
+  const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get configuration from context
   const { config, status: configStatus, refreshConfig } = useEegConfig(); // Added refreshConfig
@@ -247,7 +251,8 @@ export default function EegMonitorWebGL() {
   // Effect to create WebGL lines when config and CONTAINER SIZE are ready
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const VISUAL_AMPLITUDE_SCALE = 0.00001; // Visual height scale (0-1) - Start with 0.1
+  const BASE_VISUAL_AMPLITUDE_SCALE = 0.0001; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
+  const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
 
   useEffect(() => {
     // --- ResizeObserver Setup ---
@@ -368,9 +373,12 @@ export default function EegMonitorWebGL() {
 
         line.lineWidth = 1;
         // Original Scale Y: Convert to microvolts AND scale for visual spacing/amplitude
-        const calculatedScaleY = (ySpacing * VISUAL_AMPLITUDE_SCALE) * MICROVOLT_CONVERSION_FACTOR;
+        // const calculatedScaleY = (ySpacing * VISUAL_AMPLITUDE_SCALE) * MICROVOLT_CONVERSION_FACTOR;
+        // New calculation using uiVoltageScaleFactor:
+        const finalVisualAmplitudeScale = BASE_VISUAL_AMPLITUDE_SCALE * uiVoltageScaleFactor;
+        const calculatedScaleY = (ySpacing * finalVisualAmplitudeScale) * MICROVOLT_CONVERSION_FACTOR;
         line.scaleY = calculatedScaleY;
-        // console.log(`[EegMonitor LineEffect] Ch ${i}: ySpacing=${ySpacing.toFixed(4)}, VISUAL_AMPLITUDE_SCALE=${VISUAL_AMPLITUDE_SCALE}, calculatedScaleY=${calculatedScaleY}`); // Keep commented for now
+        // console.log(`[EegMonitor LineEffect] Ch ${i}: ySpacing=${ySpacing.toFixed(4)}, finalVisualAmplitudeScale=${finalVisualAmplitudeScale}, calculatedScaleY=${calculatedScaleY}`);
 
         // Center channel i vertically within its allocated space
         line.offsetY = 1 - (i + 0.5) * ySpacing;
@@ -398,8 +406,8 @@ export default function EegMonitorWebGL() {
             resizeObserver.disconnect();
         }
     };
-    // Depend on config, container size state, AND showSettings
-  }, [config?.channels, containerSize, showSettings]);
+    // Depend on config, container size state, showSettings, AND uiVoltageScaleFactor
+  }, [config?.channels, containerSize, showSettings, uiVoltageScaleFactor]);
   
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
@@ -408,6 +416,58 @@ export default function EegMonitorWebGL() {
   const toggleSettings = () => {
     setShowSettings(!showSettings);
   };
+
+  // Effect for settings panel scroll detection
+  useEffect(() => {
+    const scrollElement = settingsScrollRef.current;
+
+    const checkScroll = () => {
+      if (scrollElement) {
+        // Check if there's enough content to scroll (scrollbar is visible)
+        const hasScrollbar = scrollElement.scrollHeight > scrollElement.clientHeight;
+        // Check if scrolled to the bottom (with a small buffer for precision)
+        const atBottom = scrollElement.scrollTop + scrollElement.clientHeight >= scrollElement.scrollHeight - 5;
+        
+        setCanScrollSettings(hasScrollbar && !atBottom); // Only show arrow if scrollable and not at bottom
+        setIsAtSettingsBottom(hasScrollbar && atBottom); // Show end marker if scrollable and at bottom
+        
+        // If no scrollbar, effectively at bottom for "end" marker logic if content fits perfectly
+        if (!hasScrollbar) {
+            setIsAtSettingsBottom(true);
+        }
+
+      } else {
+        setCanScrollSettings(false);
+        setIsAtSettingsBottom(false);
+      }
+    };
+
+    if (showSettings && scrollElement) {
+      // Initial check
+      // Use a timeout to allow content to render fully before checking scroll height
+      const timerId = setTimeout(checkScroll, 100);
+
+
+      // Listen for scroll events
+      scrollElement.addEventListener('scroll', checkScroll);
+      // Also check on resize of the window or content (e.g. config load)
+      const resizeObserver = new ResizeObserver(checkScroll);
+      resizeObserver.observe(scrollElement);
+      // Observe children too, as their size changes can affect scrollHeight
+      Array.from(scrollElement.children).forEach(child => resizeObserver.observe(child));
+
+
+      return () => {
+        clearTimeout(timerId);
+        scrollElement.removeEventListener('scroll', checkScroll);
+        resizeObserver.disconnect(); // Disconnects from all observed elements
+      };
+    } else {
+      // Reset when settings are hidden
+      setCanScrollSettings(false);
+      setIsAtSettingsBottom(false);
+    }
+  }, [showSettings, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
 
   return (
     <div className="h-screen w-screen bg-gray-900 flex flex-col">
@@ -496,9 +556,17 @@ export default function EegMonitorWebGL() {
       {/* Main content area */}
       <div className="flex-grow overflow-hidden">
         {showSettings ? (
-          <div className="h-full p-4 overflow-auto space-y-8">
+          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto space-y-8"> {/* Added ref and relative positioning */}
+            {/* Scroll Down Indicator */}
+            {canScrollSettings && (
+              <div className="sticky top-1/2 left-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce">
+                <span className="block text-2xl">↓</span>
+                <span className="block text-2xl -mt-4">↓</span>
+                <span className="block text-2xl -mt-4">↓</span>
+              </div>
+            )}
             <div>
-              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">EEG Configuration & Setup</h2>
+              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">EEG Settings</h2>
               <div className="mb-2 mt-4">
                 <span className="font-medium text-gray-400">Connection Status:</span>
                 <span className={`ml-2 px-2 py-0.5 rounded-full text-sm ${
@@ -548,8 +616,6 @@ export default function EegMonitorWebGL() {
                   {/* Other Config Items - Display Only */}
                   <div className="text-sm"><span className="font-medium text-gray-400">Gain:</span> {config.gain}</div>
                   <div className="text-sm"><span className="font-medium text-gray-400">Board Driver:</span> {config.board_driver}</div>
-                  <div className="text-sm"><span className="font-medium text-gray-400">Batch Size:</span> {config.batch_size} samples</div>
-                  <div className="text-sm"><span className="font-medium text-gray-400">Effective FPS:</span> {config.fps?.toFixed(2)} frames/sec</div>
 
                   {/* Update Config Button */}
                   <div className="md:col-span-2 mt-6">
@@ -571,6 +637,56 @@ export default function EegMonitorWebGL() {
                 <p className="text-gray-500 mt-4">Waiting for configuration data...</p>
               )}
             </div>
+
+            {/* UI Settings Section */}
+            <div className="mt-8"> {/* Add some margin-top */}
+              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">UI Settings</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 mt-4 text-gray-300">
+                {/* Moved Batch Size and Effective FPS */}
+                {config && (
+                  <>
+                    <div className="text-sm"><span className="font-medium text-gray-400">Batch Size:</span> {config.batch_size} samples</div>
+                    <div className="text-sm"><span className="font-medium text-gray-400">Effective FPS:</span> {config.fps?.toFixed(2)} frames/sec</div>
+                  </>
+                )}
+
+                {/* UI Voltage Scaling Control */}
+                <div className="md:col-span-2 flex items-center space-x-3">
+                  <label className="block text-sm font-medium text-gray-400 w-48">UI Voltage Scaling:</label>
+                  <button
+                    onClick={() => {
+                      const currentIndex = UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor);
+                      if (currentIndex > 0) {
+                        setUiVoltageScaleFactor(UI_SCALE_FACTORS[currentIndex - 1]);
+                      }
+                    }}
+                    disabled={UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor) === 0}
+                    className="px-3 py-1 rounded-md bg-gray-600 hover:bg-gray-500 text-white disabled:opacity-50"
+                  >
+                    Zoom Out
+                  </button>
+                  <span className="text-sm w-16 text-center">{uiVoltageScaleFactor}x</span>
+                  <button
+                    onClick={() => {
+                      const currentIndex = UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor);
+                      if (currentIndex < UI_SCALE_FACTORS.length - 1) {
+                        setUiVoltageScaleFactor(UI_SCALE_FACTORS[currentIndex + 1]);
+                      }
+                    }}
+                    disabled={UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor) === UI_SCALE_FACTORS.length - 1}
+                    className="px-3 py-1 rounded-md bg-gray-600 hover:bg-gray-500 text-white disabled:opacity-50"
+                  >
+                    Zoom In
+                  </button>
+                </div>
+              </div>
+            </div>
+            {/* End of Settings Indicator */}
+            {isAtSettingsBottom && (
+              <div className="text-center text-gray-500 py-4 mt-4">
+                ❖ End of Settings ❖
+              </div>
+            )}
             {/* EegChannelConfig (Per-Channel Settings) section remains removed */}
           </div>
         ) : (
