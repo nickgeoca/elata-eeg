@@ -83,13 +83,6 @@ bash rebuild.sh
     2) Pull SD card. Set WiFi and SSH
     3) Touch screen? Will that work out of the box?
   - Configure Chrome/Firefox to detect local network
-- Managing Expectations
-  - Putting on the leads is tricky. There is goo and typically lab staff put it on the subject
-  - One time install of the cables (SPI, power, etc) is tricky. Probably takes a weekend to get the EEG setup.
-  - Our data analysis is still limited. After you record with the EEG, how do you know your sleep quality?
-  - The EEG is prototype grade (Hdmi cable in 3-d printed case, battery hanging out of it, etc)
-  - 
-
 
 ### TODO Code
 Priorites
@@ -100,48 +93,23 @@ Priorites
 
 Lowest Priority
 - Production ready task items
-- Health Checks: Add mechanisms to verify that services are running correctly after they're started.
-- Network Configuration: Add support for configuring network settings, especially if a static IP is needed.
 - Security Hardening: Consider additional security measures for a production system.
-- X11 (LDXE-pi) to Wayland (labwc) was rocky
-- Firmware versioning in the filename to account for expirimenetal errors from firmware
+- Change board name elata-e1 and add firmware versioning in the filename
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
-- integrate erro handlign
-- need to enable local device discovery if you want to download recordings
-- Change board name. ads1299-elata-v0.1
 - UI, switch to mock mode?
-- Add normalization for the GUI and pass voltage range per channel
 - Clean up driver object. may be better if we can use the board as the obj and pass the filtering into it or something
 - Add to config.json? the fitler parameters?
-- - Then maybe add an HTTP route to download.
-- Add WS to stop EEG?
-- Handle voltage scaling. Should it be passed as normalized values -1 to 1 from the daemon?
-- Fix up the eeg graph. x axis. y axis. signal spacing, etc
 - Blink test doc
-- GUI switch to mock mode. Enable disable channels? no changes during recording
-- Add data exploration repo? seperate from this one?
-- discuss battery vs plugin. how much does 60hz affect sginal qaulity?
-- mock driver thru UI and have it run on computer in mock mode for web dev'ing it
 - test low esr capacitor on power supply
 - install script
-  - Also some Pi's seem to use Wayland by default and others X11. They switched to wayland on Pi 5 last year.
-  - Impact on Pi 5 Behavior (Revised): Yes, the script makes significant changes. Crucially, while the default Raspberry Pi OS (Bookworm) on a Pi 5 uses Wayland (with the Wayfire compositor) for its graphical session, this script overrides that default and forces the system to use X11. It does this by:
-- Should we add 60hz detection? Like your too close to a wall socket
+- Add 60hz/50hz configurable filter
 - Dry vs wet electrodes- make py notebook?
-- Improve board handling in GUI.
-- Add studies thing via git clone
-- Data quality accessment- impedance testing, 60/50hz noise measure. step thru (don't need graphing either)
-- Look at signal quality. AVSS vs GND vs DGND vs AGND. 5v powering AVDD
- - AVSS=AGND (JP25). DGND=AGND (Figure 58)
- - SPI uses AGND
- - AGND/AVSS/DGND - Analog ground
- - Stimulus response- Problem: There is a delay between pi 5 recording data and mac emitting stimulus. Solution: have the daemon and webclient (Pi 5 and Mac) sync clocks (NTP/PTP)
-- Change sample rate and channel count in the browser. session name too (need to have keyboard popup then). Batch size configurable in browser?
-- name the age or something in the file name? how do we key subject/their-data to the file recorded?
- - session number on screen, then on pen and paper "session #35, age 24, name Bob Dylan, etc"
-  - then multiple eegs, makes it hard to do
-  - maybe study number in config.json and eeg number in config.json... then write that to file
-  - file name = "study4_eeg2_recording24_datetime_..."
+- Signal quality and filtering. AVSS vs GND vs DGND vs AGND. 5v powering AVDD
+ - AVSS=AGND (JP25). DGND=AGND (Figure 58)... SPI uses AGND... AGND/AVSS/DGND - Analog ground
+ - Filtering adds delays and possible phase distortions. Could impact BCI/Nuerofeedback
+- UI can change session name too (need to have keyboard popup then). Batch size configurable in browser?
+- What's a good way to do study/session naming in the file? How do we key subject/their-data to the file recorded?
+- multiple eegs, makes it hard to do over WiFi
 
 ## What Can EEG Analysis Tell You?
 1) Frequency Bands: EEG signals are commonly decomposed into frequency bands (delta, theta, alpha, beta, gamma). Changes in band power can indicate different cognitive or physiological states (e.g., alpha often relates to relaxation or idling states, beta to active concentration).
