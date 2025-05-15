@@ -137,10 +137,11 @@ pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatc
 pub async fn handle_config_websocket(
     ws: WebSocket,
     config: Arc<Mutex<AdcConfig>>,
-    config_update_tx: mpsc::Sender<AdcConfig>,
+    config_update_tx: mpsc::Sender<AdcConfig>, // For sending proposed updates to main
+    mut config_applied_rx: broadcast::Receiver<AdcConfig>, // For receiving applied updates from main
     is_recording: Arc<AtomicBool>
 ) {
-    let (mut tx, mut rx) = ws.split(); // Keep both sender (tx) and receiver (rx)
+    let (mut ws_tx, mut ws_rx) = ws.split(); // WebSocket sender and receiver
     
     println!("Configuration WebSocket client connected");
     
@@ -152,10 +153,10 @@ pub async fn handle_config_websocket(
     
     // Convert the configuration to JSON and send it
     if let Ok(config_json) = serde_json::to_string(&initial_config) {
-        if let Err(e) = tx.send(Message::text(config_json)).await {
-            println!("Error sending configuration: {}", e);
+        if let Err(e) = ws_tx.send(Message::text(config_json)).await {
+            println!("Error sending initial configuration: {}", e);
         } else {
-            println!("Configuration sent successfully");
+            println!("Initial configuration sent successfully");
             println!("Sample rate: {}", initial_config.sample_rate);
             println!("Channels: {:?}", initial_config.channels);
             println!("Gain: {}", initial_config.gain);
@@ -166,236 +167,209 @@ pub async fn handle_config_websocket(
     } else {
         println!("Error serializing configuration");
     }
-    
-    // Process incoming configuration messages
-    while let Some(result) = rx.next().await {
-        match result {
-            Ok(msg) => {
-                if msg.is_close() {
-                    println!("Config WebSocket: Received close frame");
-                    break; // Exit loop on close frame
-                }
-                
-                if msg.is_text() {
-                    let text = msg.to_str().unwrap_or_default();
-                    
-                    // Try to parse as ConfigMessage
-                    match serde_json::from_str::<ConfigMessage>(text) {
-                        Ok(mut config_msg) => {
-                            // Check if recording is in progress
-                            if is_recording.load(Ordering::Relaxed) {
-                                // Cannot change config during recording
-                                let response = CommandResponse {
-                                    status: "error".to_string(),
-                                    message: "Cannot change configuration during recording".to_string(),
-                                };
-                                
-                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                    if let Err(e) = tx.send(Message::text(response_json)).await {
-                                        println!("Error sending config error response: {}", e);
-                                    }
-                                }
-                                continue;
-                            }
-                            
-                            // Create a new config based on the current one and apply changes
-                            let mut config_guard = config.lock().await;
-                            let mut updated_config = config_guard.clone();
-                            let mut config_changed = false;
-                            let mut update_message = String::new();
-                            
-                            // Check if both parameters are None before processing
-                            let no_params_provided = config_msg.channels.is_none() && config_msg.sample_rate.is_none();
-                            
-                            // Process channel updates if provided
-                            if let Some(new_channels) = config_msg.channels.take() {
-                                // 1. Check if channel list is empty
-                                if new_channels.is_empty() {
-                                    let response = CommandResponse {
-                                        status: "error".to_string(),
-                                        message: "Channel list cannot be empty".to_string(),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config error response: {}", e);
-                                        }
-                                    }
-                                    continue;
-                                }
-                                
-                                // 2. Check for duplicate channels
-                                let mut unique_channels = new_channels.clone();
-                                unique_channels.sort();
-                                unique_channels.dedup();
-                                
-                                if unique_channels.len() != new_channels.len() {
-                                    let response = CommandResponse {
-                                        status: "error".to_string(),
-                                        message: "Duplicate channels detected in configuration".to_string(),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config error response: {}", e);
-                                        }
-                                    }
-                                    continue;
-                                }
-                                
-                                // 3. Check for valid channel indices (ADS1299 has 8 channels, 0-7)
-                                // This might need to be adjusted based on the actual hardware
-                                let max_channel = *new_channels.iter().max().unwrap_or(&0);
-                                if max_channel > 7 {
-                                    let response = CommandResponse {
-                                        status: "error".to_string(),
-                                        message: format!("Invalid channel index: {}. Maximum supported channel is 7", max_channel),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config error response: {}", e);
-                                        }
-                                    }
-                                    continue;
-                                }
-                                
-                                // Update channels in the new config
-                                // Convert new_channels from Vec<u32> to Vec<usize> for comparison
-                                let new_channels_usize: Vec<usize> = new_channels.iter().map(|&x| x as usize).collect();
-                                
-                                if updated_config.channels != new_channels_usize {
-                                    updated_config.channels = new_channels_usize;
-                                    config_changed = true;
-                                    update_message = format!("channels: {:?}", updated_config.channels);
-                                }
-                            }
-                            
-                            // Process sample rate updates if provided
-                            if let Some(new_sample_rate) = config_msg.sample_rate {
-                                // Validate sample rate
-                                // ADS1299 supports sample rates: 250, 500, 1000, 2000 Hz
-                                let valid_sample_rates = vec![250, 500, 1000, 2000];
-                                if !valid_sample_rates.contains(&new_sample_rate) {
-                                    let response = CommandResponse {
-                                        status: "error".to_string(),
-                                        message: format!("Invalid sample rate: {}. Supported rates are: {:?}", new_sample_rate, valid_sample_rates),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config error response: {}", e);
-                                        }
-                                    }
-                                    continue;
-                                }
-                                
-                                // Update sample rate in the new config
-                                if updated_config.sample_rate != new_sample_rate {
-                                    updated_config.sample_rate = new_sample_rate;
-                                    config_changed = true;
-                                    
-                                    if !update_message.is_empty() {
-                                        update_message.push_str(", ");
-                                    }
-                                    update_message.push_str(&format!("sample rate: {}", new_sample_rate));
-                                }
-                            }
-                            
-                            // If nothing changed or no parameters were provided, send an error
-                            if !config_changed {
-                                if no_params_provided {
-                                    let response = CommandResponse {
-                                        status: "error".to_string(),
-                                        message: "No channels or sample rate provided in configuration update".to_string(),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config error response: {}", e);
-                                        }
-                                    }
-                                } else {
-                                    let response = CommandResponse {
-                                        status: "ok".to_string(),
-                                        message: "Configuration unchanged".to_string(),
-                                    };
-                                    
-                                    if let Ok(response_json) = serde_json::to_string(&response) {
-                                        if let Err(e) = tx.send(Message::text(response_json)).await {
-                                            println!("Error sending config response: {}", e);
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                            
-                            // No longer update the shared config here - let main.rs handle it
-                            // This prevents the race condition where main.rs compares against
-                            // a config that was already updated
-                            drop(config_guard); // Release the lock
-                            
-                            // Send the proposed config via the channel for main.rs to process
-                            if let Err(e) = config_update_tx.send(updated_config.clone()).await {
-                                println!("Error sending config update: {}", e);
-                                
-                                let response = CommandResponse {
-                                    status: "error".to_string(),
-                                    message: format!("Failed to update configuration: {}", e),
-                                };
-                                
-                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                    if let Err(e) = tx.send(Message::text(response_json)).await {
-                                        println!("Error sending config error response: {}", e);
-                                    }
-                                }
-                            } else {
-                                // Send success response
-                                let response = CommandResponse {
-                                    status: "ok".to_string(),
-                                    message: format!("Configuration request for {} received and sent for processing", update_message),
-                                };
-                                
-                                if let Ok(response_json) = serde_json::to_string(&response) {
-                                    if let Err(e) = tx.send(Message::text(response_json)).await {
-                                        println!("Error sending config success response: {}", e);
-                                    }
-                                }
-                                
-                                // Also send the updated config
-                                if let Ok(config_json) = serde_json::to_string(&updated_config) {
-                                    if let Err(e) = tx.send(Message::text(config_json)).await {
-                                        println!("Error sending updated configuration: {}", e);
-                                    }
-                                }
-                            }
-                        },
-                        Err(e) => {
-                            println!("Error parsing config message: {}", e);
-                            let response = CommandResponse {
-                                status: "error".to_string(),
-                                message: format!("Invalid configuration format: {}", e),
-                            };
-                            
-                            if let Ok(response_json) = serde_json::to_string(&response) {
-                                if let Err(e) = tx.send(Message::text(response_json)).await {
-                                    println!("Error sending config error response: {}", e);
-                                }
-                            }
+
+    // Create an MPSC channel to forward messages from the spawned task to ws_tx
+    let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<Message>(32); // Channel for warp::ws::Message
+
+    // Task to listen for applied config updates from main.rs and send them to the client via the MPSC channel
+    let ws_tx_forwarder = mpsc_tx.clone();
+    tokio::spawn(async move {
+        loop {
+            match config_applied_rx.recv().await {
+                Ok(applied_config) => {
+                    println!("Config WebSocket: Received applied config from main: {:?}", applied_config.channels);
+                    if let Ok(config_json) = serde_json::to_string(&applied_config) {
+                        if let Err(e) = ws_tx_forwarder.send(Message::text(config_json)).await {
+                            println!("Config WebSocket: Error queueing applied config for client: {}", e);
+                            break; // Stop if queueing fails (channel might be closed)
                         }
+                    } else {
+                        println!("Config WebSocket: Error serializing applied config");
                     }
-                } else {
-                    println!("Config WebSocket: Received non-text message: {:?}", msg);
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    println!("Config WebSocket: Lagged behind applied config broadcast by {} messages. Consider increasing channel capacity.", n);
+                    // Potentially resend current config or signal client to refresh
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    println!("Config WebSocket: Applied config broadcast channel closed.");
+                    break;
+                }
+            }
+        }
+        println!("Config WebSocket: Applied config listener task finished.");
+    });
+    
+    // Process incoming configuration messages from this specific client
+    loop {
+        tokio::select! {
+            // Arm to receive messages from the MPSC channel (either from spawned task or client message handler)
+            // and forward them to the WebSocket client.
+            Some(message_to_send) = mpsc_rx.recv() => {
+                if let Err(e) = ws_tx.send(message_to_send).await {
+                    println!("Config WebSocket: Error sending message from mpsc_rx to client: {}", e);
+                    break; // Error sending to client, close connection
+                }
+            }
+
+            // Arm to process incoming messages from the WebSocket client
+            result = ws_rx.next() => {
+                match result {
+                    Some(Ok(msg)) => {
+                        if msg.is_close() {
+                            println!("Config WebSocket: Received close frame from client.");
+                            break; // Exit loop on close frame
+                        }
+                        
+                        if msg.is_text() {
+                            let text_from_client = msg.to_str().unwrap_or_default();
+                            println!("Config WebSocket: Received text message: {}", text_from_client);
+                            
+                            // Try to parse as ConfigMessage
+                            match serde_json::from_str::<ConfigMessage>(text_from_client) {
+                                Ok(mut config_msg) => {
+                                    if is_recording.load(Ordering::Relaxed) {
+                                        let response = CommandResponse {
+                                            status: "error".to_string(),
+                                            message: "Cannot change configuration during recording".to_string(),
+                                        };
+                                        if let Ok(response_json) = serde_json::to_string(&response) {
+                                            // Send response via mpsc_tx
+                                            if let Err(e) = mpsc_tx.send(Message::text(response_json)).await {
+                                                println!("Config WebSocket: Error queueing 'recording active' response: {}", e);
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    let mut config_guard = config.lock().await;
+                                    let mut updated_config = config_guard.clone();
+                                    let mut config_changed = false;
+                                    let mut update_message = String::new();
+                                    let no_params_provided = config_msg.channels.is_none() && config_msg.sample_rate.is_none();
+
+                                    if let Some(new_channels) = config_msg.channels.take() {
+                                        if new_channels.is_empty() {
+                                            let response = CommandResponse { status: "error".to_string(), message: "Channel list cannot be empty".to_string() };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
+                                                     println!("Config WebSocket: Error queueing 'channel empty' response: {}", e);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        let mut unique_channels = new_channels.clone();
+                                        unique_channels.sort();
+                                        unique_channels.dedup();
+                                        if unique_channels.len() != new_channels.len() {
+                                            let response = CommandResponse { status: "error".to_string(), message: "Duplicate channels detected".to_string() };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
+                                                    println!("Config WebSocket: Error queueing 'duplicate channels' response: {}", e);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        let max_channel = *new_channels.iter().max().unwrap_or(&0);
+                                        if max_channel > 7 {
+                                            let response = CommandResponse { status: "error".to_string(), message: format!("Invalid channel index: {}. Max is 7.", max_channel) };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
+                                                    println!("Config WebSocket: Error queueing 'invalid channel idx' response: {}", e);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        let new_channels_usize: Vec<usize> = new_channels.iter().map(|&x| x as usize).collect();
+                                        if updated_config.channels != new_channels_usize {
+                                            updated_config.channels = new_channels_usize;
+                                            config_changed = true;
+                                            update_message = format!("channels: {:?}", updated_config.channels);
+                                        }
+                                    }
+
+                                    if let Some(new_sample_rate) = config_msg.sample_rate {
+                                        let valid_sample_rates = vec![250, 500, 1000, 2000];
+                                        if !valid_sample_rates.contains(&new_sample_rate) {
+                                            let response = CommandResponse { status: "error".to_string(), message: format!("Invalid sample rate: {}. Valid: {:?}", new_sample_rate, valid_sample_rates) };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
+                                                    println!("Config WebSocket: Error queueing 'invalid sample rate' response: {}", e);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        if updated_config.sample_rate != new_sample_rate {
+                                            updated_config.sample_rate = new_sample_rate;
+                                            config_changed = true;
+                                            if !update_message.is_empty() { update_message.push_str(", "); }
+                                            update_message.push_str(&format!("sample rate: {}", new_sample_rate));
+                                        }
+                                    }
+                                    
+                                    if !config_changed {
+                                        let msg_text_response = if no_params_provided { "No channels or sample rate provided" } else { "Configuration unchanged" };
+                                        let status_str = if no_params_provided { "error" } else { "ok" };
+                                        let response = CommandResponse { status: status_str.to_string(), message: msg_text_response.to_string() };
+                                        if let Ok(response_json) = serde_json::to_string(&response) {
+                                            if let Err(e) = mpsc_tx.send(Message::text(response_json)).await {
+                                                println!("Config WebSocket: Error queueing 'config unchanged' response: {}", e);
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    
+                                    drop(config_guard);
+                                    
+                                    if let Err(e) = config_update_tx.send(updated_config.clone()).await {
+                                        println!("Error sending config update to main: {}", e);
+                                        let response = CommandResponse { status: "error".to_string(), message: format!("Failed to submit update: {}", e) };
+                                        if let Ok(response_json) = serde_json::to_string(&response) {
+                                            if let Err(e_send) = mpsc_tx.send(Message::text(response_json)).await {
+                                                println!("Config WebSocket: Error queueing 'update submission failed' response: {}", e_send);
+                                            }
+                                        }
+                                    } else {
+                                        let response = CommandResponse {
+                                            status: "ok".to_string(),
+                                            message: format!("Config update for {} submitted for processing.", update_message),
+                                        };
+                                        if let Ok(response_json) = serde_json::to_string(&response) {
+                                            if let Err(e) = mpsc_tx.send(Message::text(response_json)).await {
+                                                println!("Config WebSocket: Error queueing 'update submitted' response: {}", e);
+                                            }
+                                        }
+                                        // DO NOT send updated_config here. Client will get it via broadcast from the other task.
+                                    }
+                                },
+                                Err(e) => {
+                                    println!("Error parsing config message: {}", e);
+                                    let response = CommandResponse { status: "error".to_string(), message: format!("Invalid config format: {}", e) };
+                                    if let Ok(response_json) = serde_json::to_string(&response) {
+                                        if let Err(e_send) = mpsc_tx.send(Message::text(response_json)).await {
+                                            println!("Config WebSocket: Error queueing 'invalid format' response: {}", e_send);
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            println!("Config WebSocket: Received non-text message: {:?}", msg);
+                        }
+                    },
+                    Some(Err(e)) => {
+                        println!("Config WebSocket: Error receiving message from client: {}", e);
+                        break;
+                    }
+                    None => {
+                        println!("Config WebSocket: Client disconnected (stream ended).");
+                        break;
+                    }
                 }
             },
-            Err(e) => {
-                println!("Config WebSocket: Error receiving message: {}", e);
-                break; // Exit loop on error
-            }
         }
     }
   
-    println!("Config WebSocket: Connection handler finished.");
+    println!("Config WebSocket: Connection handler finished for a client.");
 }
 
 /// Handle WebSocket connection for recording control commands
@@ -576,13 +550,14 @@ pub async fn handle_command_websocket(
 
 // Set up WebSocket routes and server
 pub fn setup_websocket_routes(
-    tx: broadcast::Sender<EegBatchData>,
-    config: Arc<Mutex<AdcConfig>>,
+    tx: broadcast::Sender<EegBatchData>, // For EEG data
+    config: Arc<Mutex<AdcConfig>>, // Shared current config
     csv_recorder: Arc<Mutex<CsvRecorder>>,
     is_recording: Arc<AtomicBool>,
+    config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
 ) -> (impl warp::Filter<Extract = impl warp::Reply> + Clone, mpsc::Receiver<AdcConfig>) {
-    // Create a channel for config updates
-    let (config_update_tx, config_update_rx) = mpsc::channel::<AdcConfig>(32);
+    // Channel for clients to send proposed config updates TO main.rs
+    let (config_update_to_main_tx, config_update_to_main_rx) = mpsc::channel::<AdcConfig>(32);
     let eeg_ws_route = warp::path("eeg")
         .and(warp::ws())
         .and(warp::any().map(move || tx.subscribe()))
@@ -590,16 +565,20 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_websocket(socket, rx))
         });
         
-    let config_clone = config.clone();
-    let config_update_tx_clone = config_update_tx.clone();
-    let is_recording_clone = is_recording.clone();
+    let config_clone = config.clone(); // Arc for current config
+    let config_update_to_main_tx_clone = config_update_to_main_tx.clone();
+    let is_recording_clone_config = is_recording.clone(); // Separate clone for config route
+    let config_applied_tx_clone = config_applied_tx.clone(); // Clone for the route
+
     let config_ws_route = warp::path("config")
         .and(warp::ws())
-        .and(warp::any().map(move || config_clone.clone()))
-        .and(warp::any().map(move || config_update_tx_clone.clone()))
-        .and(warp::any().map(move || is_recording_clone.clone()))
-        .map(|ws: warp::ws::Ws, config: Arc<Mutex<AdcConfig>>, config_update_tx: mpsc::Sender<AdcConfig>, is_recording: Arc<AtomicBool>| {
-            ws.on_upgrade(move |socket| handle_config_websocket(socket, config, config_update_tx, is_recording))
+        .and(warp::any().map(move || config_clone.clone())) // Pass current config Arc
+        .and(warp::any().map(move || config_update_to_main_tx_clone.clone())) // Pass sender for proposed updates
+        .and(warp::any().map(move || config_applied_tx_clone.subscribe())) // Pass receiver for applied updates
+        .and(warp::any().map(move || is_recording_clone_config.clone())) // Pass recording status
+        .map(|ws: warp::ws::Ws, cfg_arc: Arc<Mutex<AdcConfig>>, cfg_upd_tx: mpsc::Sender<AdcConfig>, cfg_app_rx: broadcast::Receiver<AdcConfig>, rec_status: Arc<AtomicBool>| {
+            println!("[DEBUG] /config route matched, attempting WebSocket upgrade...");
+            ws.on_upgrade(move |socket| handle_config_websocket(socket, cfg_arc, cfg_upd_tx, cfg_app_rx, rec_status))
         });
     
     let recorder_clone = csv_recorder.clone();
@@ -612,5 +591,5 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_command_websocket(socket, recorder, is_recording))
         });
     
-    (eeg_ws_route.or(config_ws_route).or(command_ws_route), config_update_rx)
+    (eeg_ws_route.or(config_ws_route).or(command_ws_route), config_update_to_main_rx)
 }

@@ -32,6 +32,7 @@ export default function EegMonitorWebGL() {
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null);
+  const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Added to track WebSocket state
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null);
   const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.5); // Added for UI Voltage Scaling
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
@@ -39,7 +40,7 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get configuration from context
-  const { config, status: configStatus, refreshConfig } = useEegConfig(); // Added refreshConfig
+  const { config, status: configStatus } = useEegConfig(); // refreshConfig removed
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -60,12 +61,28 @@ export default function EegMonitorWebGL() {
   useEffect(() => {
     if (showSettings) {
       console.log('Attempting to connect to /config WebSocket');
-      const newConfigWs = new WebSocket('ws://localhost:8080/config');
+      const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+      const newConfigWs = new WebSocket(`ws://${wsHost}:8080/config`);
       setConfigWebSocket(newConfigWs);
+      setIsConfigWsOpen(false); // Initially false until onopen
       setConfigUpdateStatus('Connecting to config service...');
 
+      const connectionTimeout = setTimeout(() => {
+        if (newConfigWs.readyState !== WebSocket.OPEN) {
+          console.warn('/config WebSocket connection timed out.');
+          setConfigUpdateStatus('Connection to config service timed out. Please check daemon.');
+          setIsConfigWsOpen(false); // Ensure this is false
+          // Optionally, try to close the WebSocket if it's in a connecting state
+          if (newConfigWs.readyState === WebSocket.CONNECTING) {
+            newConfigWs.close();
+          }
+        }
+      }, 5000); // 5-second timeout
+
       newConfigWs.onopen = () => {
+        clearTimeout(connectionTimeout);
         console.log('/config WebSocket connected');
+        setIsConfigWsOpen(true);
         setConfigUpdateStatus('Connected to config service. Ready to send updates.');
       };
 
@@ -76,8 +93,8 @@ export default function EegMonitorWebGL() {
           // Check if it's a CommandResponse (status and message)
           if (response.status && response.message) {
             if (response.status === 'ok') {
-              setConfigUpdateStatus(`Config update successful: ${response.message}`);
-              refreshConfig(); // Refresh the global config state
+              setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config.`);
+              // refreshConfig(); // REFRESH_CONFIG_REMOVED: Global config will update via EegConfigProvider's WebSocket
             } else {
               setConfigUpdateStatus(`Config update error: ${response.message}`);
             }
@@ -94,21 +111,34 @@ export default function EegMonitorWebGL() {
       };
 
       newConfigWs.onclose = () => {
+        clearTimeout(connectionTimeout);
         console.log('/config WebSocket disconnected');
         setConfigWebSocket(null);
-        setConfigUpdateStatus('Disconnected from config service.');
+        setIsConfigWsOpen(false);
+        // Only set to 'Disconnected' if it wasn't already an error or timeout
+        setConfigUpdateStatus(prevStatus =>
+          prevStatus && (prevStatus.includes('Error') || prevStatus.includes('timed out'))
+          ? prevStatus
+          : 'Disconnected from config service.'
+        );
       };
 
       newConfigWs.onerror = (error) => {
+        clearTimeout(connectionTimeout);
         console.error('/config WebSocket error:', error);
         setConfigWebSocket(null);
+        setIsConfigWsOpen(false);
         setConfigUpdateStatus('Error connecting to config service.');
       };
 
       return () => {
+        clearTimeout(connectionTimeout);
         console.log('Closing /config WebSocket');
-        newConfigWs.close();
+        if (newConfigWs.readyState === WebSocket.OPEN || newConfigWs.readyState === WebSocket.CONNECTING) {
+          newConfigWs.close();
+        }
         setConfigWebSocket(null);
+        setIsConfigWsOpen(false);
         setConfigUpdateStatus(null);
       };
     } else {
@@ -117,10 +147,11 @@ export default function EegMonitorWebGL() {
         console.log('Closing /config WebSocket because settings are hidden');
         configWebSocket.close();
         setConfigWebSocket(null);
+        setIsConfigWsOpen(false);
       }
       setConfigUpdateStatus(null);
     }
-  }, [showSettings, refreshConfig]); // Added refreshConfig dependency
+  }, [showSettings]); // REFRESH_CONFIG_REMOVED: refreshConfig removed from dependencies
 
 
   const handleUpdateConfig = () => {
@@ -394,8 +425,15 @@ export default function EegMonitorWebGL() {
       setDataVersion(v => v + 1); // Increment version
 
     } else {
-        console.log(`[EegMonitor LineEffect] Condition NOT met (or in settings view). Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
-        // No need to clear lines here, handled by the showSettings check above
+        // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is 0)
+        // The specific check for numChannels === 0 inside the 'if' block already handles clearing.
+        // This 'else' handles cases where the outer 'if (config && config.channels && containerSize.width > 0)' fails.
+        console.log(`[EegMonitor LineEffect] Outer conditions for line creation NOT met. Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}. Clearing lines if necessary.`);
+        if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
+            dataRef.current = [];
+            setLinesReady(false);
+            setDataVersion(v => v + 1);
+        }
     }
 
     // Cleanup function for the effect
@@ -407,7 +445,7 @@ export default function EegMonitorWebGL() {
         }
     };
     // Depend on config, container size state, showSettings, AND uiVoltageScaleFactor
-  }, [config?.channels, containerSize, showSettings, uiVoltageScaleFactor]);
+  }, [config?.channels, config?.sample_rate, containerSize, showSettings, uiVoltageScaleFactor]);
   
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
@@ -621,7 +659,12 @@ export default function EegMonitorWebGL() {
                   <div className="md:col-span-2 mt-6">
                     <button
                       onClick={handleUpdateConfig}
-                      className="px-6 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50"
+                      disabled={!isConfigWsOpen}
+                      className={`px-6 py-2 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 ${
+                        !isConfigWsOpen
+                          ? 'bg-gray-500 cursor-not-allowed'
+                          : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
                     >
                       Update Config
                     </button>
@@ -725,10 +768,11 @@ export default function EegMonitorWebGL() {
                   config={config}
                   latestTimestampRef={latestTimestampRef} // Pass the single timestamp ref
                   debugInfoRef={debugInfoRef} // Pass debugInfoRef
-                  containerRef={containerRef}
+                  containerWidth={containerSize.width}
+                  containerHeight={containerSize.height}
                   linesReady={linesReady} // Pass down the readiness flag
                   dataVersion={dataVersion} // Pass down the data version
-                  targetFps={30} // Added target FPS
+                  targetFps={displayFps} // Added target FPS
                 />
               </div>
             </div>

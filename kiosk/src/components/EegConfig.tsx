@@ -18,13 +18,13 @@ export interface EegConfig {
 interface EegConfigContextType {
   config: EegConfig | null;
   status: string;
-  refreshConfig: () => void; // Added refreshConfig
+  // refreshConfig is no longer needed as config updates will be pushed by the server
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
   config: null,
   status: 'Initializing...',
-  refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
+  // refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
 });
 
 // Hook to use the EEG configuration
@@ -38,6 +38,34 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
+
+  // Helper function to deeply compare relevant parts of EEG configurations
+  // Compares server-provided data against the current state (excluding client-added 'fps')
+  const areConfigsEqual = (currentConfig: EegConfig | null, newServerData: any): boolean => {
+    if (!currentConfig) return false; // If no current config, new data means change
+
+    // Compare server-provided fields
+    if (currentConfig.sample_rate !== newServerData.sample_rate) return false;
+    if (currentConfig.gain !== newServerData.gain) return false;
+    if (currentConfig.board_driver !== newServerData.board_driver) return false;
+    if (currentConfig.batch_size !== newServerData.batch_size) return false;
+
+    // Compare channels array
+    if (!newServerData.channels || !Array.isArray(newServerData.channels) ||
+        currentConfig.channels.length !== newServerData.channels.length) {
+      return false;
+    }
+    // Sort arrays before comparison to handle same channels in different order (if applicable, though usually order matters)
+    // For this specific case, assuming order from server is canonical. If not, sort both.
+    // const sortedCurrentChannels = [...currentConfig.channels].sort((a, b) => a - b);
+    // const sortedNewChannels = [...newServerData.channels].sort((a, b) => a - b);
+    for (let i = 0; i < currentConfig.channels.length; i++) {
+      // if (sortedCurrentChannels[i] !== sortedNewChannels[i]) return false;
+      if (currentConfig.channels[i] !== newServerData.channels[i]) return false;
+    }
+
+    return true;
+  };
 
   const connectWebSocket = useCallback(() => {
     // Clear any existing reconnect timeout
@@ -72,15 +100,42 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
 
     ws.onmessage = (event) => {
       try {
-        const data = JSON.parse(event.data);
+        const data = JSON.parse(event.data as string);
+        // Check if it's a CommandResponse (status and message)
+        // This provider should primarily care about full config objects.
+        // Error/status messages from the /config endpoint are handled by EegMonitor's WebSocket.
+        if (data.status && data.message) {
+            if (!isProduction) console.log('Config WebSocket (EegConfigProvider): Received status message, ignoring:', data);
+            // Potentially set status here if it's an error directly affecting this provider's connection
+            // For now, we assume EegMonitor handles user-facing config update statuses.
+            return;
+        }
+
+        // Assume it's a full config object (variable 'data' holds the parsed new server data)
+        if (areConfigsEqual(config, data)) {
+          if (!isProduction) {
+            console.log('Config WebSocket (EegConfigProvider): Received EEG configuration, but it is identical to the current one. No update needed.', data);
+          }
+          // If config is already set and status is 'Connected', no need to update status again.
+          // If config was null, and this is the first valid data, status should be updated.
+          if (!config) {
+            const FPS = 60.0; // Keep client-side FPS calculation for now
+            const configWithFps = { ...data, fps: FPS };
+            setConfig(configWithFps); // Set initial config
+            setStatus('Connected');
+            if (!isProduction) console.log('Config WebSocket (EegConfigProvider): Set initial EEG configuration:', configWithFps);
+          }
+          return; // Configs are the same, do nothing further
+        }
+
+        // Configs are different, or it's the first config
         const FPS = 60.0; // Keep client-side FPS calculation for now
         const configWithFps = { ...data, fps: FPS };
         setConfig(configWithFps);
-        if (!isProduction) console.log('Received EEG configuration:', configWithFps);
-        // Consider closing the socket here if config is only needed once?
-        // ws.close(); // Optional: close after receiving config
+        if (!isProduction) console.log('Config WebSocket (EegConfigProvider): Received and applied updated EEG configuration:', configWithFps);
+        setStatus('Connected'); // Ensure status reflects that we have a valid config
       } catch (error) {
-        console.error('Error parsing config data:', error);
+        console.error('Config WebSocket (EegConfigProvider): Error parsing config data:', error);
         setStatus('Error parsing data');
       }
     };
@@ -113,7 +168,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       // The onclose event will usually fire after an error, triggering reconnect logic there.
     };
 
-  }, [isProduction]); // useCallback dependencies
+  }, [isProduction]); // Removed 'config' from dependencies
 
   useEffect(() => {
     connectWebSocket(); // Initial connection attempt
@@ -135,15 +190,11 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [connectWebSocket]); // useEffect depends on the stable connectWebSocket callback
 
-  const refreshConfig = useCallback(() => {
-    if (!isProduction) console.log('EegConfigContext: refreshConfig called, re-initiating WebSocket connection.');
-    // connectWebSocket is already stable due to its own useCallback,
-    // so it's safe to call here. It will close existing and open new.
-    connectWebSocket();
-  }, [connectWebSocket, isProduction]);
+  // refreshConfig is removed as updates are now pushed by the server.
+  // The existing connectWebSocket handles initial connection and reconnections on error/close.
 
   return (
-    <EegConfigContext.Provider value={{ config, status, refreshConfig }}>
+    <EegConfigContext.Provider value={{ config, status }}>
       {children}
     </EegConfigContext.Provider>
   );

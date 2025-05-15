@@ -78,6 +78,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("EEG system started. Waiting for data...");
 
+    // Create a broadcast channel for applied config updates
+    let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16); // Channel for broadcasting applied configs
+
+    // Broadcast the initial configuration
+    if let Err(e) = config_applied_tx.send(initial_config.clone()) {
+        println!("Error broadcasting initial config: {}", e);
+    }
+
     // Create CSV recorder with daemon config and ADC config
     let csv_recorder = Arc::new(Mutex::new(driver_handler::CsvRecorder::new(
         initial_config.sample_rate,
@@ -91,7 +99,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tx_ws,
         config.clone(),
         csv_recorder.clone(),
-        is_recording.clone()
+        is_recording.clone(),
+        config_applied_tx.clone() // Pass the sender for applied configs
     );
 
     println!("WebSocket server starting on:");
@@ -205,6 +214,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             *config_guard = new_config_from_channel.clone();
                         }
                         println!("Shared configuration updated to: {:?}", new_config_from_channel.channels);
+
+                        // Broadcast the newly applied configuration
+                        if let Err(e) = config_applied_tx.send(new_config_from_channel.clone()) {
+                            println!("Error broadcasting updated config: {}", e);
+                        }
                         
                         // Update CSV recorder with new config
                         {
@@ -243,4 +257,3 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     Ok(())
 }
-

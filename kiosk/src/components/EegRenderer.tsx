@@ -18,10 +18,12 @@ interface EegRendererProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
-  containerRef?: React.RefObject<HTMLDivElement | null>;
+  // containerRef is no longer needed here, dimensions are passed directly
   linesReady: boolean; // Add prop to signal when lines are ready
   dataVersion: number; // Add prop to track data updates
   targetFps?: number; // Optional target FPS for rendering
+  containerWidth: number; // New prop for container width
+  containerHeight: number; // New prop for container height
 }
 
 export const EegRenderer = React.memo(function EegRenderer({
@@ -30,17 +32,19 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  containerRef,
+  // containerRef, // Removed
   linesReady, // Destructure linesReady
   dataVersion, // Destructure dataVersion
-  targetFps
+  targetFps,
+  containerWidth, // Destructure new prop
+  containerHeight // Destructure new prop
 }: EegRendererProps) {
   const wglpRef = useRef<WebglPlot | null>(null);
   // Array of WebglStep instances, one per channel
   // const linesRef = useRef<WebglStep[] | null>(null); // Removed - Use dataRef prop instead
   const animationFrameRef = useRef<number | null>(null);
   const isInitializedRef = useRef<boolean>(false);
-  const [canvasSized, setCanvasSized] = useState<boolean>(false); // Track if canvas has been sized
+  // const [canvasSized, setCanvasSized] = useState<boolean>(false); // Removed - use containerWidth/Height props
   // Removed wglpInstance state, reverting to refs
   // Last data chunk timestamps per channel
   const lastDataChunkTimeRef = useRef<number[]>([]);
@@ -90,19 +94,20 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   // Effect 1: Initialize WebGL Plot when canvas is ready and sized
   useEffect(() => {
-    // Skip if plot already exists, canvas missing, or canvas not sized yet
-    if (wglpRef.current || !canvasRef.current || !canvasSized || numChannels === 0) {
-      console.log(`[EegRenderer InitEffect1] Skipping plot creation (Plot Exists: ${!!wglpRef.current}, Canvas: ${!!canvasRef.current}, CanvasSized: ${canvasSized}, Channels: ${numChannels}).`);
+    // Skip if plot already exists, canvas missing, or container dimensions are not valid
+    const validDimensions = containerWidth > 0 && containerHeight > 0;
+    if (wglpRef.current || !canvasRef.current || !validDimensions || numChannels === 0) {
+      console.log(`[EegRenderer InitEffect1] Skipping plot creation (Plot Exists: ${!!wglpRef.current}, Canvas: ${!!canvasRef.current}, ValidDimensions: ${validDimensions} [${containerWidth}x${containerHeight}], Channels: ${numChannels}).`);
       return;
     }
 
     const canvas = canvasRef.current;
+    // Canvas sizing is now handled by the resize effect that depends on containerWidth/Height
     console.log("[EegRenderer InitEffect1] Initializing WebGL Plot instance...");
 
     try {
       const wglp = new WebglPlot(canvas);
       wglpRef.current = wglp; // Store in ref
-      // setWglpInstance(wglp); // Removed state update
 
       wglp.gScaleX = 1;
       wglp.gScaleY = 1;
@@ -119,7 +124,6 @@ export const EegRenderer = React.memo(function EegRenderer({
     } catch (error) {
       console.error("[EegRenderer InitEffect1] Error initializing WebGL Plot:", error);
       wglpRef.current = null;
-      // setWglpInstance(null); // Removed state update
       isInitializedRef.current = false; // Reset ref on error
     }
 
@@ -130,15 +134,12 @@ export const EegRenderer = React.memo(function EegRenderer({
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
-      // wglpRef.current?.destroy?.(); // Optional destroy
       wglpRef.current = null; // Clear ref on cleanup
-      // setWglpInstance(null); // Removed state update
       isInitializedRef.current = false; // Reset ref on cleanup
-      // Don't reset canvasSized here, ResizeObserver handles it
       console.log("[EegRenderer InitEffect1] Plot instance cleanup complete.");
     };
-    // Depend on canvasRef, numChannels, and canvasSized
-  }, [canvasRef, numChannels, canvasSized, renderLoop]); // Added renderLoop dependency
+    // Depend on canvasRef, numChannels, containerWidth, containerHeight, and renderLoop
+  }, [canvasRef, numChannels, containerWidth, containerHeight, renderLoop]);
 
 
   // Effect 2: Add/Update lines when they are ready AND plot is initialized
@@ -195,49 +196,38 @@ export const EegRenderer = React.memo(function EegRenderer({
   }, [linesReady, dataVersion]);
 
 
-  // Resize Effect (Keep as is, gScaleY=1 is handled)
+  // Resize Effect: Now depends on containerWidth and containerHeight props
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || containerWidth === 0 || containerHeight === 0) {
+      // console.log(`[EegRenderer ResizeEffect] Skipping resize: Canvas: ${!!canvasRef.current}, ContainerDims: ${containerWidth}x${containerHeight}`);
+      return;
+    }
 
     const canvas = canvasRef.current;
-    const elementToMeasure = (containerRef?.current) ? containerRef.current : canvas;
+    const dpr = window.devicePixelRatio || 1;
+    
+    // Use containerWidth and containerHeight directly for CSS size
+    const cssWidth = containerWidth;
+    const cssHeight = containerHeight; // Or a fraction if EegMonitor calculates it for aspect ratio
 
-    const resizeObserver = new ResizeObserver(entries => {
-      for (let entry of entries) {
-        const { width, height } = entry.contentRect;
-        const dpr = window.devicePixelRatio || 1;
-        const displayWidth = Math.round(width * dpr);
-        const displayHeight = Math.round(height * dpr);
+    const physicalWidth = Math.round(cssWidth * dpr);
+    const physicalHeight = Math.round(cssHeight * dpr);
 
-        if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
-          console.log(`[EegRenderer] Resizing canvas to: ${width}x${height} (CSS), ${displayWidth}x${displayHeight} (Physical), DPR: ${dpr}`);
-          canvas.width = displayWidth;
-          canvas.height = displayHeight;
+    if (canvas.width !== physicalWidth || canvas.height !== physicalHeight) {
+      console.log(`[EegRenderer ResizeEffect] Resizing canvas to: ${cssWidth}x${cssHeight} (CSS), ${physicalWidth}x${physicalHeight} (Physical), DPR: ${dpr}`);
+      canvas.width = physicalWidth;
+      canvas.height = physicalHeight;
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
 
-          // Use wglpRef here too
-          if (wglpRef.current) {
-             wglpRef.current.gScaleY = 1;
-             console.log(`[EegRenderer] Kept gScaleY at 1 on resize.`);
-             // Explicitly update the plot after resizing the canvas
-             wglpRef.current.update();
-          }
-          // Mark canvas as sized if dimensions are valid
-          if (displayWidth > 0 && displayHeight > 0) {
-              setCanvasSized(true);
-          }
-          // NOTE: WebglLineRoll width/buffer size is fixed on initialization.
-          // Resizing requires re-initialization if buffer size needs to change.
-        }
+      if (wglpRef.current) {
+         wglpRef.current.gScaleY = 1; // Maintain consistent Y scaling
+         console.log(`[EegRenderer ResizeEffect] Kept gScaleY at 1 on resize.`);
+         wglpRef.current.update(); // Update plot after canvas resize
       }
-    });
-
-    resizeObserver.observe(elementToMeasure);
-
-    return () => {
-      resizeObserver.unobserve(elementToMeasure);
-      resizeObserver.disconnect();
-    };
-  }, [canvasRef, containerRef]);
+    }
+    // No cleanup needed here as we are not using ResizeObserver anymore
+  }, [canvasRef, containerWidth, containerHeight]); // Depend on props
 
 
   // Component renders nothing itself
