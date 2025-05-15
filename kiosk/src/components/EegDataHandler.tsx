@@ -37,6 +37,7 @@ export function useEegDataHandler({
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
   // No queues or animation frame needed for immediate display
+  const sampleBuffersRef = useRef<Float32Array[]>([]); // Added for reusable sample buffers
   
   // createMessageHandler logic is now moved inside connectWebSocket
 
@@ -118,31 +119,50 @@ export function useEegDataHandler({
         }
 
         let bufferOffset = 9; // Start reading samples after timestamp (8) and error flag (1)
+        
+        // Ensure sampleBuffersRef has enough slots, primarily for when channelCount increases
+        if (sampleBuffersRef.current.length < channelCount) {
+          sampleBuffersRef.current = Array(channelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
+        }
+
+
         for (let ch = 0; ch < channelCount; ch++) {
-          const samples = new Float32Array(samplesPerChannel);
+          let currentSampleBuffer = sampleBuffersRef.current[ch];
+
+          // Check if buffer needs to be created or resized
+          if (!currentSampleBuffer || currentSampleBuffer.length !== samplesPerChannel) {
+            if (!isProduction && currentSampleBuffer) {
+              console.log(`[EegDataHandler] Ch ${ch} resizing sample buffer from ${currentSampleBuffer.length} to ${samplesPerChannel}`);
+            } else if (!isProduction && !currentSampleBuffer) {
+              console.log(`[EegDataHandler] Ch ${ch} creating sample buffer with size ${samplesPerChannel}`);
+            }
+            currentSampleBuffer = new Float32Array(samplesPerChannel);
+            sampleBuffersRef.current[ch] = currentSampleBuffer;
+          }
+
           for (let i = 0; i < samplesPerChannel; i++) {
             const sampleBufferOffset = bufferOffset + i * 4;
             if (sampleBufferOffset + 4 <= event.data.byteLength) {
               const rawValue = dataView.getFloat32(sampleBufferOffset, true);
-              samples[i] = isFinite(rawValue) ? rawValue : 0;
+              currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
             } else {
-              samples[i] = 0; // Handle potential buffer overrun
+              currentSampleBuffer[i] = 0; // Handle potential buffer overrun
               if (!isProduction) console.warn(`Buffer overrun detected at sample ${i}, channel ${ch}`);
             }
           }
           bufferOffset += samplesPerChannel * 4; // Move offset for the next channel
 
           // Update per-channel timestamp
-          if (lastDataChunkTimeRef.current) {
+          if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
               lastDataChunkTimeRef.current[ch] = performance.now();
           }
           // Feed data directly into WebGL line
           if (linesRef.current && linesRef.current[ch]) {
             // Log the first few samples to check if they are non-zero
-            if (!isProduction && samples.length > 0) {
-                console.log(`[EegDataHandler] Ch ${ch} samples (first 5):`, samples.slice(0, 5));
+            if (!isProduction && currentSampleBuffer.length > 0) {
+                // console.log(`[EegDataHandler] Ch ${ch} samples (first 5):`, currentSampleBuffer.slice(0, 5)); // Reduce noise
             }
-            linesRef.current[ch].shiftAdd(samples); // Add the whole batch
+            linesRef.current[ch].shiftAdd(currentSampleBuffer); // Add the whole batch
           } else if (!isProduction) {
             // console.warn(`linesRef missing or channel ${ch} not initialized`); // Reduce noise
           }

@@ -251,7 +251,7 @@ export default function EegMonitorWebGL() {
   // Effect to create WebGL lines when config and CONTAINER SIZE are ready
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const BASE_VISUAL_AMPLITUDE_SCALE = 0.0001; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
+  const BASE_VISUAL_AMPLITUDE_SCALE = 0.01; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
   const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
 
   useEffect(() => {
@@ -728,6 +728,7 @@ export default function EegMonitorWebGL() {
                   containerRef={containerRef}
                   linesReady={linesReady} // Pass down the readiness flag
                   dataVersion={dataVersion} // Pass down the data version
+                  targetFps={30} // Added target FPS
                 />
               </div>
             </div>

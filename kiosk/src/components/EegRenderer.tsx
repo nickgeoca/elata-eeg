@@ -21,6 +21,7 @@ interface EegRendererProps {
   containerRef?: React.RefObject<HTMLDivElement | null>;
   linesReady: boolean; // Add prop to signal when lines are ready
   dataVersion: number; // Add prop to track data updates
+  targetFps?: number; // Optional target FPS for rendering
 }
 
 export const EegRenderer = React.memo(function EegRenderer({
@@ -31,7 +32,8 @@ export const EegRenderer = React.memo(function EegRenderer({
   debugInfoRef,
   containerRef,
   linesReady, // Destructure linesReady
-  dataVersion // Destructure dataVersion
+  dataVersion, // Destructure dataVersion
+  targetFps
 }: EegRendererProps) {
   const wglpRef = useRef<WebglPlot | null>(null);
   // Array of WebglStep instances, one per channel
@@ -42,13 +44,15 @@ export const EegRenderer = React.memo(function EegRenderer({
   // Removed wglpInstance state, reverting to refs
   // Last data chunk timestamps per channel
   const lastDataChunkTimeRef = useRef<number[]>([]);
+  const lastRenderTimeRef = useRef<number>(0); // For FPS throttling
 
   const numChannels = config?.channels?.length ?? 8;
 
   // Render loop using single WebglLineRoll with addPoints
   const renderLoop = useCallback(() => {
+    animationFrameRef.current = requestAnimationFrame(renderLoop); // Request next frame immediately
+
     if (!wglpRef.current || !dataRef.current || !isInitializedRef.current || numChannels === 0) { // Use dataRef
-      animationFrameRef.current = requestAnimationFrame(renderLoop);
       return;
     }
   
@@ -56,24 +60,32 @@ export const EegRenderer = React.memo(function EegRenderer({
     const lines = dataRef.current; // Use dataRef
     const now = performance.now();
   
-    const sampleRate = config?.sample_rate || 250;
-    const batchSize = config?.batch_size || 16; // Get batch size from config, default 16
-    // totalNumSamples will be derived from line.numPoints inside the loop
-  
-    // offsetX logic removed - data is now added sample-by-sample
+    // FPS Throttling Logic
+    if (targetFps && targetFps > 0) {
+      const frameInterval = 1000 / targetFps;
+      const elapsed = now - lastRenderTimeRef.current;
 
+      if (elapsed < frameInterval) {
+        return; // Skip this frame
+      }
+      lastRenderTimeRef.current = now - (elapsed % frameInterval); // Adjust for consistent timing
+    } else {
+      // No FPS target, or invalid target, render as fast as possible (synced with rAF)
+      lastRenderTimeRef.current = now;
+    }
+
+    // The following loop for offsetX is not strictly needed for wglp.update()
+    // but kept if any per-line logic might be re-introduced.
+    // If it's purely for wglp.update(), it can be removed.
     for (let ch = 0; ch < numChannels; ch++) {
       const line = lines[ch];
       if (!line || line.numPoints === 0) continue; // Skip if line missing or has no points
-  
       // No need to set offsetX here anymore
     }
   
     wglp.update();
   
-    animationFrameRef.current = requestAnimationFrame(renderLoop);
-  
-  }, [numChannels, config]);
+  }, [numChannels, config, targetFps, dataRef, isInitializedRef]);
 
 
   // Effect 1: Initialize WebGL Plot when canvas is ready and sized
