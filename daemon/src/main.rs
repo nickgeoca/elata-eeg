@@ -171,9 +171,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         };
                         println!("[MAIN] Current shared config before comparison. Powerline filter: {:?}", current_shared_config.powerline_filter_hz);
                         
-                        // If the config hasn't changed, skip the restart
-                        if new_config_from_channel == current_shared_config {
-                            println!("[MAIN] Proposed configuration is THE SAME as current shared_config. Skipping restart. Proposed PL: {:?}, Current Shared PL: {:?}", new_config_from_channel.powerline_filter_hz, current_shared_config.powerline_filter_hz);
+                        // Check if powerline filter is being turned off (set to None)
+                        let powerline_filter_turning_off =
+                            new_config_from_channel.powerline_filter_hz.is_none() &&
+                            current_shared_config.powerline_filter_hz.is_some();
+                            
+                        if powerline_filter_turning_off {
+                            println!("[MAIN] CRITICAL: Detected powerline filter being turned OFF. Forcing update regardless of equality check.");
+                            // Continue to the update code below
+                        }
+                        // If the config hasn't changed and we're not turning off powerline filter, skip the restart
+                        else if new_config_from_channel == current_shared_config {
+                            println!("[MAIN] Proposed configuration is THE SAME as current shared_config. Skipping restart. Proposed PL: {:?}, Current Shared PL: {:?}",
+                                new_config_from_channel.powerline_filter_hz, current_shared_config.powerline_filter_hz);
+                            
                             // Even if we skip, let's ensure the shared config is what we think it is and broadcast it,
                             // as the server.rs might have sent "unchanged" based on a different view if there was a race.
                             // However, server.rs makes its "unchanged" decision *before* sending to main.

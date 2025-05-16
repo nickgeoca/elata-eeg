@@ -1,6 +1,7 @@
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
-use serde::{Serialize, Deserialize};
+use serde::{Serialize, Deserialize, Deserializer};
+use serde_json::Value;
 use futures_util::{StreamExt, SinkExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,11 +17,48 @@ pub struct CommandMessage {
 }
 
 /// Configuration message for WebSocket control
-#[derive(Deserialize)]
+
+// Custom deserializer for Option<Option<u32>>
+// Maps JSON `null` to `Some(None)` and missing field to `None`.
+fn deserialize_option_option_u32<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Deserialize the field's content directly as a Value.
+    // This bypasses Option<T>'s default "null -> None" behavior at this stage.
+    let v = Value::deserialize(deserializer)?;
+
+    match v {
+        Value::Null => Ok(Some(None)), // If the value was JSON null, make it Some(None)
+        actual_value => {
+            // If it was some other JSON value, try to parse it as u32
+            match serde_json::from_value::<u32>(actual_value) {
+                Ok(n) => Ok(Some(Some(n))),
+                Err(e) => Err(serde::de::Error::custom(e)),
+            }
+        }
+    }
+}
+
+#[derive(Deserialize, Debug)]
 pub struct ConfigMessage {
     pub channels: Option<Vec<u32>>,
     pub sample_rate: Option<u32>,
+    #[serde(default, deserialize_with = "deserialize_option_option_u32")]
     pub powerline_filter_hz: Option<Option<u32>>,
+}
+
+impl ConfigMessage {
+    // Helper method to debug the powerline filter value
+    pub fn debug_powerline(&self) {
+        println!("[CONFIG_DEBUG] ConfigMessage.powerline_filter_hz: {:?}", self.powerline_filter_hz);
+        if let Some(inner) = &self.powerline_filter_hz {
+            println!("[CONFIG_DEBUG] Inner value is: {:?}", inner);
+            if inner.is_none() {
+                println!("[CONFIG_DEBUG] CONFIRMED: Inner value is None (powerline filter OFF)");
+            }
+        }
+    }
 }
 
 /// Response message for WebSocket commands
@@ -253,6 +291,9 @@ pub async fn handle_config_websocket(
                             // Try to parse as ConfigMessage
                             match serde_json::from_str::<ConfigMessage>(text_from_client) {
                                 Ok(mut config_msg) => {
+                                    // Use our new debug method
+                                    config_msg.debug_powerline();
+                                    
                                     // ADD THIS LOG
                                     println!("[SERVER_DEBUG] Parsed config_msg.powerline_filter_hz: {:?}", config_msg.powerline_filter_hz);
 
@@ -346,7 +387,10 @@ pub async fn handle_config_websocket(
                                         }
                                     }
 
-                                    if let Some(new_powerline_filter) = config_msg.powerline_filter_hz {
+                                    // Handle powerline filter update
+                                    println!("[SERVER_DEBUG] Processing powerline filter. config_msg.powerline_filter_hz: {:?}", config_msg.powerline_filter_hz);
+                                    
+                                    if let Some(new_powerline_filter) = config_msg.powerline_filter_hz.clone() {
                                         // Validate the powerline filter value
                                         if new_powerline_filter.is_some() && ![50, 60].contains(&new_powerline_filter.unwrap()) {
                                             let response = CommandResponse {
@@ -361,10 +405,21 @@ pub async fn handle_config_websocket(
                                             continue;
                                         }
                                         
-                                        // ADD THIS LOG
-                                        println!("[SERVER_DEBUG] Comparing powerline_filter_hz: current_in_shared_config={:?}, from_client_message={:?}", updated_config.powerline_filter_hz, new_powerline_filter);
-
-                                        if updated_config.powerline_filter_hz != new_powerline_filter {
+                                        println!("[SERVER_DEBUG] Comparing powerline_filter_hz: current_in_shared_config={:?}, from_client_message={:?}",
+                                            updated_config.powerline_filter_hz, new_powerline_filter);
+                                        
+                                        // ALWAYS update powerline filter when explicitly set to None
+                                        if new_powerline_filter.is_none() {
+                                            println!("[SERVER_DEBUG] CRITICAL: Setting powerline filter to None (turning off)");
+                                            updated_config.powerline_filter_hz = None;
+                                            config_changed = true;
+                                            if !update_message.is_empty() { update_message.push_str(", "); }
+                                            update_message.push_str("powerline filter: Off");
+                                        }
+                                        // Otherwise, only update if different
+                                        else if updated_config.powerline_filter_hz != new_powerline_filter {
+                                            println!("[SERVER_DEBUG] Updating powerline filter from {:?} to {:?}",
+                                                updated_config.powerline_filter_hz, new_powerline_filter);
                                             updated_config.powerline_filter_hz = new_powerline_filter;
                                             config_changed = true;
                                             if !update_message.is_empty() { update_message.push_str(", "); }
