@@ -665,10 +665,10 @@ export default function EegMonitorWebGL() {
       {/* Main content area */}
       <div className="flex-grow overflow-hidden">
         {showSettings ? (
-          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto space-y-8"> {/* Added ref and relative positioning */}
+          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto"> {/* Added ref and relative positioning */}
             {/* Scroll Down Indicator */}
             {canScrollSettings && (
-              <div className="sticky top-1/2 right-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce pointer-events-none">
+              <div className="absolute top-1/2 right-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce pointer-events-none">
                 <span className="block text-2xl">↓</span>
                 <span className="block text-2xl -mt-4">↓</span>
                 <span className="block text-2xl -mt-4">↓</span>
