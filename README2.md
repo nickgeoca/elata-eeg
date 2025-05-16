@@ -90,19 +90,13 @@ Priorites
 - Fix readmes
 - MVP push. add /boot/firmware/config.txt line? dtparam=spi=on
 - Manual - include the http://raspberrypi.local:3000/ thing
+ - Blink test doc
 
 Lowest Priority
-- Production ready task items
 - Security Hardening: Consider additional security measures for a production system.
 - Change board name elata-e1 and add firmware versioning in the filename
 - Incoroporate positive channel lead-off detection? Maybe useful in the csv file for data analysis. (see LOFF_STATP register)
-- UI, switch to mock mode?
 - Clean up driver object. may be better if we can use the board as the obj and pass the filtering into it or something
-- Add to config.json? the fitler parameters?
-- Blink test doc
-- test low esr capacitor on power supply
-- install script
-- Add 60hz/50hz configurable filter
 - Dry vs wet electrodes- make py notebook?
 - Signal quality and filtering. AVSS vs GND vs DGND vs AGND. 5v powering AVDD
  - AVSS=AGND (JP25). DGND=AGND (Figure 58)... SPI uses AGND... AGND/AVSS/DGND - Analog ground

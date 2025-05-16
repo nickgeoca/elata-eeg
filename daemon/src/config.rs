@@ -19,6 +19,8 @@ pub struct DaemonConfig {
     pub batch_size: usize,
     /// Type of board driver to use (Ads1299 or Mock)
     pub driver_type: DriverType,
+    /// Powerline filter frequency in Hz (50Hz, 60Hz, or None for off)
+    pub powerline_filter_hz: Option<u32>,
 }
 
 impl Default for DaemonConfig {
@@ -31,6 +33,7 @@ impl Default for DaemonConfig {
             dsp_low_pass_cutoff_hz: 100.0, // Default value from current implementation
             batch_size: 32,
             driver_type: DriverType::Mock, // Default to Mock driver for safety
+            powerline_filter_hz: Some(60), // Default to 60Hz powerline filter
         }
     }
 }

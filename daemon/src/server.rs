@@ -20,6 +20,7 @@ pub struct CommandMessage {
 pub struct ConfigMessage {
     pub channels: Option<Vec<u32>>,
     pub sample_rate: Option<u32>,
+    pub powerline_filter_hz: Option<Option<u32>>,
 }
 
 /// Response message for WebSocket commands
@@ -110,6 +111,11 @@ pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatc
     
     while let Ok(eeg_batch_data) = rx.recv().await {
         // Create binary packet
+        if eeg_batch_data.channels.is_empty() {
+            println!("Warning: Received EegBatchData with no channels, skipping packet.");
+            continue; // Skip to the next message in the loop
+        }
+        // It's now safe to assume channels[0] exists
         let binary_data = create_eeg_binary_packet(&eeg_batch_data);
         let packet_size = binary_data.len();
         let samples_count = eeg_batch_data.channels[0].len();
@@ -171,6 +177,20 @@ pub async fn handle_config_websocket(
     // Create an MPSC channel to forward messages from the spawned task to ws_tx
     let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<Message>(32); // Channel for warp::ws::Message
 
+    // **NEW: Send current config immediately on connection**
+    let initial_config_for_client = {
+        let config_guard = config.lock().await; // 'config' is Arc<Mutex<AdcConfig>> passed to handle_config_websocket
+        config_guard.clone()
+    };
+    if let Ok(config_json) = serde_json::to_string(&initial_config_for_client) {
+        println!("Config WebSocket: Queuing initial config for client: {}", config_json);
+        if let Err(e) = mpsc_tx.send(Message::text(config_json)).await {
+             println!("Config WebSocket: Error queueing initial config for client: {}", e);
+             // Optionally, could send an error back to client or close if this fails.
+        }
+    }
+    // **END NEW**
+
     // Task to listen for applied config updates from main.rs and send them to the client via the MPSC channel
     let ws_tx_forwarder = mpsc_tx.clone();
     tokio::spawn(async move {
@@ -178,7 +198,9 @@ pub async fn handle_config_websocket(
             match config_applied_rx.recv().await {
                 Ok(applied_config) => {
                     println!("Config WebSocket: Received applied config from main: {:?}", applied_config.channels);
+                    println!("Config WebSocket: Applied config powerline_filter_hz: {:?}", applied_config.powerline_filter_hz);
                     if let Ok(config_json) = serde_json::to_string(&applied_config) {
+                        println!("Config WebSocket: Sending JSON to client: {}", config_json);
                         if let Err(e) = ws_tx_forwarder.send(Message::text(config_json)).await {
                             println!("Config WebSocket: Error queueing applied config for client: {}", e);
                             break; // Stop if queueing fails (channel might be closed)
@@ -225,9 +247,18 @@ pub async fn handle_config_websocket(
                             let text_from_client = msg.to_str().unwrap_or_default();
                             println!("Config WebSocket: Received text message: {}", text_from_client);
                             
+                            // ADD THIS LOG
+                            println!("[SERVER_DEBUG] Attempting to parse JSON: >>>{}<<<", text_from_client);
+                            
                             // Try to parse as ConfigMessage
                             match serde_json::from_str::<ConfigMessage>(text_from_client) {
                                 Ok(mut config_msg) => {
+                                    // ADD THIS LOG
+                                    println!("[SERVER_DEBUG] Parsed config_msg.powerline_filter_hz: {:?}", config_msg.powerline_filter_hz);
+
+                                    // ADD THIS LOG
+                                    println!("[SERVER_DEBUG] Checking is_recording status: {}", is_recording.load(Ordering::Relaxed));
+
                                     if is_recording.load(Ordering::Relaxed) {
                                         let response = CommandResponse {
                                             status: "error".to_string(),
@@ -242,12 +273,20 @@ pub async fn handle_config_websocket(
                                         continue;
                                     }
                                     
+                                    // ADD THIS LOG
+                                    println!("[SERVER_DEBUG] About to acquire config lock.");
                                     let mut config_guard = config.lock().await;
+                                    // ADD THIS LOG
+                                    println!("[SERVER_DEBUG] Config lock acquired. Current shared PL: {:?}", config_guard.powerline_filter_hz);
                                     let mut updated_config = config_guard.clone();
                                     let mut config_changed = false;
                                     let mut update_message = String::new();
-                                    let no_params_provided = config_msg.channels.is_none() && config_msg.sample_rate.is_none();
-
+                                    let no_params_provided = config_msg.channels.is_none() &&
+                                                            config_msg.sample_rate.is_none() &&
+                                                            config_msg.powerline_filter_hz.is_none();
+ 
+                                    // ADD THIS LOG
+                                    println!("[SERVER_DEBUG] About to process channels. config_msg.channels.is_some(): {}", config_msg.channels.is_some());
                                     if let Some(new_channels) = config_msg.channels.take() {
                                         if new_channels.is_empty() {
                                             let response = CommandResponse { status: "error".to_string(), message: "Channel list cannot be empty".to_string() };
@@ -304,6 +343,33 @@ pub async fn handle_config_websocket(
                                             config_changed = true;
                                             if !update_message.is_empty() { update_message.push_str(", "); }
                                             update_message.push_str(&format!("sample rate: {}", new_sample_rate));
+                                        }
+                                    }
+
+                                    if let Some(new_powerline_filter) = config_msg.powerline_filter_hz {
+                                        // Validate the powerline filter value
+                                        if new_powerline_filter.is_some() && ![50, 60].contains(&new_powerline_filter.unwrap()) {
+                                            let response = CommandResponse {
+                                                status: "error".to_string(),
+                                                message: format!("Invalid powerline filter: {:?}. Valid: 50Hz, 60Hz, or null (off)", new_powerline_filter)
+                                            };
+                                            if let Ok(json) = serde_json::to_string(&response) {
+                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
+                                                    println!("Config WebSocket: Error queueing 'invalid powerline filter' response: {}", e);
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        
+                                        // ADD THIS LOG
+                                        println!("[SERVER_DEBUG] Comparing powerline_filter_hz: current_in_shared_config={:?}, from_client_message={:?}", updated_config.powerline_filter_hz, new_powerline_filter);
+
+                                        if updated_config.powerline_filter_hz != new_powerline_filter {
+                                            updated_config.powerline_filter_hz = new_powerline_filter;
+                                            config_changed = true;
+                                            if !update_message.is_empty() { update_message.push_str(", "); }
+                                            update_message.push_str(&format!("powerline filter: {:?}",
+                                                new_powerline_filter.map_or("Off".to_string(), |f| f.to_string() + "Hz")));
                                         }
                                     }
                                     

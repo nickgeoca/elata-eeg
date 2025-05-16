@@ -1,33 +1,4 @@
 use biquad::{Biquad, DirectForm2Transposed, Coefficients, Type, Q_BUTTERWORTH_F32, ToHertz};
-use rustfft::{FftPlanner, num_complex::Complex};
-use std::sync::Arc;
-use std::time::Instant;
-use std::f32::consts::PI;
-use std::error::Error;
-use std::thread::sleep;
-use std::time::{Duration, SystemTime};
-use tokio;
-use crate::board_drivers::types::DriverError;
-use crate::board_drivers::types::AdcDriver;
-use crate::board_drivers::types::DriverStatus;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-
-#[derive(Debug)]
-pub struct FrequencyBins {
-    // Delta (0.5-4 Hz) - 7 bins
-    delta: Vec<f32>,  
-    // Theta (4-8 Hz) - 8 bins
-    theta: Vec<f32>,  
-    // Alpha (8-13 Hz) - 10 bins
-    alpha: Vec<f32>,  
-    // Beta (13-30 Hz) - 17 bins
-    beta: Vec<f32>,   
-    // Gamma (30-150 Hz) - 32 bins
-    gamma: Vec<f32>,
-    line_noise_50hz: f32,  // Around 50Hz
-    line_noise_60hz: f32,  // Around 60Hz
-}
 
 // Update the FilterCoefficients to use biquad's Coefficients
 #[derive(Clone, Debug)]
@@ -125,29 +96,43 @@ impl LowpassFilter {
 pub struct SignalProcessor {
     sample_rate: u32,
     num_channels: usize,
-    notch_filters_50hz: Vec<NotchFilter>,
-    notch_filters_60hz: Vec<NotchFilter>,
+    powerline_notch_filters: Option<Vec<NotchFilter>>, // Holds 50Hz OR 60Hz filters, or None
     highpass_filters: Vec<HighpassFilter>,
     lowpass_filters: Vec<LowpassFilter>,
 }
 
 impl SignalProcessor {
-    pub fn new(sample_rate: u32, num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32) -> Self {
+    pub fn new(sample_rate: u32, num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32, powerline_filter_hz: Option<u32>) -> Self {
+        println!("[SignalProcessor::new] Initializing with sample_rate: {}, num_channels: {}, HP_cutoff: {}, LP_cutoff: {}, powerline_filter_hz: {:?}",
+                 sample_rate, num_channels, dsp_high_pass_cutoff, dsp_low_pass_cutoff, powerline_filter_hz);
         // Add validation for sample rate
         assert!(sample_rate > 0, "Sample rate must be positive");
         assert!(sample_rate >= 200, "Sample rate should be at least 200Hz for proper filter operation");
         
         let sample_rate_f32 = sample_rate as f32;
         
+        // Create powerline notch filters based on the configuration
+        let powerline_notch_filters = match powerline_filter_hz {
+            Some(freq) if freq == 50 || freq == 60 => {
+                Some((0..num_channels)
+                    .map(|_| NotchFilter::new(sample_rate_f32, freq as f32))
+                    .collect())
+            },
+            _ => {
+                println!("[SignalProcessor::new] Powerline filter is OFF or invalid value: {:?}", powerline_filter_hz);
+                None // No powerline filter
+            }
+        };
+        if powerline_notch_filters.is_some() {
+            println!("[SignalProcessor::new] Powerline notch filters CREATED for {:?} Hz", powerline_filter_hz.unwrap());
+        } else {
+            println!("[SignalProcessor::new] Powerline notch filters are NONE");
+        }
+        
         Self {
             sample_rate,
             num_channels,
-            notch_filters_50hz: (0..num_channels)
-                .map(|_| NotchFilter::new(sample_rate_f32, 50.0))
-                .collect(),
-            notch_filters_60hz: (0..num_channels)
-                .map(|_| NotchFilter::new(sample_rate_f32, 60.0))
-                .collect(),
+            powerline_notch_filters,
             highpass_filters: (0..num_channels)
                 .map(|_| HighpassFilter::new(sample_rate_f32, dsp_high_pass_cutoff))
                 .collect(),
@@ -163,8 +148,14 @@ impl SignalProcessor {
         
         let mut processed = sample;
         processed = self.highpass_filters[channel].process(processed);  // Move highpass first
-        processed = self.notch_filters_50hz[channel].process(processed);
-        processed = self.notch_filters_60hz[channel].process(processed);
+        
+        // Apply powerline notch filter if configured
+        if let Some(notch_filters) = &mut self.powerline_notch_filters {
+            if channel < notch_filters.len() {
+                processed = notch_filters[channel].process(processed);
+            }
+        }
+        
         processed = self.lowpass_filters[channel].process(processed);
         processed
     }
@@ -194,8 +185,14 @@ impl SignalProcessor {
         for (i, &sample) in samples.iter().enumerate() {
             let mut processed = sample;
             processed = self.highpass_filters[channel].process(processed);
-            processed = self.notch_filters_50hz[channel].process(processed);
-            processed = self.notch_filters_60hz[channel].process(processed);
+            
+            // Apply powerline notch filter if configured
+            if let Some(notch_filters) = &mut self.powerline_notch_filters {
+                if channel < notch_filters.len() {
+                    processed = notch_filters[channel].process(processed);
+                }
+            }
+            
             processed = self.lowpass_filters[channel].process(processed);
             output[i] = processed;
         }
@@ -203,17 +200,32 @@ impl SignalProcessor {
         Ok(())
     }
 
-    pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32) {
+    pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32, powerline_filter_hz: Option<u32>) {
+        println!("[SignalProcessor::reset] Resetting with sample_rate: {}, num_channels: {}, HP_cutoff: {}, LP_cutoff: {}, powerline_filter_hz: {:?}",
+                 new_sample_rate, new_num_channels, dsp_high_pass_cutoff, dsp_low_pass_cutoff, powerline_filter_hz);
         self.sample_rate = new_sample_rate;
         self.num_channels = new_num_channels;
         // Recreate all filters
         let sample_rate = self.sample_rate as f32;
-        self.notch_filters_50hz = (0..self.num_channels)
-            .map(|_| NotchFilter::new(sample_rate, 50.0))
-            .collect();
-        self.notch_filters_60hz = (0..self.num_channels)
-            .map(|_| NotchFilter::new(sample_rate, 60.0))
-            .collect();
+        
+        // Create powerline notch filters based on the configuration
+        self.powerline_notch_filters = match powerline_filter_hz {
+            Some(freq) if freq == 50 || freq == 60 => {
+                Some((0..self.num_channels)
+                    .map(|_| NotchFilter::new(sample_rate, freq as f32))
+                    .collect())
+            },
+            _ => {
+                println!("[SignalProcessor::reset] Powerline filter is OFF or invalid value: {:?}", powerline_filter_hz);
+                None // No powerline filter
+            }
+        };
+        if self.powerline_notch_filters.is_some() {
+            println!("[SignalProcessor::reset] Powerline notch filters RE-CREATED for {:?} Hz", powerline_filter_hz.unwrap());
+        } else {
+            println!("[SignalProcessor::reset] Powerline notch filters are NOW NONE");
+        }
+        
         self.highpass_filters = (0..self.num_channels)
             .map(|_| HighpassFilter::new(sample_rate, dsp_high_pass_cutoff))
             .collect();

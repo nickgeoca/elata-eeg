@@ -102,8 +102,28 @@ export const EegRenderer = React.memo(function EegRenderer({
     }
 
     const canvas = canvasRef.current;
-    // Canvas sizing is now handled by the resize effect that depends on containerWidth/Height
-    console.log("[EegRenderer InitEffect1] Initializing WebGL Plot instance...");
+    // Explicitly size the canvas using current props BEFORE initializing WebglPlot
+    const dpr = window.devicePixelRatio || 1;
+    const cssWidth = containerWidth;
+    const cssHeight = containerHeight; // Or a fraction if EegMonitor calculates it for aspect ratio
+
+    const physicalWidth = Math.round(cssWidth * dpr);
+    const physicalHeight = Math.round(cssHeight * dpr);
+
+    // Check if canvas actually needs resizing before applying.
+    // This ensures that if the effect re-runs due to other dependency changes
+    // but the size is already correct, we don't unnecessarily manipulate the DOM.
+    if (canvas.width !== physicalWidth || canvas.height !== physicalHeight) {
+      console.log(`[EegRenderer InitEffect1] Sizing canvas for initialization: ${cssWidth}x${cssHeight} (CSS), ${physicalWidth}x${physicalHeight} (Physical), DPR: ${dpr}`);
+      canvas.width = physicalWidth;
+      canvas.height = physicalHeight;
+      canvas.style.width = `${cssWidth}px`;
+      canvas.style.height = `${cssHeight}px`;
+    } else {
+      console.log(`[EegRenderer InitEffect1] Canvas already correctly sized for initialization: ${cssWidth}x${cssHeight} (CSS), ${physicalWidth}x${physicalHeight} (Physical), DPR: ${dpr}`);
+    }
+    
+    console.log("[EegRenderer InitEffect1] Initializing WebGL Plot instance (after explicit sizing)...");
 
     try {
       const wglp = new WebglPlot(canvas);

@@ -40,6 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("  Low-pass filter cutoff: {} Hz", daemon_config.dsp_low_pass_cutoff_hz);
     println!("  Batch size: {}", daemon_config.batch_size);
     println!("  Driver type: {:?}", daemon_config.driver_type);
+    println!("  Powerline filter: {:?} Hz", daemon_config.powerline_filter_hz);
     
     // Debug: Print current working directory
     match std::env::current_dir() {
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Vref: 4.5,
         dsp_high_pass_cutoff_hz: daemon_config.dsp_high_pass_cutoff_hz,
         dsp_low_pass_cutoff_hz: daemon_config.dsp_low_pass_cutoff_hz,
+        powerline_filter_hz: daemon_config.powerline_filter_hz,
     };
     
     // Create shared state
@@ -153,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             },
             config_update = config_update_rx.recv() => {
                 if let Some(new_config_from_channel) = config_update {
-                    println!("Received configuration update: {:?}", new_config_from_channel.channels);
+                    println!("[MAIN] Received proposed config update. Powerline filter: {:?}", new_config_from_channel.powerline_filter_hz);
                     
                     // Check if recording is in progress
                     let recording_in_progress = is_recording.load(Ordering::Relaxed);
@@ -167,14 +169,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             let config_guard = config.lock().await;
                             config_guard.clone()
                         };
+                        println!("[MAIN] Current shared config before comparison. Powerline filter: {:?}", current_shared_config.powerline_filter_hz);
                         
                         // If the config hasn't changed, skip the restart
                         if new_config_from_channel == current_shared_config {
-                            println!("Proposed configuration is the same as the current active configuration. Skipping restart.");
+                            println!("[MAIN] Proposed configuration is THE SAME as current shared_config. Skipping restart. Proposed PL: {:?}, Current Shared PL: {:?}", new_config_from_channel.powerline_filter_hz, current_shared_config.powerline_filter_hz);
+                            // Even if we skip, let's ensure the shared config is what we think it is and broadcast it,
+                            // as the server.rs might have sent "unchanged" based on a different view if there was a race.
+                            // However, server.rs makes its "unchanged" decision *before* sending to main.
+                            // The key is that if main skips, it doesn't broadcast an "applied" config.
+                            // The client is waiting for an applied config.
+                            // If main skips, the client gets nothing new after "unchanged" or "submitted".
+                            // Let's send the current_shared_config if we skip, so the client gets *something*.
+                            if let Err(e) = config_applied_tx.send(current_shared_config.clone()) {
+                                println!("[MAIN] Error broadcasting current_shared_config after skip: {}", e);
+                            }
                             continue;
                         }
+                        println!("[MAIN] Proposed configuration IS DIFFERENT. Proceeding with EegSystem restart. Proposed PL: {:?}, Current Shared PL: {:?}", new_config_from_channel.powerline_filter_hz, current_shared_config.powerline_filter_hz);
                         
-                        println!("Stopping current EEG system...");
+                        println!("[MAIN] Stopping current EEG system...");
                         // Stop current EEG system
                         if let Err(e) = current_eeg_system.stop().await {
                             println!("Error stopping EEG system: {}", e);
@@ -193,31 +207,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             current_processing_handle.abort();
                         }
                         
-                        println!("Starting new EEG system with updated configuration...");
+                        println!("[MAIN] Starting new EEG system with proposed configuration: Powerline filter: {:?}", new_config_from_channel.powerline_filter_hz);
                         // Create and start new EEG system with updated configuration
                         let (mut new_eeg_system, new_data_rx) = match EegSystem::new(new_config_from_channel.clone()).await {
                             Ok(result) => result,
                             Err(e) => {
-                                println!("Error creating new EEG system: {}", e);
+                                println!("[MAIN] Error creating new EEG system: {}", e);
                                 return Err(to_daemon_error(e));
                             }
                         };
                         
                         if let Err(e) = new_eeg_system.start(new_config_from_channel.clone()).await {
-                            println!("Error starting new EEG system: {}", e);
+                            println!("[MAIN] Error starting new EEG system: {}", e);
                             return Err(to_daemon_error(e));
                         }
                         
                         // Update the shared config with the new configuration from the channel
+                        let applied_config_for_broadcast = new_config_from_channel.clone();
                         {
                             let mut config_guard = config.lock().await;
-                            *config_guard = new_config_from_channel.clone();
+                            *config_guard = applied_config_for_broadcast.clone();
                         }
-                        println!("Shared configuration updated to: {:?}", new_config_from_channel.channels);
+                        println!("[MAIN] Shared configuration updated. Powerline filter: {:?}", applied_config_for_broadcast.powerline_filter_hz);
 
                         // Broadcast the newly applied configuration
-                        if let Err(e) = config_applied_tx.send(new_config_from_channel.clone()) {
-                            println!("Error broadcasting updated config: {}", e);
+                        println!("[MAIN] Broadcasting applied config. Powerline filter: {:?}", applied_config_for_broadcast.powerline_filter_hz);
+                        if let Err(e) = config_applied_tx.send(applied_config_for_broadcast.clone()) {
+                            println!("[MAIN] Error broadcasting updated config: {}", e);
                         }
                         
                         // Update CSV recorder with new config

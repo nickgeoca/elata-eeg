@@ -102,6 +102,7 @@ impl EegSystem {
             config.channels.len(),
             config.dsp_high_pass_cutoff_hz,
             config.dsp_low_pass_cutoff_hz,
+            config.powerline_filter_hz,
         )));
         let (tx, rx) = mpsc::channel(100);
         let cancel_token = CancellationToken::new();
@@ -157,7 +158,8 @@ impl EegSystem {
                 config.sample_rate,
                 config.channels.len(),
                 config.dsp_high_pass_cutoff_hz,
-                config.dsp_low_pass_cutoff_hz
+                config.dsp_low_pass_cutoff_hz,
+                config.powerline_filter_hz
             );
         }
 

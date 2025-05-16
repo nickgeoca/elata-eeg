@@ -45,6 +45,7 @@ export default function EegMonitorWebGL() {
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
   const [selectedSampleRate, setSelectedSampleRate] = useState<string | undefined>(undefined);
+  const [selectedPowerlineFilter, setSelectedPowerlineFilter] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     if (config) {
@@ -53,6 +54,9 @@ export default function EegMonitorWebGL() {
       }
       if (config.sample_rate !== undefined) {
         setSelectedSampleRate(String(config.sample_rate));
+      }
+      if (config.powerline_filter_hz !== undefined) {
+        setSelectedPowerlineFilter(config.powerline_filter_hz === null ? 'off' : String(config.powerline_filter_hz));
       }
     }
   }, [config]);
@@ -93,7 +97,11 @@ export default function EegMonitorWebGL() {
           // Check if it's a CommandResponse (status and message)
           if (response.status && response.message) {
             if (response.status === 'ok') {
-              setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config.`);
+              if (response.message === "Configuration unchanged") {
+                setConfigUpdateStatus(`Configuration unchanged.`);
+              } else {
+                setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config.`);
+              }
               // refreshConfig(); // REFRESH_CONFIG_REMOVED: Global config will update via EegConfigProvider's WebSocket
             } else {
               setConfigUpdateStatus(`Config update error: ${response.message}`);
@@ -161,13 +169,13 @@ export default function EegMonitorWebGL() {
       return;
     }
 
-    if (!selectedChannelCount && !selectedSampleRate) {
+    if (!selectedChannelCount && !selectedSampleRate && !selectedPowerlineFilter) {
       setConfigUpdateStatus('No changes selected to update.');
       console.log('No changes to send for config update.');
       return;
     }
     
-    const newConfig: { channels?: number[]; sample_rate?: number } = {};
+    const newConfig: { channels?: number[]; sample_rate?: number; powerline_filter_hz?: number | null } = {};
 
     if (selectedChannelCount !== undefined) {
       const numChannels = parseInt(selectedChannelCount, 10);
@@ -187,6 +195,17 @@ export default function EegMonitorWebGL() {
       const rate = parseInt(selectedSampleRate, 10);
       if (!isNaN(rate)) {
         newConfig.sample_rate = rate;
+      }
+    }
+    
+    if (selectedPowerlineFilter !== undefined) {
+      if (selectedPowerlineFilter === 'off') {
+        newConfig.powerline_filter_hz = null;
+      } else {
+        const filterHz = parseInt(selectedPowerlineFilter, 10);
+        if (!isNaN(filterHz) && (filterHz === 50 || filterHz === 60)) {
+          newConfig.powerline_filter_hz = filterHz;
+        }
       }
     }
     
@@ -289,19 +308,30 @@ export default function EegMonitorWebGL() {
     // --- ResizeObserver Setup ---
     let resizeObserver: ResizeObserver | null = null;
     const target = containerRef.current;
+    let sizeUpdateTimeoutId: NodeJS.Timeout | null = null;
 
     if (!showSettings && target) {
         console.log("[EegMonitor LineEffect] Setting up ResizeObserver.");
         resizeObserver = new ResizeObserver(entries => {
           for (let entry of entries) {
             const { width, height } = entry.contentRect;
-            setContainerSize(prevSize => {
-              if (prevSize.width !== width || prevSize.height !== height) {
-                console.log(`[EegMonitor ResizeObserver] Container size changed: ${width}x${height}`);
-                return { width, height };
-              }
-              return prevSize;
-            });
+            console.log(`[EegMonitor ResizeObserver] Observed size change: ${width}x${height}. Current showSettings: ${showSettings}`);
+            
+            // Clear any existing timeout to avoid multiple rapid updates
+            if (sizeUpdateTimeoutId) {
+              clearTimeout(sizeUpdateTimeoutId);
+            }
+            
+            // Use a small timeout to ensure the size is stable
+            sizeUpdateTimeoutId = setTimeout(() => {
+              setContainerSize(prevSize => {
+                if (prevSize.width !== width || prevSize.height !== height) {
+                  console.log(`[EegMonitor ResizeObserver] Setting container size: ${width}x${height}`);
+                  return { width, height };
+                }
+                return prevSize;
+              });
+            }, 50); // Small delay to ensure DOM is fully laid out
           }
         });
         resizeObserver.observe(target);
@@ -316,7 +346,7 @@ export default function EegMonitorWebGL() {
     // --- End ResizeObserver Setup ---
 
 
-    console.log(`[EegMonitor LineEffect] Running. showSettings: ${showSettings}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
+    console.log(`[EegMonitor LineEffect RUNS] showSettings: ${showSettings}, containerSize: ${JSON.stringify(containerSize)}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
 
     // Handle navigating AWAY from graph
     if (showSettings) {
@@ -337,8 +367,11 @@ export default function EegMonitorWebGL() {
         };
     }
 
+    // Add a minimum width threshold to ensure container is properly measured
+    const MIN_VALID_WIDTH = 50; // Minimum width to consider container properly measured
+    
     // Depend on config, channels, and the container SIZE state
-    if (config && config.channels && containerSize.width > 0) {
+    if (config && config.channels && containerSize.width > MIN_VALID_WIDTH) {
       const numChannels = config.channels.length;
       const width = containerSize.width; // Use width from state
       const sampleRate = config.sample_rate || 250; // Use default if needed
@@ -348,13 +381,11 @@ export default function EegMonitorWebGL() {
 
       console.log(`[EegMonitor] Measured container width: ${width}`); // Log width
       console.log(`[EegMonitor] Calculated initialNumPoints: ${initialNumPoints}`); // Log points
+      console.log(`[EegMonitor] Container size from state:`, containerSize);
+      console.log(`[EegMonitor] Container element rect:`, containerRef.current?.getBoundingClientRect());
+      console.log(`[EegMonitor] showSettings:`, showSettings);
 
-      // This check might be redundant now as the effect depends on containerSize.width > 0
-      // if (width <= 0) {
-      //     console.warn("[EegMonitor] Container width is zero (from state). Skipping line creation/update.");
-      //     setLinesReady(false); // Ensure lines are not marked ready
-      //     return;
-      // }
+      // Width check is now handled by the MIN_VALID_WIDTH check in the if condition
 
       if (numChannels === 0) {
           console.warn("[EegMonitor LineEffect] Zero channels configured. Clearing lines.");
@@ -428,7 +459,7 @@ export default function EegMonitorWebGL() {
         // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is 0)
         // The specific check for numChannels === 0 inside the 'if' block already handles clearing.
         // This 'else' handles cases where the outer 'if (config && config.channels && containerSize.width > 0)' fails.
-        console.log(`[EegMonitor LineEffect] Outer conditions for line creation NOT met. Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}. Clearing lines if necessary.`);
+        console.log(`[EegMonitor LineEffect SKIPPING] Condition not met: config=${!!config}, config.channels=${!!config?.channels}, containerSize.width=${containerSize.width} > MIN_VALID_WIDTH=${MIN_VALID_WIDTH}`);
         if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
             dataRef.current = [];
             setLinesReady(false);
@@ -452,8 +483,48 @@ export default function EegMonitorWebGL() {
 
   // Toggle between settings and graph view
   const toggleSettings = () => {
-    setShowSettings(!showSettings);
+    console.log(`[EegMonitor toggleSettings] Called. Current showSettings: ${showSettings}`);
+    const newShowSettings = !showSettings;
+    setShowSettings(newShowSettings);
+    console.log(`[EegMonitor toggleSettings] New showSettings: ${newShowSettings}`);
+    
+    // If switching from settings to graph view, ensure container size is reset
+    // to trigger proper measurement and line creation
+    if (showSettings) { // If previous showSettings was true (i.e., was in settings view)
+      // Reset container size to force remeasurement
+      console.log("[EegMonitor toggleSettings] Switching from settings to graph view. Resetting containerSize.");
+      setContainerSize({ width: 0, height: 0 });
+    }
   };
+  
+  // Effect to handle transition from settings to graph view
+  useEffect(() => {
+    if (!showSettings && containerRef.current) {
+      console.log(`[EegMonitor TransitionEffect RUNS] showSettings: ${showSettings}, containerRef.current: ${!!containerRef.current}. Scheduling size check.`);
+      
+      // Use a timeout to ensure the DOM has updated after the view switch
+      const transitionTimeoutId = setTimeout(() => {
+        const rect = containerRef.current?.getBoundingClientRect();
+        console.log(`[EegMonitor TransitionEffect TIMEOUT] Measured rect: ${JSON.stringify(rect)}`);
+        if (rect && rect.width > 0) {
+          console.log(`[EegMonitor] Post-transition size check: ${rect.width}x${rect.height}`);
+          // Update container size if it's not already set correctly
+          setContainerSize(prevSize => {
+            if (prevSize.width !== rect.width || prevSize.height !== rect.height) {
+              console.log(`[EegMonitor TransitionEffect TIMEOUT] Updating container size from ${JSON.stringify(prevSize)} to ${rect.width}x${rect.height}`);
+              return { width: rect.width, height: rect.height };
+            }
+            console.log(`[EegMonitor TransitionEffect TIMEOUT] Container size already correct: ${JSON.stringify(prevSize)}`);
+            return prevSize;
+          });
+        } else {
+          console.log(`[EegMonitor TransitionEffect TIMEOUT] Rect not valid or width is 0. rect: ${JSON.stringify(rect)}`);
+        }
+      }, 100); // Small delay to ensure DOM is updated
+      
+      return () => clearTimeout(transitionTimeoutId);
+    }
+  }, [showSettings]);
 
   // Effect for settings panel scroll detection
   useEffect(() => {
@@ -597,7 +668,7 @@ export default function EegMonitorWebGL() {
           <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto space-y-8"> {/* Added ref and relative positioning */}
             {/* Scroll Down Indicator */}
             {canScrollSettings && (
-              <div className="sticky top-1/2 left-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce">
+              <div className="sticky top-1/2 right-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce pointer-events-none">
                 <span className="block text-2xl">↓</span>
                 <span className="block text-2xl -mt-4">↓</span>
                 <span className="block text-2xl -mt-4">↓</span>
@@ -649,6 +720,26 @@ export default function EegMonitorWebGL() {
                       ))}
                     </select>
                     <span className="text-sm text-gray-500">(Currently: {config.channels?.length} channels - [{config.channels?.join(', ')}])</span>
+                  </div>
+                  
+                  {/* Powerline Filter */}
+                  <div className="md:col-span-2 flex items-center space-x-4">
+                    <label htmlFor="powerlineFilter" className="block text-sm font-medium text-gray-400 w-48">Powerline Filter:</label>
+                    <select
+                      id="powerlineFilter"
+                      name="powerlineFilter"
+                      value={selectedPowerlineFilter || ''}
+                      onChange={(e) => setSelectedPowerlineFilter(e.target.value)}
+                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
+                    >
+                      <option value="off">Off</option>
+                      <option value="50">50 Hz</option>
+                      <option value="60">60 Hz</option>
+                    </select>
+                    <span className="text-sm text-gray-500">
+                      (Currently: {config.powerline_filter_hz === null ? 'Off' :
+                                  config.powerline_filter_hz ? `${config.powerline_filter_hz} Hz` : 'Not set'})
+                    </span>
                   </div>
                   
                   {/* Other Config Items - Display Only */}
@@ -724,12 +815,6 @@ export default function EegMonitorWebGL() {
                 </div>
               </div>
             </div>
-            {/* End of Settings Indicator */}
-            {isAtSettingsBottom && (
-              <div className="text-center text-gray-500 py-4 mt-4">
-                ❖ End of Settings ❖
-              </div>
-            )}
             {/* EegChannelConfig (Per-Channel Settings) section remains removed */}
           </div>
         ) : (

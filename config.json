@@ -5,5 +5,6 @@
   "dsp_high_pass_cutoff_hz": 16,
   "dsp_low_pass_cutoff_hz": 40.0,
   "batch_size": 16,
-  "driver_type": "Ads1299"
+  "driver_type": "Ads1299",
+  "powerline_filter_hz": 60
 }

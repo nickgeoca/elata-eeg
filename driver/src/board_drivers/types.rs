@@ -47,6 +47,8 @@ pub struct AdcConfig {
     pub dsp_high_pass_cutoff_hz: f32,
     /// Low-pass filter cutoff frequency in Hz
     pub dsp_low_pass_cutoff_hz: f32,
+    /// Powerline filter frequency in Hz (50Hz, 60Hz, or None for off)
+    pub powerline_filter_hz: Option<u32>,
 }
 
 impl Default for AdcConfig {
@@ -60,6 +62,7 @@ impl Default for AdcConfig {
             Vref: 4.5,         // Vref for the ADC
             dsp_high_pass_cutoff_hz: 0.1,  // Default high-pass filter cutoff (Hz)
             dsp_low_pass_cutoff_hz: 100.0, // Default low-pass filter cutoff (Hz)
+            powerline_filter_hz: Some(60), // Default to 60Hz powerline filter
         }
     }
 }
