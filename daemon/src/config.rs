@@ -27,7 +27,7 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             max_recording_length_minutes: 60,
-            recordings_directory: "../recordings/".to_string(),
+            recordings_directory: "./recordings/".to_string(), // Changed to ./
             session: "".to_string(),
             dsp_high_pass_cutoff_hz: 0.1,  // Default value from current implementation
             dsp_low_pass_cutoff_hz: 100.0, // Default value from current implementation
@@ -40,23 +40,38 @@ impl Default for DaemonConfig {
 
 /// Load daemon configuration from file or create default if not found
 pub fn load_config() -> Arc<DaemonConfig> {
-    // Try to load from file
-    let config_path = "../config.json";
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| {
+        println!("Warning: Could not determine current directory. Assuming project root for config path.");
+        std::path::PathBuf::from(".")
+    });
+
+    let config_path_str = if current_dir.file_name().map_or(false, |name| name == "daemon") {
+        "../config.json"
+    } else {
+        // Assumes if CWD is not '.../daemon', it's the project root.
+        "config.json"
+    };
+    
+    let config_path = std::path::Path::new(config_path_str);
+
     match std::fs::read_to_string(config_path) {
         Ok(contents) => {
             match serde_json::from_str(&contents) {
                 Ok(config) => {
-                    println!("Loaded configuration from {}", config_path);
+                    println!("Loaded configuration from {}", config_path.display());
                     Arc::new(config)
                 },
                 Err(e) => {
-                    println!("Error parsing configuration file: {}. Using defaults.", e);
+                    println!("Error parsing configuration file {}: {}. Using defaults.", config_path.display(), e);
                     let default_config = DaemonConfig::default();
                     
-                    // Create default config file for future use
+                    // Create default config file for future use at the determined path
                     if let Ok(json) = serde_json::to_string_pretty(&default_config) {
-                        let _ = std::fs::write(config_path, json);
-                        println!("Created default configuration file at {}", config_path);
+                        if let Err(write_err) = std::fs::write(config_path, json) {
+                            println!("Warning: Could not create default configuration file at {}: {}", config_path.display(), write_err);
+                        } else {
+                            println!("Created default configuration file at {}", config_path.display());
+                        }
                     }
                     
                     Arc::new(default_config)
@@ -64,13 +79,16 @@ pub fn load_config() -> Arc<DaemonConfig> {
             }
         },
         Err(_) => {
-            println!("Configuration file not found. Using defaults.");
+            println!("Configuration file {} not found. Using defaults.", config_path.display());
             let default_config = DaemonConfig::default();
             
-            // Create default config file for future use
+            // Create default config file for future use at the determined path
             if let Ok(json) = serde_json::to_string_pretty(&default_config) {
-                let _ = std::fs::write(config_path, json);
-                println!("Created default configuration file at {}", config_path);
+                 if let Err(write_err) = std::fs::write(config_path, json) {
+                    println!("Warning: Could not create default configuration file at {}: {}", config_path.display(), write_err);
+                } else {
+                    println!("Created default configuration file at {}", config_path.display());
+                }
             }
             
             Arc::new(default_config)

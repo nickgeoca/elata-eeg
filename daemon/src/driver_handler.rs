@@ -101,9 +101,7 @@ impl CsvRecorder {
         
         // Create filename with current timestamp and parameters
         let now: DateTime<Local> = Local::now();
-        let gain = self.current_adc_config.gain;
         let driver = format!("{:?}", self.current_adc_config.board_driver);
-        let vref = self.current_adc_config.Vref;
         
         // Get session field from config
         let session_prefix = if self.config.session.is_empty() {
@@ -113,13 +111,11 @@ impl CsvRecorder {
         };
 
         let filename = format!(
-            "{}/{}{}_gain{}_board{}_vref{}.csv",
+            "{}/{}{}_board{}.csv",
             recordings_dir,
             session_prefix,
             now.format("%Y-%m-%d_%H-%M"),
-            gain,
             driver,
-            vref
         );
         println!("DEBUG: Creating recording file at: {}", filename);
         

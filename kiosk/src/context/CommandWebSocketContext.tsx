@@ -9,6 +9,7 @@ interface CommandWebSocketContextType {
   stopRecording: () => void;
   recordingStatus: string;
   recordingFilePath: string | null;
+  isStartRecordingPending: boolean;
 }
 
 const CommandWebSocketContext = createContext<CommandWebSocketContextType | undefined>(
@@ -24,6 +25,7 @@ export const CommandWebSocketProvider = ({
   const [wsConnected, setWsConnected] = useState(false);
   const [recordingStatus, setRecordingStatus] = useState('Not recording');
   const [recordingFilePath, setRecordingFilePath] = useState<string | null>(null);
+  const [isStartRecordingPending, setIsStartRecordingPending] = useState(false);
 
   useEffect(() => {
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -40,6 +42,7 @@ export const CommandWebSocketProvider = ({
 
         if (response.status === 'ok') {
           const recording = response.message.startsWith('Currently recording');
+          const failedToStart = response.message.includes('Failed to start recording'); // Or other relevant error messages
           let filePath = null;
 
           if (recording) {
@@ -51,8 +54,18 @@ export const CommandWebSocketProvider = ({
 
           setRecordingStatus(response.message);
           setRecordingFilePath(filePath);
+
+          if (recording || failedToStart) {
+            console.timeEnd('startRecordingCommand');
+            setIsStartRecordingPending(false);
+          }
         } else {
           console.error('Command error:', response.message);
+          // Potentially clear pending state if the error is related to a start command
+          if (isStartRecordingPending) { // Check if a start command was pending
+             console.timeEnd('startRecordingCommand'); // End timer if it was running
+             setIsStartRecordingPending(false);
+          }
         }
       } catch (error) {
         console.error('Error parsing command response:', error);
@@ -77,7 +90,10 @@ export const CommandWebSocketProvider = ({
   }, []);
 
   const startRecording = () => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (ws && ws.readyState === WebSocket.OPEN && !isStartRecordingPending) {
+      setIsStartRecordingPending(true);
+      console.time('startRecordingCommand');
+      console.log('Attempting to start recording...');
       ws.send(JSON.stringify({ command: 'start' }));
     }
   };
@@ -95,6 +111,7 @@ export const CommandWebSocketProvider = ({
     stopRecording,
     recordingStatus,
     recordingFilePath,
+    isStartRecordingPending,
   };
 
   return (
