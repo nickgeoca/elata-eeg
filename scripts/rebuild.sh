@@ -26,7 +26,6 @@ echo "✅ Daemon rebuild complete!"
 echo "🧹 Cleaning Next.js build cache..."
 cd kiosk
 rm -rf .next
-  
 echo "⚙️ Rebuilding Next.js app..."
 npm run build
 cd ..
