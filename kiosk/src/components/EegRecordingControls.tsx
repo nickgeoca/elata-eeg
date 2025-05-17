@@ -12,6 +12,8 @@ export default function EegRecordingControls() {
     isStartRecordingPending,
   } = useCommandWebSocket();
 
+  console.log('[EegRecordingControls] isStartRecordingPending before return:', isStartRecordingPending);
+
   return (
     <div className="flex flex-col w-full">
       {/* Recording controls */}
@@ -20,14 +22,17 @@ export default function EegRecordingControls() {
         <button
           onClick={isStartRecordingPending ? undefined : (recordingStatus.startsWith('Currently recording') ? stopRecording : startRecording)}
           disabled={!wsConnected || isStartRecordingPending}
-          className={`px-4 py-2 rounded-md flex items-center duration-150 ${
-            !wsConnected
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : isStartRecordingPending
-                ? 'bg-yellow-500 text-white cursor-wait'
-                : recordingStatus.startsWith('Currently recording')
-                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                  : 'bg-green-600 hover:bg-green-700 text-white'
+          className={`px-4 py-1 rounded-md flex items-center ${
+            ((value) => {
+              console.log('[EegRecordingControls] isStartRecordingPending for className:', value);
+              return !wsConnected
+                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                : value
+                  ? 'bg-yellow-500 text-white cursor-wait'
+                  : recordingStatus.startsWith('Currently recording')
+                    ? 'bg-red-600 hover:bg-red-700 text-white'
+                    : 'bg-green-600 hover:bg-green-700 text-white';
+            })(isStartRecordingPending)
           }`}
         >
           {isStartRecordingPending ? (

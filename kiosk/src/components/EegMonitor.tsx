@@ -7,6 +7,7 @@ import { useEegConfig } from './EegConfig';
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
+import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
 import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';
 import { useCommandWebSocket } from '../context/CommandWebSocketContext';
@@ -232,7 +233,10 @@ export default function EegMonitorWebGL() {
     stopRecording,
     recordingStatus,
     recordingFilePath,
-    ws,
+    // ws, // ws is used by EegRecordingControls via the context
+    // startRecording, // Handled by EegRecordingControls
+    // stopRecording, // Handled by EegRecordingControls
+    // wsConnected, // Used by EegRecordingControls
   } = useCommandWebSocket();
 
   // Update canvas dimensions based on container size
@@ -590,31 +594,9 @@ export default function EegMonitorWebGL() {
             <span>{dataReceived ? 'receiving data' : 'no data'}</span>
           </div>
         </div>
-        <div className="flex space-x-2">
-          {/* Recording button */}
-          <button
-            onClick={recordingStatus.startsWith('Currently recording') ? stopRecording : startRecording}
-            disabled={!wsConnected}
-            className={`px-4 py-1 rounded-md flex items-center ${
-              !wsConnected
-                ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-                : recordingStatus.startsWith('Currently recording')
-                  ? 'bg-red-600 hover:bg-red-700 text-white'
-                  : 'bg-green-600 hover:bg-green-700 text-white'
-            }`}
-          >
-            {recordingStatus.startsWith('Currently recording') ? (
-              <>
-                <span className="inline-block w-2 h-2 rounded-full bg-white mr-2"></span>
-                Stop Recording
-              </>
-            ) : (
-              <>
-                <span className="inline-block w-2 h-2 rounded-full bg-white mr-2"></span>
-                Start Recording
-              </>
-            )}
-          </button>
+        <div className="flex items-baseline space-x-2">
+          {/* Use the EegRecordingControls component */}
+          <EegRecordingControls />
           
           {/* Recordings button */}
           <a

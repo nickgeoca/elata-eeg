@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useState, useEffect, useContext } from 'react';
+import { createContext, useState, useEffect, useContext, useMemo, useCallback } from 'react';
 
 interface CommandWebSocketContextType {
   ws: WebSocket | null;
@@ -89,22 +89,22 @@ export const CommandWebSocketProvider = ({
     };
   }, []);
 
-  const startRecording = () => {
+  const startRecording = useCallback(() => {
     if (ws && ws.readyState === WebSocket.OPEN && !isStartRecordingPending) {
       setIsStartRecordingPending(true);
       console.time('startRecordingCommand');
       console.log('Attempting to start recording...');
       ws.send(JSON.stringify({ command: 'start' }));
     }
-  };
+  }, [ws, isStartRecordingPending]);
 
-  const stopRecording = () => {
+  const stopRecording = useCallback(() => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ command: 'stop' }));
     }
-  };
+  }, [ws]);
 
-  const value: CommandWebSocketContextType = {
+  const value = useMemo(() => ({
     ws,
     wsConnected,
     startRecording,
@@ -112,7 +112,7 @@ export const CommandWebSocketProvider = ({
     recordingStatus,
     recordingFilePath,
     isStartRecordingPending,
-  };
+  }), [ws, wsConnected, startRecording, stopRecording, recordingStatus, recordingFilePath, isStartRecordingPending]);
 
   return (
     <CommandWebSocketContext.Provider value={value}>
