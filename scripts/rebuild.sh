@@ -9,7 +9,7 @@ echo "🚀 Starting full rebuild process..."
 # Stop services and exit kiosk mode (unless called from install.sh)
 if [ "$FROM_INSTALL" != "from-install" ]; then
   echo "🛑 Stopping services and exiting kiosk mode..."
-  ./stop.sh
+  ./scripts/stop.sh
 fi
 
 # Driver is built automatically as a dependency of the daemon
@@ -35,7 +35,7 @@ echo "✅ Kiosk rebuild complete!"
 # Start services and kiosk mode (unless called from install.sh)
 if [ "$FROM_INSTALL" != "from-install" ]; then
   echo "🚀 Starting services and kiosk mode..."
-  ./start.sh
+  ./scripts/start.sh
 fi
 
 echo "🎉 Rebuild process complete!"

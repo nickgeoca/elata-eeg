@@ -1,3 +1,40 @@
+> This is not FDA approved. For research only.
+
+## Setup Guide
+After the product is assembled with the touch screen, clone then start the kiosk application.
+```bash
+git clone https://github.com/Elata-Biosciences/elata-eeg
+cd elata-eeg
+chmod +x install.sh
+bash install.sh
+```
+
+## Dev Usage
+#### Change Code
+```bash
+# Stop kiosk mode
+bash stop.sh
+
+# Term 1, driver
+cd driver; cargo build
+# Term 2, daemon
+cd daemon; cargo build; cargo run
+# Term 3, kiosk
+cd kiosk; npm run dev
+```
+
+#### Rebuild Production
+```bash
+# Stop
+bash stop.sh
+
+# ...<Change code here> ...
+
+# Rebuild code base and run kiosk mode
+bash rebuild.sh
+```
+
+
 # Open EEG Project
 
 **Table of Contents**

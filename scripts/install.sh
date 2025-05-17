@@ -9,10 +9,10 @@ sudo raspi-config
 
 
 # Make scripts executable
-chmod +x rebuild.sh
-chmod +x start.sh
-chmod +x stop.sh
-chmod +x uninstall.sh
+chmod +x scripts/rebuild.sh
+chmod +x scripts/start.sh
+chmod +x scripts/stop.sh
+chmod +x scripts/uninstall.sh
 
 # Configuration variables
 REPO_DIR="$HOME/elata-eeg"  # Repository directory
