@@ -7,6 +7,7 @@ import { useEegConfig } from './EegConfig';
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
+import { FftRenderer } from './FftRenderer'; // Import the FftRenderer
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
 import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';
@@ -28,10 +29,13 @@ export default function EegMonitorWebGL() {
   // Ref to hold the single latest timestamp of any received data packet
   const latestTimestampRef = useRef<number>(performance.now());
   // Removed canvasDimensions state, EegRenderer handles this
-  const [showSettings, setShowSettings] = useState(false);
+  const [activeView, setActiveView] = useState<'signalGraph' | 'fftGraph' | 'settings'>('signalGraph');
+  const [lastGraphView, setLastGraphView] = useState<'signalGraph' | 'fftGraph'>('signalGraph');
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
+  const fftDataRef = useRef<Record<number, number[]>>({}); // Ref to store latest FFT data for all channels
+  const [fftDataVersion, setFftDataVersion] = useState(0); // Version counter for fftDataRef updates
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null);
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Added to track WebSocket state
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null);
@@ -64,7 +68,7 @@ export default function EegMonitorWebGL() {
 
   // Effect to manage the /config WebSocket connection
   useEffect(() => {
-    if (showSettings) {
+    if (activeView === 'settings') {
       console.log('Attempting to connect to /config WebSocket');
       const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
       const newConfigWs = new WebSocket(`ws://${wsHost}:8080/config`);
@@ -160,7 +164,7 @@ export default function EegMonitorWebGL() {
       }
       setConfigUpdateStatus(null);
     }
-  }, [showSettings]); // REFRESH_CONFIG_REMOVED: refreshConfig removed from dependencies
+  }, [activeView]); // REFRESH_CONFIG_REMOVED: refreshConfig removed from dependencies
 
 
   const handleUpdateConfig = () => {
@@ -278,6 +282,14 @@ export default function EegMonitorWebGL() {
     // return () => clearTimeout(timer); // Note: useCallback doesn't directly support cleanup return like useEffect
   }, [setDriverError]); // setDriverError is stable
 
+  // Handle FFT data updates
+  const handleFftData = useCallback((channelIndex: number, fftOutput: number[]) => {
+    fftDataRef.current[channelIndex] = fftOutput;
+    setFftDataVersion(v => v + 1);
+    // Optional: Add logging for FFT data if needed for debugging
+    // console.log(`[EegMonitor] Received FFT data for Ch ${channelIndex}:`, fftOutput.slice(0, 5));
+  }, [setFftDataVersion]); // setFftDataVersion is stable
+
   // Effect to initialize/resize channelTimestampRef based on channel count
   useEffect(() => {
     const numChannels = config?.channels?.length || 0;
@@ -296,8 +308,8 @@ export default function EegMonitorWebGL() {
     linesRef: dataRef, // Pass dataRef as linesRef (holds WebglStep instances)
     lastDataChunkTimeRef: channelTimestampRef, // Pass the array ref for per-channel times
     latestTimestampRef: latestTimestampRef,     // Pass the single ref for the overall latest time
-    // debugInfoRef is not needed by useEegDataHandler
-    // latestTimestampRef was renamed to channelTimestampRef and is passed as lastDataChunkTimeRef
+    debugInfoRef: debugInfoRef, // Pass debugInfoRef for packet counting
+    onFftData: activeView === 'fftGraph' ? handleFftData : undefined // Pass FFT handler only if in FFT view
   });
 
   // Removed dedicated useLayoutEffect for ResizeObserver
@@ -314,12 +326,12 @@ export default function EegMonitorWebGL() {
     const target = containerRef.current;
     let sizeUpdateTimeoutId: NodeJS.Timeout | null = null;
 
-    if (!showSettings && target) {
+    if (activeView !== 'settings' && target) {
         console.log("[EegMonitor LineEffect] Setting up ResizeObserver.");
         resizeObserver = new ResizeObserver(entries => {
           for (let entry of entries) {
             const { width, height } = entry.contentRect;
-            console.log(`[EegMonitor ResizeObserver] Observed size change: ${width}x${height}. Current showSettings: ${showSettings}`);
+            console.log(`[EegMonitor ResizeObserver] Observed size change: ${width}x${height}. Current activeView: ${activeView}`);
             
             // Clear any existing timeout to avoid multiple rapid updates
             if (sizeUpdateTimeoutId) {
@@ -350,13 +362,13 @@ export default function EegMonitorWebGL() {
     // --- End ResizeObserver Setup ---
 
 
-    console.log(`[EegMonitor LineEffect RUNS] showSettings: ${showSettings}, containerSize: ${JSON.stringify(containerSize)}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
+    console.log(`[EegMonitor LineEffect RUNS] activeView: ${activeView}, containerSize: ${JSON.stringify(containerSize)}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
 
     // Handle navigating AWAY from graph
-    if (showSettings) {
+    if (activeView === 'settings') {
         console.log("[EegMonitor LineEffect] In settings view, ensuring lines are cleared.");
         if (dataRef.current.length > 0 || linesReady) {
-             console.log("[EegMonitor LineEffect] Clearing lines for settings view.");
+             console.log("[EegMonitor LineEffect] Clearing lines for settings view (activeView is 'settings').");
              dataRef.current = [];
              setLinesReady(false);
              setDataVersion(v => v + 1);
@@ -387,7 +399,7 @@ export default function EegMonitorWebGL() {
       console.log(`[EegMonitor] Calculated initialNumPoints: ${initialNumPoints}`); // Log points
       console.log(`[EegMonitor] Container size from state:`, containerSize);
       console.log(`[EegMonitor] Container element rect:`, containerRef.current?.getBoundingClientRect());
-      console.log(`[EegMonitor] showSettings:`, showSettings);
+      console.log(`[EegMonitor] activeView:`, activeView);
 
       // Width check is now handled by the MIN_VALID_WIDTH check in the if condition
 
@@ -479,32 +491,50 @@ export default function EegMonitorWebGL() {
             resizeObserver.disconnect();
         }
     };
-    // Depend on config, container size state, showSettings, AND uiVoltageScaleFactor
-  }, [config?.channels, config?.sample_rate, containerSize, showSettings, uiVoltageScaleFactor]);
+    // Depend on config, container size state, activeView, AND uiVoltageScaleFactor
+  }, [config?.channels, config?.sample_rate, containerSize, activeView, uiVoltageScaleFactor]);
   
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
 
-  // Toggle between settings and graph view
-  const toggleSettings = () => {
-    console.log(`[EegMonitor toggleSettings] Called. Current showSettings: ${showSettings}`);
-    const newShowSettings = !showSettings;
-    setShowSettings(newShowSettings);
-    console.log(`[EegMonitor toggleSettings] New showSettings: ${newShowSettings}`);
-    
-    // If switching from settings to graph view, ensure container size is reset
-    // to trigger proper measurement and line creation
-    if (showSettings) { // If previous showSettings was true (i.e., was in settings view)
-      // Reset container size to force remeasurement
-      console.log("[EegMonitor toggleSettings] Switching from settings to graph view. Resetting containerSize.");
+  // Handler for the "Brain Waves" / "Signal Graph" button
+  const handleToggleGraphView = () => {
+    if (activeView === 'signalGraph') {
+      setActiveView('fftGraph');
+    } else if (activeView === 'fftGraph') {
+      setActiveView('signalGraph');
+    } else if (activeView === 'settings') {
+      // If in settings, switch to the last active graph view
+      setActiveView(lastGraphView);
+      // Ensure container size is reset for graph view
+      console.log("[EegMonitor handleToggleGraphView] Switching from settings to graph view. Resetting containerSize.");
+      setContainerSize({ width: 0, height: 0 });
+    }
+  };
+
+  // Handler for the "Settings" / "Back to [Graph]" button
+  const handleToggleSettingsView = () => {
+    if (activeView !== 'settings') {
+      // Store the current graph view before switching to settings
+      if (activeView === 'signalGraph' || activeView === 'fftGraph') {
+        setLastGraphView(activeView);
+      }
+      setActiveView('settings');
+      // Settings panel manages its own layout, graph container size reset is handled when switching back.
+    } else {
+      // Switching back from settings to the last graph view
+      setActiveView(lastGraphView);
+      // If switching from settings to graph view, ensure container size is reset
+      // to trigger proper measurement and line creation for the graph
+      console.log("[EegMonitor handleToggleSettingsView] Switching from settings to graph view. Resetting containerSize.");
       setContainerSize({ width: 0, height: 0 });
     }
   };
   
   // Effect to handle transition from settings to graph view
   useEffect(() => {
-    if (!showSettings && containerRef.current) {
-      console.log(`[EegMonitor TransitionEffect RUNS] showSettings: ${showSettings}, containerRef.current: ${!!containerRef.current}. Scheduling size check.`);
+    if (activeView !== 'settings' && containerRef.current) {
+      console.log(`[EegMonitor TransitionEffect RUNS] activeView: ${activeView}, containerRef.current: ${!!containerRef.current}. Scheduling size check.`);
       
       // Use a timeout to ensure the DOM has updated after the view switch
       const transitionTimeoutId = setTimeout(() => {
@@ -528,7 +558,7 @@ export default function EegMonitorWebGL() {
       
       return () => clearTimeout(transitionTimeoutId);
     }
-  }, [showSettings]);
+  }, [activeView]);
 
   // Effect for settings panel scroll detection
   useEffect(() => {
@@ -555,7 +585,7 @@ export default function EegMonitorWebGL() {
       }
     };
 
-    if (showSettings && scrollElement) {
+    if (activeView === 'settings' && scrollElement) {
       // Initial check
       // Use a timeout to allow content to render fully before checking scroll height
       const timerId = setTimeout(checkScroll, 100);
@@ -580,7 +610,7 @@ export default function EegMonitorWebGL() {
       setCanScrollSettings(false);
       setIsAtSettingsBottom(false);
     }
-  }, [showSettings, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
+  }, [activeView, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
 
   return (
     <div className="h-screen w-screen bg-gray-900 flex flex-col">
@@ -609,12 +639,23 @@ export default function EegMonitorWebGL() {
             Recordings
           </a>
           
+          {/* Brain Waves / Signal Graph toggle button */}
+          <button
+            onClick={handleToggleGraphView}
+            className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
+            // disabled={activeView === 'settings'} // Optionally disable if in settings, or allow switching
+          >
+            {activeView === 'signalGraph' ? 'Brain Waves' : activeView === 'fftGraph' ? 'Signal Graph' : lastGraphView === 'signalGraph' ? 'Brain Waves' : 'Signal Graph'}
+          </button>
+
           {/* Settings button */}
           <button
-            onClick={toggleSettings}
+            onClick={handleToggleSettingsView}
             className="px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white"
           >
-            {showSettings ? 'Show Graph' : 'Settings'}
+            {activeView === 'settings'
+              ? `Back to ${lastGraphView === 'signalGraph' ? 'Signal' : 'FFT'} Graph`
+              : 'Settings'}
           </button>
         </div>
       </div>
@@ -646,8 +687,8 @@ export default function EegMonitorWebGL() {
       
       {/* Main content area */}
       <div className="flex-grow overflow-hidden">
-        {showSettings ? (
-          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto"> {/* Added ref and relative positioning */}
+        {activeView === 'settings' ? (
+          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto"> {/* Settings Panel Component (Existing UI) */}
             {/* Scroll Down Indicator */}
             {canScrollSettings && (
               <div className="absolute top-1/2 right-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce pointer-events-none">
@@ -799,18 +840,17 @@ export default function EegMonitorWebGL() {
             </div>
             {/* EegChannelConfig (Per-Channel Settings) section remains removed */}
           </div>
-        ) : (
-          <div className="h-full p-4">
+        ) : activeView === 'signalGraph' ? (
+          <div className="h-full p-4"> {/* This outer div might be slightly different from original, ensure it matches structure */}
             {/* Time markers */}
-            <div className="relative h-full">
+            <div className="relative h-full"> {/* This div is important for positioning */}
               <div className="absolute w-full flex justify-between px-2 -top-6 text-gray-400 text-sm">
-                {/* Use a reversed copy instead of mutating the array in place */}
                 {[...TIME_TICKS].reverse().map(time => (
                   <div key={time}>{time}s</div>
                 ))}
               </div>
               
-              <div className="relative h-full" ref={containerRef}>
+              <div className="relative h-full" ref={containerRef}> {/* EegRenderer and related elements */}
                 {/* Channel labels */}
                 <div className="absolute -left-8 h-full flex flex-col justify-between">
                   {config?.channels && config.channels.length > 0 ? (
@@ -822,30 +862,66 @@ export default function EegMonitorWebGL() {
                   )}
                 </div>
                 
-                {/* WebGL Canvas - Now using dynamic dimensions and full height */}
                 <canvas
-                  ref={canvasRef} // EegRenderer will set width/height attributes
-                  className="w-full h-full border border-gray-700 rounded-lg" // Style remains
+                  ref={canvasRef}
+                  className="w-full h-full border border-gray-700 rounded-lg"
                 />
                 
-                {/* WebGL Renderer (doesn't render anything directly, handles WebGL setup) */}
                 <EegRenderer
                   canvasRef={canvasRef}
-                  dataRef={dataRef} // Restore prop pass
+                  dataRef={dataRef}
                   config={config}
-                  latestTimestampRef={latestTimestampRef} // Pass the single timestamp ref
-                  debugInfoRef={debugInfoRef} // Pass debugInfoRef
+                  latestTimestampRef={latestTimestampRef}
+                  debugInfoRef={debugInfoRef}
                   containerWidth={containerSize.width}
                   containerHeight={containerSize.height}
-                  linesReady={linesReady} // Pass down the readiness flag
-                  dataVersion={dataVersion} // Pass down the data version
-                  targetFps={displayFps} // Added target FPS
+                  linesReady={linesReady}
+                  dataVersion={dataVersion}
+                  targetFps={displayFps}
                 />
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-    </div>
+                 <EegStatusBar
+                   status={status}
+                   fps={displayFps}
+                   dataReceived={dataReceived}
+                   packetsReceived={debugInfoRef.current.packetsReceived}
+                 />
+             </div>
+           </div>
+         </div>
+       ) : activeView === 'fftGraph' ? (
+         <div className="relative h-full" ref={containerRef}>
+           {/* Canvas for FFT plot */}
+           <canvas
+             ref={canvasRef} // Reusing the same canvas, FftRenderer will manage it
+             className="w-full h-full border border-gray-700 rounded-lg" // Style consistent with EegRenderer
+           />
+           <FftRenderer
+             canvasRef={canvasRef}
+             fftDataRef={fftDataRef}
+             fftDataVersion={fftDataVersion}
+             config={config}
+             containerWidth={containerSize.width}
+             containerHeight={containerSize.height}
+             linesReady={linesReady} // linesReady indicates container is ready and basic config is loaded
+                                     // FftRenderer internally manages its own line setup based on FFT data.
+             targetFps={displayFps} // Use the same displayFps for now
+           />
+           {/* Optional: Add specific FFT axis labels or overlays here if needed */}
+           {/* Example: X-axis labels for frequency */}
+           {/* <div className="absolute w-full flex justify-between px-2 -bottom-6 text-gray-400 text-sm">
+             <span>{FFT_MIN_FREQ_HZ} Hz</span>
+             <span>{(FFT_MIN_FREQ_HZ + FFT_MAX_FREQ_HZ) / 2} Hz</span>
+             <span>{FFT_MAX_FREQ_HZ} Hz</span>
+           </div> */}
+           <EegStatusBar
+             status={status} // Or a more relevant status for FFT
+             fps={displayFps}
+             dataReceived={dataReceived} // This reflects raw data; FFT is derived
+             packetsReceived={debugInfoRef.current.packetsReceived}
+           />
+         </div>
+       ) : null}
+     </div>
+   </div>
   );
 }

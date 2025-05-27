@@ -10,7 +10,14 @@
  */
 
 import { useEffect, useRef, useState, useCallback } from 'react';
-import { DEFAULT_SAMPLE_RATE, DEFAULT_BATCH_SIZE, WINDOW_DURATION } from '../utils/eegConstants';
+import {
+    DEFAULT_SAMPLE_RATE,
+    DEFAULT_BATCH_SIZE,
+    WINDOW_DURATION,
+    FFT_WINDOW_DURATION_MS, // Import from constants
+    FFT_HOP_DURATION_MS     // Import from constants
+} from '../utils/eegConstants';
+import { calculateFft } from '../utils/fftUtils';
 
 interface EegDataHandlerProps {
   config: any;
@@ -19,6 +26,12 @@ interface EegDataHandlerProps {
   linesRef: React.MutableRefObject<any[]>; // Array of WebglStep instances (e.g., WebglLineRoll)
   lastDataChunkTimeRef: React.MutableRefObject<number[]>; // Ref holding array of per-channel timestamps
   latestTimestampRef: React.MutableRefObject<number>; // Ref holding the single latest timestamp
+  debugInfoRef: React.MutableRefObject<{
+    lastPacketTime: number;
+    packetsReceived: number;
+    samplesProcessed: number;
+  }>; // Ref for debug information including packet count
+  onFftData?: (channelIndex: number, fftOutput: number[]) => void; // New callback for FFT data
 }
 
 export function useEegDataHandler({
@@ -27,7 +40,9 @@ export function useEegDataHandler({
   onError,
   linesRef,
   lastDataChunkTimeRef,
-  latestTimestampRef // Destructure the new prop
+  latestTimestampRef,
+  debugInfoRef,
+  onFftData // Destructure the new FFT callback
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
   const wsRef = useRef<WebSocket | null>(null);
@@ -37,7 +52,9 @@ export function useEegDataHandler({
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
   // No queues or animation frame needed for immediate display
-  const sampleBuffersRef = useRef<Float32Array[]>([]); // Added for reusable sample buffers
+  const sampleBuffersRef = useRef<Float32Array[]>([]); // For raw data display
+  const fftBuffersRef = useRef<number[][]>([]); // Buffers for accumulating FFT window data per channel
+  const samplesSinceLastFftRef = useRef<number[]>([]); // Samples received since last FFT calc per channel
   
   // createMessageHandler logic is now moved inside connectWebSocket
 
@@ -166,11 +183,61 @@ export function useEegDataHandler({
           } else if (!isProduction) {
             // console.warn(`linesRef missing or channel ${ch} not initialized`); // Reduce noise
           }
+
+          // --- FFT Processing ---
+          if (onFftData) {
+            if (!fftBuffersRef.current[ch]) {
+              fftBuffersRef.current[ch] = [];
+            }
+            if (samplesSinceLastFftRef.current[ch] === undefined) {
+              samplesSinceLastFftRef.current[ch] = 0;
+            }
+
+            // Append new samples to the FFT buffer for this channel
+            // Convert Float32Array to number[] before concatenating
+            const newSamplesArray = Array.from(currentSampleBuffer);
+            fftBuffersRef.current[ch].push(...newSamplesArray);
+            samplesSinceLastFftRef.current[ch] += samplesPerChannel;
+
+            const fftWindowSamples = (FFT_WINDOW_DURATION_MS / 1000) * sampleRate;
+            const fftHopSamples = (FFT_HOP_DURATION_MS / 1000) * sampleRate;
+
+            // Check if enough new samples have arrived for an FFT calculation
+            // and if the buffer has enough total samples for a full window
+            while (samplesSinceLastFftRef.current[ch] >= fftHopSamples && fftBuffersRef.current[ch].length >= fftWindowSamples) {
+              // Extract the latest window of data for FFT
+              const currentFftWindowData = fftBuffersRef.current[ch].slice(-fftWindowSamples);
+              
+              if (currentFftWindowData.length === fftWindowSamples) {
+                const fftResult = calculateFft(currentFftWindowData, sampleRate);
+                onFftData(ch, fftResult);
+              } else if (!isProduction) {
+                console.warn(`[EegDataHandler FFT] Ch ${ch} - Not enough data for FFT window after slice. Expected ${fftWindowSamples}, got ${currentFftWindowData.length}. Buffer length: ${fftBuffersRef.current[ch].length}`);
+              }
+              
+              // Decrement samplesSinceLastFftRef by one hop size
+              samplesSinceLastFftRef.current[ch] -= fftHopSamples;
+            }
+
+            // Trim the FFT buffer to prevent it from growing indefinitely
+            // Keep a bit more than one window to ensure data for the next hop is likely there
+            const desiredFftBufferSize = fftWindowSamples + fftHopSamples; // Keep enough for one full window and the next hop
+            if (fftBuffersRef.current[ch].length > desiredFftBufferSize) {
+              fftBuffersRef.current[ch] = fftBuffersRef.current[ch].slice(-desiredFftBufferSize);
+            }
+          }
+          // --- End FFT Processing ---
         }
         // Update the single latest timestamp ref after processing all channels for this packet
         if (latestTimestampRef) {
-            // Use performance.now() for the latest timestamp in immediate mode
             latestTimestampRef.current = performance.now();
+        }
+
+        // Update debug info - increment packets received counter
+        if (debugInfoRef) {
+          debugInfoRef.current.packetsReceived++;
+          debugInfoRef.current.lastPacketTime = performance.now();
+          debugInfoRef.current.samplesProcessed += samplesPerChannel * channelCount;
         }
 
         if (typeof onDataUpdate === 'function') {
@@ -241,8 +308,8 @@ export function useEegDataHandler({
 
   // Dependencies: Only include stable references or primitives if possible.
   // config is passed directly when called.
-  // linesRef, lastDataChunkTimeRef, latestTimestampRef, onDataUpdate, onError are refs/callbacks assumed stable.
-  }, [isProduction, linesRef, lastDataChunkTimeRef, latestTimestampRef, onDataUpdate, onError]); // Keep latestTimestampRef here
+  // linesRef, lastDataChunkTimeRef, latestTimestampRef, debugInfoRef, onDataUpdate, onError, onFftData are refs/callbacks assumed stable.
+  }, [isProduction, linesRef, lastDataChunkTimeRef, latestTimestampRef, debugInfoRef, onDataUpdate, onError, onFftData]);
   
   /**
    * Effect for managing WebSocket connection and sample processing interval.
@@ -251,6 +318,15 @@ export function useEegDataHandler({
     const currentConfig = config; // Capture config for this effect run
     const numChannels = currentConfig?.channels?.length || 0;
     const sampleRate = currentConfig?.sample_rate || DEFAULT_SAMPLE_RATE;
+
+    // Initialize/Reset FFT buffers when config changes (e.g., channel count)
+    if (numChannels > 0) {
+      fftBuffersRef.current = Array(numChannels).fill(null).map(() => []);
+      samplesSinceLastFftRef.current = Array(numChannels).fill(0);
+    } else {
+      fftBuffersRef.current = [];
+      samplesSinceLastFftRef.current = [];
+    }
 
     // --- Connect WebSocket ---
     if (currentConfig) {
@@ -295,7 +371,9 @@ export function useEegDataHandler({
     };
   // Dependencies: Re-run effect if config changes that affect connection or processing rate/channels.
   // Also include connectWebSocket as it's defined outside but used inside.
-  }, [config, connectWebSocket, isProduction, linesRef, latestTimestampRef]); // Removed lastDataChunkTimeRef, onDataUpdate, onError as they are stable refs/callbacks
+  // onFftData is added to dependencies of connectWebSocket, so not strictly needed here if connectWebSocket handles it.
+  // However, including config directly ensures re-initialization of FFT buffers if channel count changes.
+  }, [config, connectWebSocket, isProduction, linesRef, latestTimestampRef, debugInfoRef]);
   // Return status (FPS is now implicitly handled by sample rate)
   return { status };
 }

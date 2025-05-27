@@ -21,3 +21,12 @@ export const BASE_CHANNEL_COLORS = [
 
 export const VOLTAGE_TICKS = [-1.5, -0.75, 0, 0.75, 1.5];
 export const TIME_TICKS = [0, 0.5, 1.0, 1.5, 2.0];
+
+// FFT Related Constants
+export const FFT_WINDOW_DURATION_MS = 2000; // Duration of the window for FFT calculation in milliseconds
+export const FFT_HOP_DURATION_MS = 1000;    // Hop size or interval between FFT calculations in milliseconds
+export const FFT_WINDOW_TYPE = 'hann';      // Windowing function to apply before FFT (e.g., 'hann', 'hamming')
+
+// Constants for FFT display range (can be adjusted as needed)
+export const FFT_MIN_FREQ_HZ = 1;  // Minimum frequency to display on the FFT plot in Hz
+export const FFT_MAX_FREQ_HZ = 50; // Maximum frequency to display on the FFT plot in Hz
