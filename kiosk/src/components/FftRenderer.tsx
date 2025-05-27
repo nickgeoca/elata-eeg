@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, useEffect, useLayoutEffect, useState } from 'react';
+import { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 // @ts-ignore: WebglLine might be missing from types or setY might be, but setY exists at runtime
 import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
@@ -8,9 +8,25 @@ import { getFrequencyBins } from '../utils/fftUtils'; // To get X-axis values
 import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../utils/eegConstants'; // Import constants
 
 const DATA_Y_MAX = 10.0; // Expected maximum for FFT power data (µV²/Hz), display range 0-10.0
+const GRID_COLOR = new ColorRGBA(0.25, 0.25, 0.25, 1); // Darker gray for grid lines
+const LABEL_COLOR = '#bbbbbb'; // Light gray for labels
+const AXIS_TITLE_COLOR = '#dddddd';
+const CANVAS_BG_COLOR = new ColorRGBA(0.05, 0.05, 0.05, 1); // Dark background
+
+// Margins for labels
+const MARGIN_LEFT = 50; // Space for Y-axis labels
+const MARGIN_BOTTOM = 40; // Space for X-axis labels & title
+const MARGIN_TOP = 20; // Space for plot title (if any) or just padding
+const MARGIN_RIGHT = 20; // Padding
+
+interface LabelInfo {
+  value: string;
+  position: number; // Pixel position on the canvas dimension
+  normalized: number; // Normalized WebGL coordinate (-1 to 1)
+}
 
 interface FftRendererProps {
-  canvasRef: React.RefObject<HTMLCanvasElement | null>; // Allow null for canvasRef
+  // canvasRef: React.RefObject<HTMLCanvasElement | null>; // REMOVED
   fftDataRef: React.MutableRefObject<Record<number, number[]>>;
   fftDataVersion: number; // To trigger updates
   config: any; // EEG configuration (for sample_rate, channels)
@@ -20,7 +36,7 @@ interface FftRendererProps {
 }
 
 export function FftRenderer({
-  canvasRef,
+  // canvasRef, // REMOVED
   fftDataRef,
   fftDataVersion,
   config,
@@ -28,31 +44,104 @@ export function FftRenderer({
   containerHeight,
   targetFps = 30, // Default FFT update FPS
 }: FftRendererProps) {
+  const internalCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [fftLinesReady, setFftLinesReady] = useState(false);
   const wglpRef = useRef<WebglPlot | null>(null); // For WebglPlot instance
   const linesRef = useRef<WebglLine[]>([]); // Holds WebglLine line objects for FFT
+  const gridLinesRef = useRef<WebglLine[]>([]); // Holds WebglLine objects for the grid
   const animationFrameIdRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
   const xFreqRef = useRef<number[][]>([]); // Store X-axis frequency values for each line
   const previousXCoordsLengthRef = useRef<number | null>(null); // Store previous xCoords.length
 
+  const [axisLabels, setAxisLabels] = useState<{ x: LabelInfo[], y: LabelInfo[] }>({ x: [], y: [] });
+
+  const plotWidth = useMemo(() => Math.max(0, containerWidth - MARGIN_LEFT - MARGIN_RIGHT), [containerWidth]);
+  const plotHeight = useMemo(() => Math.max(0, containerHeight - MARGIN_TOP - MARGIN_BOTTOM), [containerHeight]);
+
+
   // Initialize WebGL context and plot instance
   useLayoutEffect(() => {
-    if (canvasRef.current && containerWidth > 0 && containerHeight > 0) {
+    if (internalCanvasRef.current && containerWidth > 0 && containerHeight > 0) {
       if (!wglpRef.current) {
         // @ts-ignore
-        wglpRef.current = new WebglPlot(canvasRef.current, {
+        wglpRef.current = new WebglPlot(internalCanvasRef.current, {
           antialias: true,
-          transparent: false,
+          transparent: false, // Keep canvas opaque for performance
+          powerPerformance: "high-performance", // Corrected property name
         });
+        // wglpRef.current.setBackgroundColor(CANVAS_BG_COLOR.r, CANVAS_BG_COLOR.g, CANVAS_BG_COLOR.b, CANVAS_BG_COLOR.a); // Removed, not a valid method
         console.log('[FftRenderer] WebGLPlot instance created.');
       }
-      canvasRef.current.width = containerWidth;
-      canvasRef.current.height = containerHeight;
-      wglpRef.current.viewport(0, 0, containerWidth, containerHeight);
+      internalCanvasRef.current.width = containerWidth; // Full container size for canvas
+      internalCanvasRef.current.height = containerHeight;
+      // Viewport is set for the actual plotting area, offset by margins
+      wglpRef.current.viewport(MARGIN_LEFT, MARGIN_BOTTOM, plotWidth, plotHeight);
     }
-    // No explicit cleanup for wglpRef here, managed by EegMonitor's canvas lifecycle
-  }, [canvasRef, containerWidth, containerHeight]);
+  }, [containerWidth, containerHeight, plotWidth, plotHeight]);
+
+
+  // Effect to create/update grid lines and labels
+  useLayoutEffect(() => {
+    if (!wglpRef.current || plotWidth <= 0 || plotHeight <= 0) {
+      return;
+    }
+    const wglp = wglpRef.current;
+
+    // Clear existing grid lines
+    gridLinesRef.current.forEach(line => {
+      if (wglp && typeof wglp.removeLine === 'function') {
+        wglp.removeLine(line);
+      } else {
+        console.warn('[FftRenderer] wglp.removeLine is not a function or wglp is not available. Cannot remove grid line. This may lead to visual artifacts.');
+      }
+    });
+    gridLinesRef.current = [];
+
+    const newGridLines: WebglLine[] = [];
+    const newXLabels: LabelInfo[] = [];
+    const newYLabels: LabelInfo[] = [];
+
+    // X-axis grid lines and labels (Frequency)
+    const xTicks = [1, 10, 20, 30, 40, 50, 60, 70]; // Hz
+    xTicks.forEach(freq => {
+      if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
+        const normalizedX = 2 * (freq - FFT_MIN_FREQ_HZ) / (FFT_MAX_FREQ_HZ - FFT_MIN_FREQ_HZ) - 1;
+        // Vertical grid line
+        const gridX = new WebglLine(GRID_COLOR, 2);
+        gridX.xy = new Float32Array([normalizedX, -1, normalizedX, 1]);
+        newGridLines.push(gridX);
+
+        // Label position (pixel space on canvas)
+        const labelXPos = MARGIN_LEFT + (normalizedX + 1) / 2 * plotWidth;
+        newXLabels.push({ value: freq.toString(), position: labelXPos, normalized: normalizedX });
+      }
+    });
+
+    // Y-axis grid lines and labels (Power µV²/Hz)
+    const yTicks = [0, 2.5, 5, 7.5, 10.0]; // µV²/Hz
+    yTicks.forEach(power => {
+      const normalizedY = 2 * (power / DATA_Y_MAX) - 1; // Normalizing [0, DATA_Y_MAX] to [-1, 1] for WebGL
+                                                        // Note: data is later normalized to [-0.5, 0.5] and scaled by line.scaleY=2
+                                                        // So a power of 0 is -1, DATA_Y_MAX is 1 in this grid context.
+      // Horizontal grid line
+      const gridY = new WebglLine(GRID_COLOR, 2);
+      gridY.xy = new Float32Array([-1, normalizedY, 1, normalizedY]);
+      newGridLines.push(gridY);
+
+      // Label position (pixel space on canvas)
+      const labelYPos = MARGIN_BOTTOM + (normalizedY + 1) / 2 * plotHeight; // Y is from bottom up for labels
+      newYLabels.push({ value: power.toString(), position: labelYPos, normalized: normalizedY });
+    });
+
+    newGridLines.forEach(line => wglp.addLine(line));
+    gridLinesRef.current = newGridLines;
+    setAxisLabels({ x: newXLabels, y: newYLabels.reverse() }); // Reverse Y labels for top-down display
+
+    // console.log('[FftRenderer] Grid and labels updated.');
+
+  }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ, DATA_Y_MAX]);
+
 
   // Effect to create/update FFT lines
   useEffect(() => {
@@ -309,7 +398,80 @@ export function FftRenderer({
         animationFrameIdRef.current = null;
       }
     };
-  }, [fftLinesReady, fftDataVersion, config, fftDataRef, targetFps, containerWidth, containerHeight]);
+  }, [fftLinesReady, fftDataVersion, config, fftDataRef, targetFps, plotWidth, plotHeight]); // Use plotWidth/Height
 
-  return null;
+  return (
+    <div style={{ width: containerWidth, height: containerHeight, position: 'relative', backgroundColor: `rgba(${CANVAS_BG_COLOR.r*255}, ${CANVAS_BG_COLOR.g*255}, ${CANVAS_BG_COLOR.b*255}, ${CANVAS_BG_COLOR.a})` }}>
+      <canvas
+        ref={internalCanvasRef}
+        style={{
+          width: containerWidth,
+          height: containerHeight,
+          display: 'block',
+        }}
+      />
+      {/* X-Axis Labels */}
+      {axisLabels.x.map((label, index) => (
+        <div
+          key={`x-label-${index}`}
+          style={{
+            position: 'absolute',
+            left: label.position,
+            bottom: MARGIN_BOTTOM - 20, // Position below the plot area
+            transform: 'translateX(-50%)',
+            color: LABEL_COLOR,
+            fontSize: '10px',
+          }}
+        >
+          {label.value}
+        </div>
+      ))}
+      {/* Y-Axis Labels */}
+      {axisLabels.y.map((label, index) => (
+        <div
+          key={`y-label-${index}`}
+          style={{
+            position: 'absolute',
+            left: MARGIN_LEFT - 30, // Position left of the plot area
+            bottom: label.position, // Y is from bottom up for positioning
+            transform: 'translateY(50%)', // Center vertically
+            color: LABEL_COLOR,
+            fontSize: '10px',
+            width: '25px', // Ensure space for label
+            textAlign: 'right',
+          }}
+        >
+          {label.value}
+        </div>
+      ))}
+      {/* X-Axis Title */}
+      <div
+        style={{
+          position: 'absolute',
+          left: MARGIN_LEFT + plotWidth / 2,
+          bottom: 5, // Below X-axis labels
+          transform: 'translateX(-50%)',
+          color: AXIS_TITLE_COLOR,
+          fontSize: '12px',
+        }}
+      >
+        Frequency (Hz)
+      </div>
+      {/* Y-Axis Title */}
+      <div
+        style={{
+          position: 'absolute',
+          top: MARGIN_TOP + plotHeight / 2,
+          left: 10, // Far left
+          transform: 'translateY(-50%) rotate(-90deg)', // Rotate for vertical display
+          transformOrigin: 'left top',
+          color: AXIS_TITLE_COLOR,
+          fontSize: '12px',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        Power (µV²/Hz)
+      </div>
+    </div>
+  );
 }

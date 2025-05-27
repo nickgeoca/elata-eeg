@@ -891,13 +891,9 @@ export default function EegMonitorWebGL() {
          </div>
        ) : activeView === 'fftGraph' ? (
          <div className="relative h-full" ref={containerRef}>
-           {/* Canvas for FFT plot */}
-           <canvas
-             ref={canvasRef} // Reusing the same canvas, FftRenderer will manage it
-             className="w-full h-full border border-gray-700 rounded-lg" // Style consistent with EegRenderer
-           />
+           {/* Canvas for FFT plot is now managed internally by FftRenderer */}
            <FftRenderer
-             canvasRef={canvasRef}
+             // canvasRef={canvasRef} // Removed, FftRenderer manages its own canvas
              fftDataRef={fftDataRef}
              fftDataVersion={fftDataVersion}
              config={config}
@@ -906,111 +902,6 @@ export default function EegMonitorWebGL() {
              // linesReady prop removed as FftRenderer manages its own readiness
              targetFps={displayFps} // Use the same displayFps for now
            />
-{/* Y-Axis Label for FFT */}
-           <div
-             className="absolute top-1/2 left-3 transform -translate-y-1/2 -rotate-90 text-gray-400 text-xs"
-             style={{ transformOrigin: 'left center', whiteSpace: 'nowrap' }}
-           >
-             Power (µV²/Hz)
-           </div>
-           {/* X-Axis Label for FFT */}
-           <div
-             className="absolute bottom-6 left-1/2 transform -translate-x-1/2 text-gray-400 text-xs"
-           >
-             Frequency (Hz)
-{/* Grid Lines and Tick Labels for FFT - Updated Positioning */}
-{containerSize.width > 0 && containerSize.height > 0 && (
-  <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-    {(() => {
-      const PADDING_LEFT = 50; // Space for Y-axis title and Y-tick labels
-      const PADDING_BOTTOM = 35; // Space for X-axis title and X-tick labels
-      const PADDING_RIGHT = 20;  // Right margin
-      const PADDING_TOP = 20;    // Top margin
-
-      const plotWidth = containerSize.width - PADDING_LEFT - PADDING_RIGHT;
-      const plotHeight = containerSize.height - PADDING_TOP - PADDING_BOTTOM;
-
-      if (plotWidth <= 0 || plotHeight <= 0) return null;
-
-      const yTicks = [0, 1, 2, 3, 4, 5];
-      const yMax = 5.0; // DATA_Y_MAX from FftRenderer
-
-      const xTicks = [1, 10, 20, 30, 40, 50];
-      const xMin = 1;  // FFT_MIN_FREQ_HZ
-      const xMax = 50; // FFT_MAX_FREQ_HZ
-
-      return (
-        <>
-          {/* Y-Axis Ticks and Grid Lines */}
-          {yTicks.map((tickValue) => {
-            const normalizedY = tickValue / yMax; // 0 at bottom, 1 at top of data
-            const yPx = PADDING_TOP + (1 - normalizedY) * plotHeight;
-
-            return (
-              <React.Fragment key={`y-tick-${tickValue}`}>
-                <span
-                  className="absolute text-gray-400 text-xs"
-                  style={{
-                    top: `${yPx}px`,
-                    left: `${PADDING_LEFT - 25}px`, // Position label to the left of the line
-                    transform: 'translateY(-50%)',
-                  }}
-                >
-                  {tickValue.toFixed(0)}
-                </span>
-                <div
-                  className="absolute bg-gray-700 opacity-50 h-px"
-                  style={{
-                    top: `${yPx}px`,
-                    left: `${PADDING_LEFT}px`,
-                    width: `${plotWidth}px`,
-                  }}
-                ></div>
-              </React.Fragment>
-            );
-          })}
-
-          {/* X-Axis Ticks and Grid Lines */}
-          {xTicks.map((tickValue) => {
-            const normalizedX = (tickValue - xMin) / (xMax - xMin); // 0 at left, 1 at right
-            const xPx = PADDING_LEFT + normalizedX * plotWidth;
-
-            return (
-              <React.Fragment key={`x-tick-${tickValue}`}>
-                <span
-                  className="absolute text-gray-400 text-xs"
-                  style={{
-                    left: `${xPx}px`,
-                    top: `${PADDING_TOP + plotHeight + 5}px`, // Position label below the line
-                    transform: 'translateX(-50%)',
-                  }}
-                >
-                  {tickValue}
-                </span>
-                <div
-                  className="absolute bg-gray-700 opacity-50 w-px"
-                  style={{
-                    left: `${xPx}px`,
-                    top: `${PADDING_TOP}px`,
-                    height: `${plotHeight}px`,
-                  }}
-                ></div>
-              </React.Fragment>
-            );
-          })}
-        </>
-      );
-    })()}
-  </div>
-)}
-           </div>
-           {/* Optional: Add specific FFT axis labels or overlays here if needed */}
-           {/* Example: X-axis labels for frequency */}
-           {/* <div className="absolute w-full flex justify-between px-2 -bottom-6 text-gray-400 text-sm">
-             <span>{FFT_MIN_FREQ_HZ} Hz</span>
-             <span>{(FFT_MIN_FREQ_HZ + FFT_MAX_FREQ_HZ) / 2} Hz</span>
-             <span>{FFT_MAX_FREQ_HZ} Hz</span>
-           </div> */}
            <EegStatusBar
              status={status} // Or a more relevant status for FFT
              fps={displayFps}
