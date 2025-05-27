@@ -29,4 +29,4 @@ export const FFT_WINDOW_TYPE = 'hann';      // Windowing function to apply befor
 
 // Constants for FFT display range (can be adjusted as needed)
 export const FFT_MIN_FREQ_HZ = 1;  // Minimum frequency to display on the FFT plot in Hz
-export const FFT_MAX_FREQ_HZ = 50; // Maximum frequency to display on the FFT plot in Hz
+export const FFT_MAX_FREQ_HZ = 70; // Maximum frequency to display on the FFT plot in Hz

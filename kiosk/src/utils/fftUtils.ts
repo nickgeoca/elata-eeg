@@ -33,10 +33,10 @@ function applyHannWindow(data: number[]): number[] {
 /**
  * Calculates the Fast Fourier Transform (FFT) for a given window of EEG data.
  *
- * @param dataWindow An array of numbers representing a window of raw EEG samples.
+ * @param dataWindow An array of numbers representing a window of EEG samples in microvolts (µV).
  * @param sampleRate The sample rate of the EEG data in Hz.
- * @returns An array of numbers representing the power spectrum (magnitudes).
- *          The length of the output will be dataWindow.length / 2.
+ * @returns An array of numbers representing the power spectral density (PSD) in µV²/Hz.
+ *          The length of the output will be N_fft / 2, where N_fft is the zero-padded length (power of 2).
  */
 export function calculateFft(dataWindow: number[], sampleRate: number): number[] {
   if (!dataWindow || dataWindow.length === 0) {
@@ -73,13 +73,26 @@ export function calculateFft(dataWindow: number[], sampleRate: number): number[]
   f.realTransform(out, paddedData);   // Perform FFT on (potentially padded) real data
 
   // 4. Calculate the power spectrum (magnitudes)
-  // The output of realTransform is packed. For N_fft input points, it produces N_fft/2 magnitudes.
-  const numMagnitudeBins = N_fft / 2;
-  const magnitudes = new Array(numMagnitudeBins);
+  // The output of realTransform is packed. For N_fft input points, it produces N_fft/2 complex values.
+  // We will calculate PSD = (Amplitude)^2 / (frequency_resolution)
+  // frequency_resolution = sampleRate / N_fft
+  // So, PSD = (Amplitude)^2 * (N_fft / sampleRate)
+  const numOutputBins = N_fft / 2;
+  const psdValues = new Array(numOutputBins);
+  
+  if (sampleRate <= 0) {
+    console.warn('[fftUtils] calculateFft called with invalid sampleRate.');
+    return new Array(numOutputBins).fill(0);
+  }
+  const psdNormalizationFactor = N_fft / sampleRate;
 
   // DC component (0 Hz) - out[0] is Re(DC)
-  // Normalize by N_fft. For one-sided spectrum, DC is not multiplied by 2.
-  magnitudes[0] = Math.abs(out[0]) / N_fft;
+  // Amplitude_DC = abs(out[0]) / N_fft
+  const amplitude_dc = Math.abs(out[0]) / N_fft;
+  psdValues[0] = (amplitude_dc * amplitude_dc) * psdNormalizationFactor;
+  if (!isFinite(psdValues[0])) {
+    psdValues[0] = 0; // Clamp non-finite DC component
+  }
 
   // AC components
   // For fft.js's `realTransform`, the layout is:
@@ -87,25 +100,28 @@ export function calculateFft(dataWindow: number[], sampleRate: number): number[]
   // out[1] = Re(Nyquist) (if N_fft is even)
   // out[2*i] = Re(freq_i) for i = 1...N_fft/2-1
   // out[2*i+1] = Im(freq_i) for i = 1...N_fft/2-1
-  for (let i = 1; i < numMagnitudeBins; i++) {
+  for (let i = 1; i < numOutputBins; i++) {
+    let amplitude_ac_component;
     // For the last bin (Nyquist frequency) if N_fft is even, it's stored in out[1]
-    if (N_fft % 2 === 0 && i === numMagnitudeBins - 1) {
-      magnitudes[i] = Math.abs(out[1]) / N_fft; // Not multiplied by 2
+    // Amplitude_Nyquist = abs(out[1]) / N_fft (not multiplied by 2)
+    if (N_fft % 2 === 0 && i === numOutputBins - 1) {
+      amplitude_ac_component = Math.abs(out[1]) / N_fft;
     } else {
+      // Amplitude_AC = (2 * sqrt(real^2 + imag^2)) / N_fft
       const real = out[i * 2];
       const imag = out[i * 2 + 1];
-      // For one-sided spectrum, AC components are multiplied by 2.
-      magnitudes[i] = (2 * Math.sqrt(real * real + imag * imag)) / N_fft;
+      amplitude_ac_component = (2 * Math.sqrt(real * real + imag * imag)) / N_fft;
+    }
+    psdValues[i] = (amplitude_ac_component * amplitude_ac_component) * psdNormalizationFactor;
+    if (!isFinite(psdValues[i])) {
+      psdValues[i] = 0; // Clamp non-finite AC component
     }
   }
   
-  // Ensure the output array has exactly N_fft/2 elements.
-  // This should now be guaranteed by the loop structure and numMagnitudeBins.
-  // The typical output length for magnitudes is floor(N/2) + 1 if DC and Nyquist are distinct.
-  // Or N/2 if Nyquist is not specially handled or N is odd.
-  // fft.js realTransform is designed to give N/2 frequency bins of magnitude.
+  // The psdValues array now contains PSD in µV²/Hz.
+  // Length is N_fft / 2.
 
-  return magnitudes;
+  return psdValues;
 }
 
 /**

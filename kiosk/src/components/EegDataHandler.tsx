@@ -195,7 +195,8 @@ export function useEegDataHandler({
 
             // Append new samples to the FFT buffer for this channel
             // Convert Float32Array to number[] before concatenating
-            const newSamplesArray = Array.from(currentSampleBuffer);
+            // Convert Float32Array to number[] and scale from V to µV
+            const newSamplesArray = Array.from(currentSampleBuffer, v => v * 1e6); // Convert V to µV
             fftBuffersRef.current[ch].push(...newSamplesArray);
             samplesSinceLastFftRef.current[ch] += samplesPerChannel;
 
