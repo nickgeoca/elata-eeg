@@ -7,6 +7,7 @@ interface CommandWebSocketContextType {
   wsConnected: boolean;
   startRecording: () => void;
   stopRecording: () => void;
+  sendPowerlineFilterCommand: (value: number | null) => void; // Added
   recordingStatus: string;
   recordingFilePath: string | null;
   isStartRecordingPending: boolean;
@@ -104,15 +105,25 @@ export const CommandWebSocketProvider = ({
     }
   }, [ws]);
 
+  const sendPowerlineFilterCommand = useCallback((value: number | null) => {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      console.log(`Sending set_powerline_filter command with value: ${value}`);
+      ws.send(JSON.stringify({ command: 'set_powerline_filter', value: value }));
+    } else {
+      console.warn('Command WebSocket not open, cannot send set_powerline_filter command.');
+    }
+  }, [ws]);
+
   const value = useMemo(() => ({
     ws,
     wsConnected,
     startRecording,
     stopRecording,
+    sendPowerlineFilterCommand, // Added
     recordingStatus,
     recordingFilePath,
     isStartRecordingPending,
-  }), [ws, wsConnected, startRecording, stopRecording, recordingStatus, recordingFilePath, isStartRecordingPending]);
+  }), [ws, wsConnected, startRecording, stopRecording, sendPowerlineFilterCommand, recordingStatus, recordingFilePath, isStartRecordingPending]);
 
   return (
     <CommandWebSocketContext.Provider value={value}>

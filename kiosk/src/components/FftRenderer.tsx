@@ -7,7 +7,12 @@ import { getChannelColor } from '../utils/colorUtils';
 import { getFrequencyBins } from '../utils/fftUtils'; // To get X-axis values
 import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../utils/eegConstants'; // Import constants
 
-const DATA_Y_MAX = 10.0; // Expected maximum for FFT power data (µV²/Hz), display range 0-10.0
+const DATA_Y_MAX = 4000.0; // Expected maximum for FFT power data (µV²/Hz)
+const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.0001; // Clamp input power to this minimum before log10
+const LOG_Y_MIN_DISPLAY = Math.log10(Y_AXIS_LOG_MIN_POWER_CLAMP); // e.g., -2 for 0.01
+const LOG_Y_MAX_DISPLAY = Math.ceil(Math.log10(DATA_Y_MAX));    // e.g., Math.ceil(log10(4000)) = 4
+                                                              // This defines the log display range, e.g., [-2, 4]
+
 const GRID_COLOR = new ColorRGBA(0.25, 0.25, 0.25, 1); // Darker gray for grid lines
 const LABEL_COLOR = '#bbbbbb'; // Light gray for labels
 const AXIS_TITLE_COLOR = '#dddddd';
@@ -118,29 +123,48 @@ export function FftRenderer({
       }
     });
 
-    // Y-axis grid lines and labels (Power µV²/Hz)
-    const yTicks = [0, 2.5, 5, 7.5, 10.0]; // µV²/Hz
-    yTicks.forEach(power => {
-      const normalizedY = 2 * (power / DATA_Y_MAX) - 1; // Normalizing [0, DATA_Y_MAX] to [-1, 1] for WebGL
-                                                        // Note: data is later normalized to [-0.5, 0.5] and scaled by line.scaleY=2
-                                                        // So a power of 0 is -1, DATA_Y_MAX is 1 in this grid context.
+    // Y-axis grid lines and labels (Log Power - Exponents)
+    const yLogExponentTicks: number[] = [];
+    for (let i = Math.floor(LOG_Y_MIN_DISPLAY); i <= Math.ceil(LOG_Y_MAX_DISPLAY); i++) {
+      yLogExponentTicks.push(i);
+    }
+    // Ensure LOG_Y_MIN_DISPLAY and LOG_Y_MAX_DISPLAY are included if they are not integers
+    // and fall within a reasonable range of the integer ticks.
+    // This is more for ensuring the grid lines at the exact min/max of data range are drawn
+    // if those min/max log values are not integers themselves.
+    if (!yLogExponentTicks.includes(LOG_Y_MIN_DISPLAY) && LOG_Y_MIN_DISPLAY > Math.floor(LOG_Y_MIN_DISPLAY)) {
+        // yLogExponentTicks.unshift(LOG_Y_MIN_DISPLAY); // Add at the beginning if not integer
+    }
+    if (!yLogExponentTicks.includes(LOG_Y_MAX_DISPLAY) && LOG_Y_MAX_DISPLAY < Math.ceil(LOG_Y_MAX_DISPLAY)) {
+        // yLogExponentTicks.push(LOG_Y_MAX_DISPLAY); // Add at the end if not integer
+    }
+    // yLogExponentTicks.sort((a,b) => a-b);
+    // const uniqueSortedYLogExponentTicks = [...new Set(yLogExponentTicks)];
+
+    yLogExponentTicks.forEach(logExponent => {
+      // Normalize the logExponent value from [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY] to [-1, 1] for WebGL grid lines
+      const normalizedY = (logExponent - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) * 2 - 1;
+
       // Horizontal grid line
       const gridY = new WebglLine(GRID_COLOR, 2);
       gridY.xy = new Float32Array([-1, normalizedY, 1, normalizedY]);
       newGridLines.push(gridY);
-
+      
+      // Label value is the exponent itself
+      const labelValue = logExponent.toString();
+      
       // Label position (pixel space on canvas)
       const labelYPos = MARGIN_BOTTOM + (normalizedY + 1) / 2 * plotHeight; // Y is from bottom up for labels
-      newYLabels.push({ value: power.toString(), position: labelYPos, normalized: normalizedY });
+      newYLabels.push({ value: labelValue, position: labelYPos, normalized: normalizedY });
     });
 
     newGridLines.forEach(line => wglp.addLine(line));
     gridLinesRef.current = newGridLines;
     setAxisLabels({ x: newXLabels, y: newYLabels.reverse() }); // Reverse Y labels for top-down display
 
-    // console.log('[FftRenderer] Grid and labels updated.');
+    // console.log('[FftRenderer] Grid and labels updated for log exponents.');
 
-  }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ, DATA_Y_MAX]);
+  }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ]); // LOG_Y_MIN/MAX_DISPLAY are derived from DATA_Y_MAX but are consts
 
 
   // Effect to create/update FFT lines
@@ -359,23 +383,33 @@ export function FftRenderer({
             }
             // 2. Ensure it's not negative (power should not be negative).
             currentMagnitude = Math.max(0, currentMagnitude);
-            // 3. Clamp to DATA_Y_MAX to prevent excessively large positive normalized values.
-            const displayMagnitude = Math.min(currentMagnitude, DATA_Y_MAX);
+            // 3. Clamp to DATA_Y_MAX before log.
+            const cappedMagnitude = Math.min(currentMagnitude, DATA_Y_MAX);
+            
+            // 4. Ensure a minimum positive value before taking log10.
+            const clampedPositiveMagnitude = Math.max(cappedMagnitude, Y_AXIS_LOG_MIN_POWER_CLAMP);
 
-            // Normalize magnitude from [0, DATA_Y_MAX] to [-0.5, 0.5]
-            // A magnitude of 0 will be at the bottom (-0.5).
-            // A magnitude of DATA_Y_MAX will be at the top (0.5).
-            let normalizedMagnitude = (displayMagnitude / DATA_Y_MAX) - 0.5;
+            // 5. Apply log10 transformation.
+            let logMagnitude = Math.log10(clampedPositiveMagnitude);
+
+            // 6. Clamp logMagnitude to the defined display range [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY]
+            // This ensures that values outside this range are pinned to the edges of the graph.
+            logMagnitude = Math.max(LOG_Y_MIN_DISPLAY, Math.min(logMagnitude, LOG_Y_MAX_DISPLAY));
+
+            // 7. Normalize logMagnitude from [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY] to [-0.5, 0.5]
+            // LOG_Y_MIN_DISPLAY maps to -0.5 (bottom of its scaled range).
+            // LOG_Y_MAX_DISPLAY maps to  0.5 (top of its scaled range).
+            let normalizedMagnitude = (logMagnitude - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) - 0.5;
 
             // Final check: ensure normalizedMagnitude is finite, otherwise default to bottom.
             if (!isFinite(normalizedMagnitude)) {
-                normalizedMagnitude = -0.5;
+                normalizedMagnitude = -0.5; // Corresponds to LOG_Y_MIN_DISPLAY
             }
 
             // Use the line's setY method to update the Y coordinate.
             // The index 'j' corresponds to the data point index.
-            // normalizedMagnitude is already calculated to be in the [-0.5, 0.5] range.
-            // The line.scaleY and line.offsetY will handle final WebGL coordinate mapping.
+            // normalizedMagnitude is calculated to be in the [-0.5, 0.5] range.
+            // The line.scaleY=2.0 and line.offsetY=0 will map this to WebGL's [-1, 1] range.
             // @ts-ignore: WebglLine type definition might be missing setY, but it should exist at runtime.
             line.setY(j, normalizedMagnitude);
           }
@@ -470,7 +504,7 @@ export function FftRenderer({
           whiteSpace: 'nowrap',
         }}
       >
-        Power (µV²/Hz)
+        Power (log₁₀ µV²/Hz)
       </div>
     </div>
   );

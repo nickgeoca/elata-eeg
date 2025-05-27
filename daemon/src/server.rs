@@ -11,9 +11,21 @@ use eeg_driver::AdcConfig;
 use crate::driver_handler::{EegBatchData, CsvRecorder};
 
 /// Command message for WebSocket control
-#[derive(Deserialize)]
-pub struct CommandMessage {
-    pub command: String,
+#[derive(Deserialize, Debug)]
+#[serde(tag = "command")] // Use the "command" field as the tag
+enum DaemonCommand {
+    #[serde(rename = "start")]
+    Start,
+    #[serde(rename = "stop")]
+    Stop,
+    #[serde(rename = "status")]
+    Status,
+    #[serde(rename = "set_powerline_filter")]
+    SetPowerlineFilter {
+        // If 'value' is missing or null in JSON, this will be None.
+        // If 'value' is a number, it will be Some(number).
+        value: Option<u32>,
+    },
 }
 
 /// Configuration message for WebSocket control
@@ -497,7 +509,9 @@ pub async fn handle_config_websocket(
 pub async fn handle_command_websocket(
     ws: WebSocket,
     recorder: Arc<Mutex<CsvRecorder>>,
-    is_recording: Arc<AtomicBool>
+    is_recording: Arc<AtomicBool>,
+    config: Arc<Mutex<AdcConfig>>,         // Added
+    config_update_tx: mpsc::Sender<AdcConfig> // Added
 ) {
     let (mut tx, mut rx) = ws.split();
     
@@ -583,10 +597,10 @@ pub async fn handle_command_websocket(
                 // Clone is_recording for use in the match block
                 let is_recording_local = is_recording.clone();
                 
-                let response = match serde_json::from_str::<CommandMessage>(text) {
-                    Ok(cmd) => {
-                        match cmd.command.as_str() {
-                            "start" => {
+                let response = match serde_json::from_str::<DaemonCommand>(text) {
+                    Ok(daemon_cmd) => {
+                        match daemon_cmd {
+                            DaemonCommand::Start => {
                                 if is_recording_local.load(Ordering::Relaxed) {
                                     CommandResponse {
                                         status: "error".to_string(),
@@ -596,7 +610,6 @@ pub async fn handle_command_websocket(
                                     let mut recorder_guard = recorder.lock().await;
                                     match recorder_guard.start_recording().await {
                                         Ok(msg) => {
-                                            // No need to update is_recording here as the recorder will do it
                                             CommandResponse {
                                                 status: "ok".to_string(),
                                                 message: msg,
@@ -609,11 +622,10 @@ pub async fn handle_command_websocket(
                                     }
                                 }
                             },
-                            "stop" => {
+                            DaemonCommand::Stop => {
                                 let mut recorder_guard = recorder.lock().await;
                                 match recorder_guard.stop_recording().await {
                                     Ok(msg) => {
-                                        // No need to update is_recording here as the recorder will do it
                                         CommandResponse {
                                             status: "ok".to_string(),
                                             message: msg,
@@ -625,7 +637,7 @@ pub async fn handle_command_websocket(
                                     },
                                 }
                             },
-                            "status" => {
+                            DaemonCommand::Status => {
                                 let recorder_guard = recorder.lock().await;
                                 CommandResponse {
                                     status: "ok".to_string(),
@@ -636,10 +648,58 @@ pub async fn handle_command_websocket(
                                     },
                                 }
                             },
-                            _ => CommandResponse {
-                                status: "error".to_string(),
-                                message: format!("Unknown command: {}", cmd.command),
-                            },
+                            DaemonCommand::SetPowerlineFilter { value: new_powerline_filter_opt } => {
+                                if is_recording_local.load(Ordering::Relaxed) {
+                                    CommandResponse {
+                                        status: "error".to_string(),
+                                        message: "Cannot change configuration during recording".to_string(),
+                                    }
+                                } else {
+                                    // Validate the powerline filter value
+                                    // new_powerline_filter_opt is Option<u32>
+                                    // We need to check if it's Some(value) where value is not 50 or 60
+                                    let is_valid_filter_value = match new_powerline_filter_opt {
+                                        Some(val) => val == 50 || val == 60,
+                                        None => true, // None (off) is valid
+                                    };
+
+                                    if !is_valid_filter_value {
+                                        CommandResponse {
+                                            status: "error".to_string(),
+                                            message: format!("Invalid powerline filter value: {:?}. Valid: 50, 60, or null (off)", new_powerline_filter_opt)
+                                        }
+                                    } else {
+                                        let mut config_guard = config.lock().await;
+                                        let mut updated_config = config_guard.clone();
+                                        let mut config_changed = false;
+
+                                        if updated_config.powerline_filter_hz != new_powerline_filter_opt {
+                                            updated_config.powerline_filter_hz = new_powerline_filter_opt;
+                                            config_changed = true;
+                                        }
+
+                                        if config_changed {
+                                            drop(config_guard); // Release lock before sending to channel
+                                            match config_update_tx.send(updated_config.clone()).await {
+                                                Ok(_) => CommandResponse {
+                                                    status: "ok".to_string(),
+                                                    message: format!("Powerline filter update ({:?}) submitted.",
+                                                        new_powerline_filter_opt.map_or("Off".to_string(), |f| f.to_string() + "Hz"))
+                                                },
+                                                Err(e) => CommandResponse {
+                                                    status: "error".to_string(),
+                                                    message: format!("Failed to submit powerline filter update: {}", e),
+                                                },
+                                            }
+                                        } else {
+                                            CommandResponse {
+                                                status: "ok".to_string(),
+                                                message: "Powerline filter configuration unchanged.".to_string(),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     },
                     Err(e) => CommandResponse {
@@ -702,14 +762,19 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_config_websocket(socket, cfg_arc, cfg_upd_tx, cfg_app_rx, rec_status))
         });
     
-    let recorder_clone = csv_recorder.clone();
-    let is_recording_clone = is_recording.clone();
+    let recorder_clone_cmd = csv_recorder.clone();
+    let is_recording_clone_cmd = is_recording.clone();
+    let config_clone_cmd = config.clone(); // Clone Arc<Mutex<AdcConfig>> for command route
+    let config_update_tx_clone_cmd = config_update_to_main_tx.clone(); // Clone mpsc::Sender for command route
+
     let command_ws_route = warp::path("command")
         .and(warp::ws())
-        .and(warp::any().map(move || recorder_clone.clone()))
-        .and(warp::any().map(move || is_recording_clone.clone()))
-        .map(|ws: warp::ws::Ws, recorder: Arc<Mutex<CsvRecorder>>, is_recording: Arc<AtomicBool>| {
-            ws.on_upgrade(move |socket| handle_command_websocket(socket, recorder, is_recording))
+        .and(warp::any().map(move || recorder_clone_cmd.clone()))
+        .and(warp::any().map(move || is_recording_clone_cmd.clone()))
+        .and(warp::any().map(move || config_clone_cmd.clone())) // Pass cloned config
+        .and(warp::any().map(move || config_update_tx_clone_cmd.clone())) // Pass cloned sender
+        .map(|ws: warp::ws::Ws, recorder: Arc<Mutex<CsvRecorder>>, is_recording: Arc<AtomicBool>, cfg: Arc<Mutex<AdcConfig>>, cfg_upd_tx: mpsc::Sender<AdcConfig>| {
+            ws.on_upgrade(move |socket| handle_command_websocket(socket, recorder, is_recording, cfg, cfg_upd_tx))
         });
     
     (eeg_ws_route.or(config_ws_route).or(command_ws_route), config_update_to_main_rx)

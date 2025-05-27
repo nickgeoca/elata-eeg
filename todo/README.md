@@ -8,6 +8,7 @@
 # TODO Docs
 - security.md... security hardening
 - dsp.md... more flexible dsp
+- [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
 
 ### TODO MVP
 - 3-d printed case

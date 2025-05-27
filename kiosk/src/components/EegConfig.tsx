@@ -13,7 +13,7 @@ export interface EegConfig {
   // Defined from config file
   fps: number;
   // Powerline filter setting
-  powerline_filter_hz?: number | null;
+  powerline_filter_hz: number | null; // Changed from optional to required, can be null
 }
 
 // Create a context to share the configuration across components

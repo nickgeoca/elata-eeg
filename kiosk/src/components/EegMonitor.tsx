@@ -37,9 +37,9 @@ export default function EegMonitorWebGL() {
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
   const fftDataRef = useRef<Record<number, number[]>>({}); // Ref to store latest FFT data for all channels
   const [fftDataVersion, setFftDataVersion] = useState(0); // Version counter for fftDataRef updates
-  const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null);
-  const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Added to track WebSocket state
-  const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null);
+  const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
+  const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
+  const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
   const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.5); // Added for UI Voltage Scaling
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
   const [canScrollSettings, setCanScrollSettings] = useState(false); // True if settings panel has enough content to scroll
@@ -67,10 +67,10 @@ export default function EegMonitorWebGL() {
     }
   }, [config]);
 
-  // Effect to manage the /config WebSocket connection
+  // Effect to manage the /config WebSocket connection (Restored)
   useEffect(() => {
     if (activeView === 'settings') {
-      console.log('Attempting to connect to /config WebSocket');
+      console.log('Attempting to connect to /config WebSocket for EegMonitor');
       const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
       const newConfigWs = new WebSocket(`ws://${wsHost}:8080/config`);
       setConfigWebSocket(newConfigWs);
@@ -79,57 +79,48 @@ export default function EegMonitorWebGL() {
 
       const connectionTimeout = setTimeout(() => {
         if (newConfigWs.readyState !== WebSocket.OPEN) {
-          console.warn('/config WebSocket connection timed out.');
+          console.warn('/config WebSocket connection timed out for EegMonitor.');
           setConfigUpdateStatus('Connection to config service timed out. Please check daemon.');
-          setIsConfigWsOpen(false); // Ensure this is false
-          // Optionally, try to close the WebSocket if it's in a connecting state
+          setIsConfigWsOpen(false);
           if (newConfigWs.readyState === WebSocket.CONNECTING) {
             newConfigWs.close();
           }
         }
-      }, 5000); // 5-second timeout
+      }, 5000);
 
       newConfigWs.onopen = () => {
         clearTimeout(connectionTimeout);
-        console.log('/config WebSocket connected');
+        console.log('/config WebSocket connected for EegMonitor');
         setIsConfigWsOpen(true);
         setConfigUpdateStatus('Connected to config service. Ready to send updates.');
       };
 
       newConfigWs.onmessage = (event) => {
-        console.log('/config WebSocket message:', event.data);
+        console.log('/config WebSocket message (EegMonitor):', event.data);
         try {
           const response = JSON.parse(event.data as string);
-          // Check if it's a CommandResponse (status and message)
-          if (response.status && response.message) {
+          if (response.status && response.message) { // This is a CommandResponse
             if (response.status === 'ok') {
-              if (response.message === "Configuration unchanged") {
-                setConfigUpdateStatus(`Configuration unchanged.`);
-              } else {
-                setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config.`);
-              }
-              // refreshConfig(); // REFRESH_CONFIG_REMOVED: Global config will update via EegConfigProvider's WebSocket
+              setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config from EegConfigProvider.`);
             } else {
               setConfigUpdateStatus(`Config update error: ${response.message}`);
             }
           } else {
-            // It might be the initial full config object, or an updated one
-            // For now, we primarily care about command responses here.
-            // The EegConfig context handles receiving the main config.
-            console.log('Received config object via /config WebSocket:', response);
+            // This is likely a full config broadcast, which EegConfigProvider handles.
+            // EegMonitor's direct /config WS is primarily for sending updates.
+            console.log('EegMonitor received a full config object via its /config WS, EegConfigProvider should handle this state update.');
           }
         } catch (e) {
-          console.error('Error parsing /config WebSocket message:', e);
+          console.error('Error parsing /config WebSocket message in EegMonitor:', e);
           setConfigUpdateStatus('Error processing message from config service.');
         }
       };
 
       newConfigWs.onclose = () => {
         clearTimeout(connectionTimeout);
-        console.log('/config WebSocket disconnected');
+        console.log('/config WebSocket disconnected for EegMonitor');
         setConfigWebSocket(null);
         setIsConfigWsOpen(false);
-        // Only set to 'Disconnected' if it wasn't already an error or timeout
         setConfigUpdateStatus(prevStatus =>
           prevStatus && (prevStatus.includes('Error') || prevStatus.includes('timed out'))
           ? prevStatus
@@ -139,7 +130,7 @@ export default function EegMonitorWebGL() {
 
       newConfigWs.onerror = (error) => {
         clearTimeout(connectionTimeout);
-        console.error('/config WebSocket error:', error);
+        console.error('/config WebSocket error for EegMonitor:', error);
         setConfigWebSocket(null);
         setIsConfigWsOpen(false);
         setConfigUpdateStatus('Error connecting to config service.');
@@ -147,77 +138,101 @@ export default function EegMonitorWebGL() {
 
       return () => {
         clearTimeout(connectionTimeout);
-        console.log('Closing /config WebSocket');
+        console.log('Closing /config WebSocket for EegMonitor');
         if (newConfigWs.readyState === WebSocket.OPEN || newConfigWs.readyState === WebSocket.CONNECTING) {
           newConfigWs.close();
         }
         setConfigWebSocket(null);
         setIsConfigWsOpen(false);
-        setConfigUpdateStatus(null);
+        setConfigUpdateStatus(null); // Clear status when settings view is left
       };
     } else {
-      // If settings are hidden, ensure WebSocket is closed and status cleared
       if (configWebSocket) {
-        console.log('Closing /config WebSocket because settings are hidden');
+        console.log('Closing /config WebSocket for EegMonitor because settings are hidden');
         configWebSocket.close();
         setConfigWebSocket(null);
         setIsConfigWsOpen(false);
       }
-      setConfigUpdateStatus(null);
+      setConfigUpdateStatus(null); // Clear status when settings view is left
     }
-  }, [activeView]); // REFRESH_CONFIG_REMOVED: refreshConfig removed from dependencies
+  }, [activeView]);
 
+
+  const { sendPowerlineFilterCommand } = useCommandWebSocket(); // Keep for potential direct use if needed
 
   const handleUpdateConfig = () => {
     if (!configWebSocket || configWebSocket.readyState !== WebSocket.OPEN) {
-      console.error('Config WebSocket not connected or not ready.');
+      console.error('Config WebSocket (EegMonitor) not connected or not ready.');
       setConfigUpdateStatus('Error: Config service not connected. Cannot send update.');
       return;
     }
 
-    if (!selectedChannelCount && !selectedSampleRate && !selectedPowerlineFilter) {
-      setConfigUpdateStatus('No changes selected to update.');
-      console.log('No changes to send for config update.');
-      return;
+    if (recordingStatus.startsWith('Currently recording')) {
+        setConfigUpdateStatus('Cannot change configuration during recording.');
+        return;
     }
-    
-    const newConfig: { channels?: number[]; sample_rate?: number; powerline_filter_hz?: number | null } = {};
+
+    const newConfigPayload: { channels?: number[]; sample_rate?: number; powerline_filter_hz?: number | null } = {};
+    let changesMade = false;
 
     if (selectedChannelCount !== undefined) {
       const numChannels = parseInt(selectedChannelCount, 10);
-      // Create an array of channel indices [0, 1, ..., numChannels-1]
-      // The daemon expects actual channel indices, not just the count.
-      // However, the UI currently only allows selecting the *number* of channels.
-      // For now, let's assume if user selects "N channels", they mean channels 0 to N-1.
-      // This might need refinement based on how channel selection is truly intended.
-      if (!isNaN(numChannels) && numChannels > 0) {
-        newConfig.channels = Array.from({ length: numChannels }, (_, i) => i);
-      } else if (numChannels === 0) {
-         newConfig.channels = []; // Send empty array if 0 channels selected
+      if (!isNaN(numChannels) && numChannels >= 0 && numChannels <= 8) { // Max 8 channels for ADS1299
+        const currentChannels = config?.channels || [];
+        const newChannelsArray = Array.from({ length: numChannels }, (_, i) => i);
+        // Compare arrays properly
+        if (JSON.stringify(currentChannels) !== JSON.stringify(newChannelsArray)) {
+            newConfigPayload.channels = newChannelsArray;
+            changesMade = true;
+        }
+      } else {
+        setConfigUpdateStatus('Invalid number of channels selected.');
+        return;
       }
     }
 
     if (selectedSampleRate !== undefined) {
       const rate = parseInt(selectedSampleRate, 10);
-      if (!isNaN(rate)) {
-        newConfig.sample_rate = rate;
+      const validRates = [250, 500, 1000, 2000]; // Example valid rates
+      if (!isNaN(rate) && validRates.includes(rate)) {
+        if (config?.sample_rate !== rate) {
+            newConfigPayload.sample_rate = rate;
+            changesMade = true;
+        }
+      } else {
+        setConfigUpdateStatus(`Invalid sample rate: ${rate}. Valid: ${validRates.join(', ')}`);
+        return;
       }
     }
     
     if (selectedPowerlineFilter !== undefined) {
+      let filterValue: number | null = null;
       if (selectedPowerlineFilter === 'off') {
-        newConfig.powerline_filter_hz = null;
+        filterValue = null;
       } else {
-        const filterHz = parseInt(selectedPowerlineFilter, 10);
-        if (!isNaN(filterHz) && (filterHz === 50 || filterHz === 60)) {
-          newConfig.powerline_filter_hz = filterHz;
+        const parsedFilter = parseInt(selectedPowerlineFilter, 10);
+        if (!isNaN(parsedFilter) && (parsedFilter === 50 || parsedFilter === 60)) {
+          filterValue = parsedFilter;
+        } else {
+          setConfigUpdateStatus(`Invalid powerline filter value: ${selectedPowerlineFilter}`);
+          return;
         }
+      }
+      if (config?.powerline_filter_hz !== filterValue) {
+        newConfigPayload.powerline_filter_hz = filterValue;
+        changesMade = true;
       }
     }
     
-    console.log('Sending config update:', newConfig);
+    if (!changesMade) {
+      setConfigUpdateStatus('No changes selected to update.');
+      console.log('No changes to send for config update.');
+      return;
+    }
+    
+    console.log('Sending config update via EegMonitor /config WebSocket:', newConfigPayload);
     setConfigUpdateStatus('Sending configuration update...');
-    configWebSocket.send(JSON.stringify(newConfig));
+    configWebSocket.send(JSON.stringify(newConfigPayload));
   };
 
   // Debug info reference (ensure it's defined)
@@ -236,12 +251,9 @@ export default function EegMonitorWebGL() {
     wsConnected,
     startRecording,
     stopRecording,
+    // sendPowerlineFilterCommand is now available here but used in handleUpdateConfig
     recordingStatus,
     recordingFilePath,
-    // ws, // ws is used by EegRecordingControls via the context
-    // startRecording, // Handled by EegRecordingControls
-    // stopRecording, // Handled by EegRecordingControls
-    // wsConnected, // Used by EegRecordingControls
   } = useCommandWebSocket();
 
   // Update canvas dimensions based on container size
@@ -774,9 +786,9 @@ export default function EegMonitorWebGL() {
                   <div className="md:col-span-2 mt-6">
                     <button
                       onClick={handleUpdateConfig}
-                      disabled={!isConfigWsOpen}
+                      disabled={!isConfigWsOpen || recordingStatus.startsWith('Currently recording')}
                       className={`px-6 py-2 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 ${
-                        !isConfigWsOpen
+                        (!isConfigWsOpen || recordingStatus.startsWith('Currently recording'))
                           ? 'bg-gray-500 cursor-not-allowed'
                           : 'bg-blue-600 hover:bg-blue-700'
                       }`}
@@ -784,7 +796,7 @@ export default function EegMonitorWebGL() {
                       Update Config
                     </button>
                     {configUpdateStatus && (
-                      <p className={`mt-2 text-xs ${configUpdateStatus.includes('error') ? 'text-red-400' : 'text-gray-400'}`}>
+                      <p className={`mt-2 text-xs ${configUpdateStatus.includes('Error') || configUpdateStatus.includes('error') || configUpdateStatus.includes('Invalid') || configUpdateStatus.includes('timed out') ? 'text-red-400' : 'text-gray-400'}`}>
                         {configUpdateStatus}
                       </p>
                     )}
