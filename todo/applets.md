@@ -204,3 +204,43 @@ graph TD
 *   **Initial Applets:** Concepts like a simple voltage visualizer or an FFT spectrum display can be the first DSP crates and applets developed under this model.
 
 This synthesized plan provides a solid foundation for developing the extensible applet architecture for V1, focusing on Rust-based DSPs integrated at compile time.
+## 7. DSP Data Exposure, Routing, and API Aliasing
+
+what if we want to expose the realtime dsp data over websocket or osc routes? how does the rust server know the route of the dsp module? is it like named after the folder its in? power_spectrum/ then that is the route root name?
+
+then what if an external app is expecting the route names to be a particular name? is there an interposer that can rename it from /power_spectrum/8to13hz -> /alpha_waves ? how would this be done you think? the rust server would get teh data as message passing i think, but then to know how to expose it to a particular api.. or should the external applicaton know the api and it's on them?
+
+ChatGPT said:
+Making DSP streams discoverable (and rename‑able)
+
+| Goal                                       | Minimal v1                                                                                                                               | Scalable v2                                                                                                                                                                                             |
+| :----------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Tell the daemon where to publish           | Add an explicit field in `manifest.json` (you already hinted at `dspWebSocketPath`).<br>`"publish": { "ws": "/power_spectrum", "osc": "/power_spectrum" }` | Have each DSP crate implement a small trait, e.g.<br>`impl DspPublisher for BandPower { const DEFAULT_ROUTE: &'static str = "/band_power"; … }`<br>The build script gathers these constants into a registry (`lazy_static HashMap<&str, RouteMeta>`), so routes are typed, not string‑literals sprinkled around. |
+| Expose multiple channels (e.g., 8–13 Hz, 13–30 Hz) | Publish a JSON object once per frame:<br>`{ "alpha": 12.4, "beta": 7.3 }`<br>The client can subscribe once and unpack keys.                 | Use hierarchical paths:<br>• WebSocket: `/band_power/alpha`, `/band_power/beta`.<br>• OSC: `/band_power/alpha` etc.<br>Route list is part of the registry above so the UI can auto‑discover.                               |
+| Rename for a legacy client                 | Alias table in a simple `routes.yaml` loaded at boot:<br>```yaml<br>/band_power/alpha: /alpha_waves<br>/band_power/beta: /beta_waves<br>```<br>The daemon looks up `outgoing_path = alias.get(internal_path).unwrap_or(internal_path)` before it serialises. | Wrap the daemon with a thin proxy (nginx for WS, oscroute for OSC) so the core stays pure. Useful if you need per‑user remaps or TLS termination anyway.                                                  |
+| Let an external app bind to custom names   | Ship a one‑liner REPL / CLI:<br>`eeg route add /band_power/alpha /alpha_waves`.<br>It just edits `routes.yaml` and sends a SIGHUP to reload. | Expose a REST or gRPC endpoint: `POST /api/routes {from: “…”, to: “…”}`—keeps state out of files, plays nicely with a UI settings panel.                                                                     |
+
+How the data flows
+
+```mermaid
+graph LR
+    subgraph DSP crate
+        A(BandPower::tick()) -->|returns f32 values| B
+    end
+    B -->|send on mpsc| C[Router task\n(internal paths)]
+    C -->|alias lookup| D[WebSocket/OSC\nsender]
+    D -->|/alpha_waves 12.4| Client
+```
+Router is just an async task that owns a `HashMap<Route, Vec<Subscriber>>`.
+
+Aliasing happens once when the message enters the network layer, so internal code never sees “pretty” names.
+
+TL;DR
+
+*   Declare the canonical route in each applet (either in `manifest.json` or via a Rust trait).
+*   Keep a tiny alias map (file or API). The daemon rewrites paths before emit.
+*   External tools can either:
+    *   accept your canonical API, or
+    *   install aliases without touching any DSP code.
+
+That keeps internal names stable, lets legacy clients pick whatever routes they need, and avoids hard‑coding folder names or magic strings throughout the codebase.
