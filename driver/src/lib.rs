@@ -13,6 +13,10 @@ pub struct ProcessedData {
     pub timestamp: u64,
     pub raw_samples: Vec<Vec<i32>>,
     pub processed_voltage_samples: Vec<Vec<f32>>,
+    /// Optional FFT power spectrums for each channel
+    pub power_spectrums: Option<Vec<Vec<f32>>>,
+    /// Optional FFT frequency bins for each channel (should correspond to power_spectrums)
+    pub frequency_bins: Option<Vec<Vec<f32>>>,
     /// Optional error message if processing failed
     pub error: Option<String>,
 }
@@ -23,6 +27,8 @@ impl Default for ProcessedData {
             timestamp: 0,
             raw_samples: Vec::new(),
             processed_voltage_samples: Vec::new(),
+            power_spectrums: None,
+            frequency_bins: None,
             error: None,
         }
     }

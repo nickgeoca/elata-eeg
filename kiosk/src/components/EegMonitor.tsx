@@ -8,7 +8,7 @@ import { useEegConfig } from './EegConfig';
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
-import { FftRenderer } from './FftRenderer'; // Import the FftRenderer
+// import { FftRenderer } from './FftRenderer'; // No longer directly used here
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
 import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';
@@ -17,7 +17,8 @@ import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
 import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
-
+import BrainWavesDisplay from '../../../applets/brain_waves/ui/BrainWavesDisplay';
+ 
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -30,8 +31,12 @@ export default function EegMonitorWebGL() {
   // Ref to hold the single latest timestamp of any received data packet
   const latestTimestampRef = useRef<number>(performance.now());
   // Removed canvasDimensions state, EegRenderer handles this
-  const [activeView, setActiveView] = useState<'signalGraph' | 'fftGraph' | 'settings'>('signalGraph');
-  const [lastGraphView, setLastGraphView] = useState<'signalGraph' | 'fftGraph'>('signalGraph');
+
+  type DataView = 'signalGraph' | 'appletBrainWaves'; // fftGraph removed
+  type ActiveView = DataView | 'settings';
+ 
+  const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
+  const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph'); // To store the last non-settings view
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
@@ -322,8 +327,15 @@ export default function EegMonitorWebGL() {
     lastDataChunkTimeRef: channelTimestampRef, // Pass the array ref for per-channel times
     latestTimestampRef: latestTimestampRef,     // Pass the single ref for the overall latest time
     debugInfoRef: debugInfoRef, // Pass debugInfoRef for packet counting
-    onFftData: activeView === 'fftGraph' ? handleFftData : undefined // Pass FFT handler only if in FFT view
+    onFftData: undefined // Applet view handles its own data via WebSocket
   });
+ 
+  // Effect to update lastActiveDataView when activeView changes (and is not settings)
+  useEffect(() => {
+    if (activeView !== 'settings') {
+      setLastActiveDataView(activeView as DataView);
+    }
+  }, [activeView]);
 
   // Removed dedicated useLayoutEffect for ResizeObserver
 
@@ -339,8 +351,9 @@ export default function EegMonitorWebGL() {
     const target = containerRef.current;
     let sizeUpdateTimeoutId: NodeJS.Timeout | null = null;
 
-    if (activeView !== 'settings' && target) {
-        console.log("[EegMonitor LineEffect] Setting up ResizeObserver.");
+    // Setup ResizeObserver only for graph views ('signalGraph')
+    if (activeView === 'signalGraph' && target) { // fftGraph condition removed
+        console.log(`[EegMonitor LineEffect] Setting up ResizeObserver for ${activeView}.`);
         resizeObserver = new ResizeObserver(entries => {
           for (let entry of entries) {
             const { width, height } = entry.contentRect;
@@ -377,32 +390,15 @@ export default function EegMonitorWebGL() {
 
     console.log(`[EegMonitor LineEffect RUNS] activeView: ${activeView}, containerSize: ${JSON.stringify(containerSize)}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
 
-    // Handle navigating AWAY from graph
-    if (activeView === 'settings') {
-        console.log("[EegMonitor LineEffect] In settings view, ensuring lines are cleared.");
-        if (dataRef.current.length > 0 || linesReady) {
-             console.log("[EegMonitor LineEffect] Clearing lines for settings view (activeView is 'settings').");
-             dataRef.current = [];
-             setLinesReady(false);
-             setDataVersion(v => v + 1);
-        }
-        // Cleanup observer if it exists from a previous render
-        return () => {
-            if (resizeObserver && target) {
-                console.log("[EegMonitor LineEffect] Cleaning up ResizeObserver (settings view).");
-                resizeObserver.unobserve(target);
-                resizeObserver.disconnect();
-            }
-        };
-    }
-
-    // Add a minimum width threshold to ensure container is properly measured
-    const MIN_VALID_WIDTH = 50; // Minimum width to consider container properly measured
-    
-    // Depend on config, channels, and the container SIZE state
-    if (config && config.channels && containerSize.width > MIN_VALID_WIDTH) {
-      const numChannels = config.channels.length;
-      const width = containerSize.width; // Use width from state
+    // Logic for creating/clearing lines based on activeView
+    if (activeView === 'signalGraph') { // fftGraph condition removed
+      // Add a minimum width threshold to ensure container is properly measured
+      const MIN_VALID_WIDTH = 50; // Minimum width to consider container properly measured
+      
+      // Depend on config, channels, and the container SIZE state
+      if (config && config.channels && containerSize.width > MIN_VALID_WIDTH) {
+        const numChannels = config.channels.length;
+        const width = containerSize.width; // Use width from state
       const sampleRate = config.sample_rate || 250; // Use default if needed
 
       // Calculate points needed based on current width
@@ -484,18 +480,27 @@ export default function EegMonitorWebGL() {
       setLinesReady(true); // Mark lines as ready
       setDataVersion(v => v + 1); // Increment version
 
-    } else {
-        // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is 0)
-        // The specific check for numChannels === 0 inside the 'if' block already handles clearing.
-        // This 'else' handles cases where the outer 'if (config && config.channels && containerSize.width > 0)' fails.
-        console.log(`[EegMonitor LineEffect SKIPPING] Condition not met: config=${!!config}, config.channels=${!!config?.channels}, containerSize.width=${containerSize.width} > MIN_VALID_WIDTH=${MIN_VALID_WIDTH}`);
-        if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
-            dataRef.current = [];
-            setLinesReady(false);
-            setDataVersion(v => v + 1);
+      } else {
+          // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is 0)
+          // The specific check for numChannels === 0 inside the 'if' block already handles clearing.
+          // This 'else' handles cases where the outer 'if (config && config.channels && containerSize.width > 0)' fails.
+          console.log(`[EegMonitor LineEffect SKIPPING line creation for ${activeView}] Condition not met: config=${!!config}, config.channels=${!!config?.channels}, containerSize.width=${containerSize.width} > MIN_VALID_WIDTH=${MIN_VALID_WIDTH}`);
+          if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
+              dataRef.current = [];
+              setLinesReady(false);
+              setDataVersion(v => v + 1);
+          }
+      }
+    } else { // activeView is 'settings' or 'appletBrainWaves'
+        console.log(`[EegMonitor LineEffect] In ${activeView} view, ensuring lines are cleared (if they existed).`);
+        if (dataRef.current.length > 0 || linesReady) {
+             console.log(`[EegMonitor LineEffect] Clearing lines for ${activeView} view.`);
+             dataRef.current = [];
+             setLinesReady(false);
+             setDataVersion(v => v + 1);
         }
     }
-
+    
     // Cleanup function for the effect
     return () => {
         if (resizeObserver && target) {
@@ -510,44 +515,46 @@ export default function EegMonitorWebGL() {
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
 
-  // Handler for the "Brain Waves" / "Signal Graph" button
-  const handleToggleGraphView = () => {
-    if (activeView === 'signalGraph') {
-      setActiveView('fftGraph');
-    } else if (activeView === 'fftGraph') {
-      setActiveView('signalGraph');
-    } else if (activeView === 'settings') {
-      // If in settings, switch to the last active graph view
-      setActiveView(lastGraphView);
-      // Ensure container size is reset for graph view
-      console.log("[EegMonitor handleToggleGraphView] Switching from settings to graph view. Resetting containerSize.");
-      setContainerSize({ width: 0, height: 0 });
+  const getViewName = (view: DataView | 'settings'): string => {
+    switch (view) {
+        case 'signalGraph': return 'Signal Graph';
+        // case 'fftGraph': return 'FFT Graph'; // Removed
+        case 'appletBrainWaves': return 'Brain Waves (FFT)'; // Updated name
+        case 'settings': return 'Settings';
+        default: return '';
     }
   };
 
-  // Handler for the "Settings" / "Back to [Graph]" button
+  // Handler for toggling between Signal Graph and FFT Graph - REMOVED as FFT is now applet
+  // const handleToggleSignalFftView = () => { ... };
+ 
+  // Handler for showing the Brain Waves Applet (which is now the FFT view)
+  const handleShowAppletView = () => {
+    setActiveView('appletBrainWaves');
+    // If coming from settings, and the previous view was a graph, container size might need reset
+    // but applet view itself doesn't use containerRef for lines.
+    // No specific containerSize reset here, as applet view is different.
+  };
+
+  // Handler for the "Settings" / "Back to [View]" button
   const handleToggleSettingsView = () => {
     if (activeView !== 'settings') {
-      // Store the current graph view before switching to settings
-      if (activeView === 'signalGraph' || activeView === 'fftGraph') {
-        setLastGraphView(activeView);
-      }
-      setActiveView('settings');
-      // Settings panel manages its own layout, graph container size reset is handled when switching back.
+        // lastActiveDataView is already updated by an effect
+        setActiveView('settings');
     } else {
-      // Switching back from settings to the last graph view
-      setActiveView(lastGraphView);
-      // If switching from settings to graph view, ensure container size is reset
-      // to trigger proper measurement and line creation for the graph
-      console.log("[EegMonitor handleToggleSettingsView] Switching from settings to graph view. Resetting containerSize.");
-      setContainerSize({ width: 0, height: 0 });
+        setActiveView(lastActiveDataView);
+        // If switching from settings to a graph view, ensure container size is reset
+        if (lastActiveDataView === 'signalGraph') { // fftGraph condition removed
+            console.log("[EegMonitor handleToggleSettingsView] Switching from settings to graph view. Resetting containerSize.");
+            setContainerSize({ width: 0, height: 0 });
+        }
     }
   };
   
-  // Effect to handle transition from settings to graph view
+  // Effect to handle transition from settings to graph view (signalGraph)
   useEffect(() => {
-    if (activeView !== 'settings' && containerRef.current) {
-      console.log(`[EegMonitor TransitionEffect RUNS] activeView: ${activeView}, containerRef.current: ${!!containerRef.current}. Scheduling size check.`);
+    if (activeView === 'signalGraph' && containerRef.current) { // fftGraph condition removed
+      console.log(`[EegMonitor TransitionEffect RUNS for ${activeView}] Scheduling size check.`);
       
       // Use a timeout to ensure the DOM has updated after the view switch
       const transitionTimeoutId = setTimeout(() => {
@@ -652,22 +659,32 @@ export default function EegMonitorWebGL() {
             Recordings
           </a>
           
-          {/* Brain Waves / Signal Graph toggle button */}
+          {/* Signal / FFT Graph toggle button - REMOVED */}
+          {/*
           <button
-            onClick={handleToggleGraphView}
+            onClick={handleToggleSignalFftView}
             className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
-            // disabled={activeView === 'settings'} // Optionally disable if in settings, or allow switching
+            disabled={activeView === 'appletBrainWaves'}
           >
-            {activeView === 'signalGraph' ? 'Brain Waves' : activeView === 'fftGraph' ? 'Signal Graph' : lastGraphView === 'signalGraph' ? 'Brain Waves' : 'Signal Graph'}
+            {activeView === 'signalGraph' ? 'Show FFT' : 'Show Signal'}
           </button>
-
+          */}
+ 
+          {/* Brain Waves Applet button (Now shows FFT) */}
+          <button
+            onClick={handleShowAppletView}
+            className={`px-4 py-1 rounded-md text-white ${activeView === 'appletBrainWaves' ? 'bg-teal-700' : 'bg-teal-600 hover:bg-teal-700'}`} // Style like old FFT button
+          >
+            Show FFT Applet
+          </button>
+ 
           {/* Settings button */}
           <button
             onClick={handleToggleSettingsView}
             className="px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white"
           >
             {activeView === 'settings'
-              ? `Back to ${lastGraphView === 'signalGraph' ? 'Signal' : 'FFT'} Graph`
+              ? `Back to ${getViewName(lastActiveDataView)}`
               : 'Settings'}
           </button>
         </div>
@@ -901,26 +918,30 @@ export default function EegMonitorWebGL() {
              </div>
            </div>
          </div>
-       ) : activeView === 'fftGraph' ? (
-         <div className="relative h-full" ref={containerRef}>
-           {/* Canvas for FFT plot is now managed internally by FftRenderer */}
-           <FftRenderer
-             // canvasRef={canvasRef} // Removed, FftRenderer manages its own canvas
-             fftDataRef={fftDataRef}
-             fftDataVersion={fftDataVersion}
-             config={config}
-             containerWidth={containerSize.width}
-             containerHeight={containerSize.height}
-             // linesReady prop removed as FftRenderer manages its own readiness
-             targetFps={displayFps} // Use the same displayFps for now
-           />
-           <EegStatusBar
-             status={status} // Or a more relevant status for FFT
-             fps={displayFps}
-             dataReceived={dataReceived} // This reflects raw data; FFT is derived
-             packetsReceived={debugInfoRef.current.packetsReceived}
-           />
-         </div>
+       // Removed 'fftGraph' view case entirely
+        ) : activeView === 'appletBrainWaves' ? (
+          // Brain Waves Applet View
+          <div className="relative h-full p-2" ref={containerRef}> {/* Added padding for aesthetics */}
+            {config && containerSize.width > 0 && containerSize.height > 0 ? (
+              <BrainWavesDisplay
+                eegConfig={config}
+                containerWidth={containerSize.width}
+                containerHeight={containerSize.height - 40} // Adjust for potential status bar or titles
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-white">
+                <p>Loading Brain Waves Applet or waiting for configuration/size...</p>
+              </div>
+            )}
+            {/* Optional: Keep a minimal status bar if desired, or let the applet handle its own status */}
+            {/* <EegStatusBar
+              status={status} // This status is for the main /eeg/data WebSocket
+              fps={displayFps}
+              config={config}
+              latestTimestampRef={latestTimestampRef} // This is for the main /eeg/data WebSocket
+              debugInfoRef={debugInfoRef}
+            /> */}
+          </div>
        ) : null}
      </div>
    </div>

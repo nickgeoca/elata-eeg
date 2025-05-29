@@ -14,6 +14,7 @@ futures-util = "0.3"
 csv = "1.2"
 chrono = "0.4"
 env_logger = "0.10" # Added logger
+elata_dsp_brain_waves_fft = { path = "../dsp/brain_waves_fft", optional = true }
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -23,3 +24,8 @@ bytes = "1.0"
 [[bin]]
 name = "eeg_daemon"
 path = "src/main.rs"
+
+[features]
+default = []
+# applets = ["brain_waves_fft_feature"] # Example if using a master 'applets' feature
+brain_waves_fft_feature = ["dep:elata_dsp_brain_waves_fft"]

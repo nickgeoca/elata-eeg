@@ -18,6 +18,10 @@ use crate::config::DaemonConfig;
 pub struct EegBatchData {
     pub channels: Vec<Vec<f32>>,  // Each inner Vec represents a channel's data for the batch
     pub timestamp: u64,           // Timestamp for the start of the batch
+    /// Optional FFT power spectrums for each channel
+    pub power_spectrums: Option<Vec<Vec<f32>>>,
+    /// Optional FFT frequency bins for each channel
+    pub frequency_bins: Option<Vec<Vec<f32>>>,
     pub error: Option<String>,    // Optional error message from the driver
 }
 
@@ -202,7 +206,7 @@ impl CsvRecorder {
             // But we need to map it to the specific channel indices in the configuration
             
             // Add voltage values for each configured channel
-            for (idx, &channel_idx) in self.current_adc_config.channels.iter().enumerate() {
+            for (idx, &_channel_idx) in self.current_adc_config.channels.iter().enumerate() {
                 if idx < num_channels {
                     // We have data for this channel
                     record.push(data.processed_voltage_samples[idx][i].to_string());
@@ -213,7 +217,7 @@ impl CsvRecorder {
             }
             
             // Add raw values for each configured channel
-            for (idx, &channel_idx) in self.current_adc_config.channels.iter().enumerate() {
+            for (idx, &_channel_idx) in self.current_adc_config.channels.iter().enumerate() {
                 if idx < num_channels {
                     // We have data for this channel
                     record.push(data.raw_samples[idx][i].to_string());
@@ -252,12 +256,12 @@ pub async fn process_eeg_data(
     mut rx_data_from_adc: tokio::sync::mpsc::Receiver<ProcessedData>,
     tx_to_web_socket: tokio::sync::broadcast::Sender<EegBatchData>,
     csv_recorder: Arc<Mutex<CsvRecorder>>,
-    is_recording: Arc<AtomicBool>,
+    _is_recording: Arc<AtomicBool>,
     cancellation_token: CancellationToken,
 ) {
     let mut count = 0;
     let mut last_time = std::time::Instant::now();
-    let mut last_timestamp = None;
+    let mut last_timestamp: Option<u64> = None;
     
     loop {
         tokio::select! {
@@ -285,6 +289,8 @@ pub async fn process_eeg_data(
             let error_batch = EegBatchData {
                 channels: Vec::new(),
                 timestamp: data.timestamp / 1000, // Convert to milliseconds
+                power_spectrums: None,
+                frequency_bins: None,
                 error: Some(error_msg.clone()),
             };
             
@@ -318,6 +324,15 @@ pub async fn process_eeg_data(
                 let eeg_batch_data = EegBatchData {
                     channels: chunk_channels,
                     timestamp: chunk_timestamp / 1000, // Convert to milliseconds
+                    // Extract FFT data for the current chunk if available
+                    // This assumes ProcessedData now contains Option<Vec<Vec<f32>>> for spectrums and bins
+                    // And that the outer Vec corresponds to channels, inner Vec to data for that channel.
+                    // We need to slice the FFT data similarly to how raw channel data is chunked.
+                    // This is a simplified example; actual slicing might be more complex
+                    // if FFT is not done per small chunk but on larger windows.
+                    // For now, we pass along the whole FFT data if present.
+                    power_spectrums: data.power_spectrums.clone(), // Clone if you need to own it
+                    frequency_bins: data.frequency_bins.clone(),   // Clone if you need to own it
                     error: None,
                 };
                 

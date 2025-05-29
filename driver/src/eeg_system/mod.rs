@@ -10,6 +10,7 @@ use crate::board_drivers::{
 };
 use crate::dsp::filters::SignalProcessor;
 use super::ProcessedData;
+use elata_dsp_brain_waves_fft; // Import for FFT processing
 
 /// Helper function to process a batch of data
 ///
@@ -17,6 +18,7 @@ use super::ProcessedData;
 async fn process_data_batch(
     data_batch: &[AdcData],
     channel_count: usize,
+    sample_rate: f32, // Added sample_rate for FFT
     processor: &Arc<Mutex<SignalProcessor>>,
     tx: &mpsc::Sender<ProcessedData>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -73,12 +75,44 @@ async fn process_data_batch(
     }
     drop(proc_guard);
 
+    // --- FFT Processing ---
+    let mut all_power_spectrums: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+    let mut all_frequency_bins: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+    let mut fft_error: Option<String> = None;
+
+    for ch_data in processed_voltage_samples.iter() {
+        if ch_data.is_empty() {
+            // Handle empty channel data if necessary, perhaps by adding empty vecs or specific error
+            all_power_spectrums.push(Vec::new());
+            all_frequency_bins.push(Vec::new());
+            continue;
+        }
+        match elata_dsp_brain_waves_fft::process_eeg_data(ch_data, sample_rate) {
+            Ok((power, freqs)) => {
+                all_power_spectrums.push(power);
+                all_frequency_bins.push(freqs);
+            }
+            Err(e) => {
+                eprintln!("FFT processing error for a channel: {}", e);
+                // Store empty vecs for this channel on error, and set a global FFT error
+                all_power_spectrums.push(Vec::new());
+                all_frequency_bins.push(Vec::new());
+                if fft_error.is_none() {
+                    fft_error = Some(format!("FFT error on one or more channels: {}", e));
+                }
+            }
+        }
+    }
+    // --- End FFT Processing ---
+
     // Send the processed data
     tx.send(ProcessedData {
         timestamp: data_batch.last().unwrap().timestamp,
         raw_samples,
         processed_voltage_samples,
-        error: None,
+        power_spectrums: Some(all_power_spectrums),
+        frequency_bins: Some(all_frequency_bins),
+        error: fft_error, // Use FFT error if present, otherwise None
     }).await.map_err(|e| format!("Failed to send processed data: {}", e).into())
 }
 
@@ -173,6 +207,7 @@ impl EegSystem {
         let tx = self.tx.clone();
         // Capture the channel count from the configuration
         let channel_count = config.channels.len();
+        let sample_rate_for_fft = config.sample_rate as f32; // Capture sample rate for FFT
         // Clone the cancellation token for the task
         let cancel_token = self.cancel_token.clone();
 
@@ -195,6 +230,7 @@ impl EegSystem {
                                         if let Err(e) = process_data_batch(
                                             &data_batch,
                                             channel_count,
+                                            sample_rate_for_fft, // Pass sample_rate
                                             &processor,
                                             &tx
                                         ).await {
@@ -204,6 +240,8 @@ impl EegSystem {
                                                 timestamp: data_batch.last().map_or(0, |d| d.timestamp),
                                                 raw_samples: Vec::new(),
                                                 processed_voltage_samples: Vec::new(),
+                                                power_spectrums: None, // Ensure all fields are present
+                                                frequency_bins: None,  // Ensure all fields are present
                                                 error: Some(format!("Processing error: {}", e)),
                                             }).await;
                                             
@@ -223,6 +261,8 @@ impl EegSystem {
                                                 .as_micros() as u64,
                                             raw_samples: Vec::new(),
                                             processed_voltage_samples: Vec::new(),
+                                            power_spectrums: None,
+                                            frequency_bins: None,
                                             error: Some(format!("Driver status changed: {:?}", status)),
                                         }).await;
                                     }
@@ -237,6 +277,8 @@ impl EegSystem {
                                                 .as_micros() as u64,
                                             raw_samples: Vec::new(),
                                             processed_voltage_samples: Vec::new(),
+                                            power_spectrums: None,
+                                            frequency_bins: None,
                                             error: Some(format!("Driver error: {}", err_msg)),
                                         }).await;
                                     }

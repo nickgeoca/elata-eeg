@@ -3,9 +3,9 @@
 import { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 // @ts-ignore: WebglLine might be missing from types or setY might be, but setY exists at runtime
 import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
-import { getChannelColor } from '../utils/colorUtils';
-import { getFrequencyBins } from '../utils/fftUtils'; // To get X-axis values
-import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../utils/eegConstants'; // Import constants
+import { getChannelColor } from '../../../kiosk/src/utils/colorUtils';
+import { getFrequencyBins } from '../../../kiosk/src/utils/fftUtils'; // To get X-axis values
+import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../kiosk/src/utils/eegConstants'; // Import constants
 
 const DATA_Y_MAX = 4000.0; // Expected maximum for FFT power data (µV²/Hz)
 const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.0001; // Clamp input power to this minimum before log10
@@ -31,7 +31,6 @@ interface LabelInfo {
 }
 
 interface FftRendererProps {
-  // canvasRef: React.RefObject<HTMLCanvasElement | null>; // REMOVED
   fftDataRef: React.MutableRefObject<Record<number, number[]>>;
   fftDataVersion: number; // To trigger updates
   config: any; // EEG configuration (for sample_rate, channels)
@@ -40,8 +39,7 @@ interface FftRendererProps {
   targetFps?: number; // Optional, for controlling update rate
 }
 
-export function FftRenderer({
-  // canvasRef, // REMOVED
+export function AppletFftRenderer({ // Renamed from FftRenderer
   fftDataRef,
   fftDataVersion,
   config,
@@ -76,7 +74,7 @@ export function FftRenderer({
           powerPerformance: "high-performance", // Corrected property name
         });
         // wglpRef.current.setBackgroundColor(CANVAS_BG_COLOR.r, CANVAS_BG_COLOR.g, CANVAS_BG_COLOR.b, CANVAS_BG_COLOR.a); // Removed, not a valid method
-        console.log('[FftRenderer] WebGLPlot instance created.');
+        console.log('[AppletFftRenderer] WebGLPlot instance created.');
       }
       internalCanvasRef.current.width = containerWidth; // Full container size for canvas
       internalCanvasRef.current.height = containerHeight;
@@ -98,7 +96,7 @@ export function FftRenderer({
       if (wglp && typeof wglp.removeLine === 'function') {
         wglp.removeLine(line);
       } else {
-        console.warn('[FftRenderer] wglp.removeLine is not a function or wglp is not available. Cannot remove grid line. This may lead to visual artifacts.');
+        console.warn('[AppletFftRenderer] wglp.removeLine is not a function or wglp is not available. Cannot remove grid line. This may lead to visual artifacts.');
       }
     });
     gridLinesRef.current = [];
@@ -128,32 +126,23 @@ export function FftRenderer({
     for (let i = Math.floor(LOG_Y_MIN_DISPLAY); i <= Math.ceil(LOG_Y_MAX_DISPLAY); i++) {
       yLogExponentTicks.push(i);
     }
-    // Ensure LOG_Y_MIN_DISPLAY and LOG_Y_MAX_DISPLAY are included if they are not integers
-    // and fall within a reasonable range of the integer ticks.
-    // This is more for ensuring the grid lines at the exact min/max of data range are drawn
-    // if those min/max log values are not integers themselves.
+
     if (!yLogExponentTicks.includes(LOG_Y_MIN_DISPLAY) && LOG_Y_MIN_DISPLAY > Math.floor(LOG_Y_MIN_DISPLAY)) {
         // yLogExponentTicks.unshift(LOG_Y_MIN_DISPLAY); // Add at the beginning if not integer
     }
     if (!yLogExponentTicks.includes(LOG_Y_MAX_DISPLAY) && LOG_Y_MAX_DISPLAY < Math.ceil(LOG_Y_MAX_DISPLAY)) {
         // yLogExponentTicks.push(LOG_Y_MAX_DISPLAY); // Add at the end if not integer
     }
-    // yLogExponentTicks.sort((a,b) => a-b);
-    // const uniqueSortedYLogExponentTicks = [...new Set(yLogExponentTicks)];
 
     yLogExponentTicks.forEach(logExponent => {
-      // Normalize the logExponent value from [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY] to [-1, 1] for WebGL grid lines
       const normalizedY = (logExponent - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) * 2 - 1;
 
-      // Horizontal grid line
       const gridY = new WebglLine(GRID_COLOR, 2);
       gridY.xy = new Float32Array([-1, normalizedY, 1, normalizedY]);
       newGridLines.push(gridY);
       
-      // Label value is the exponent itself
       const labelValue = logExponent.toString();
       
-      // Label position (pixel space on canvas)
       const labelYPos = MARGIN_BOTTOM + (normalizedY + 1) / 2 * plotHeight; // Y is from bottom up for labels
       newYLabels.push({ value: labelValue, position: labelYPos, normalized: normalizedY });
     });
@@ -162,14 +151,12 @@ export function FftRenderer({
     gridLinesRef.current = newGridLines;
     setAxisLabels({ x: newXLabels, y: newYLabels.reverse() }); // Reverse Y labels for top-down display
 
-    // console.log('[FftRenderer] Grid and labels updated for log exponents.');
-
-  }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ]); // LOG_Y_MIN/MAX_DISPLAY are derived from DATA_Y_MAX but are consts
+  }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ]);
 
 
   // Effect to create/update FFT lines
   useEffect(() => {
-    setFftLinesReady(false); // Assume lines are not ready until successfully created/updated
+    setFftLinesReady(false); 
 
     if (!wglpRef.current || !config || !config.channels || !config.sample_rate || containerWidth <= 0) {
       if (linesRef.current.length > 0) {
@@ -178,7 +165,6 @@ export function FftRenderer({
         xFreqRef.current = [];
         previousXCoordsLengthRef.current = null;
       }
-      // setFftLinesReady(false); // Already set at the start
       return;
     }
 
@@ -192,39 +178,28 @@ export function FftRenderer({
         xFreqRef.current = [];
         previousXCoordsLengthRef.current = null;
       }
-      // setFftLinesReady(false); // Already set at the start
       return;
     }
 
-    // Determine numFftBins from the first available FFT data or estimate
     let numFftBins = 0;
     if (fftDataRef.current && typeof fftDataRef.current === 'object' && Object.keys(fftDataRef.current).length > 0) {
         const channelDataArrays = Object.values(fftDataRef.current);
         for (const dataArray of channelDataArrays) {
-            // Ensure dataArray is an array and has a length property
             if (dataArray && typeof dataArray.length === 'number' && dataArray.length > 0) {
                 numFftBins = dataArray.length;
-                break; // Found a valid length
+                break; 
             }
         }
     }
     
-    if (numFftBins === 0) { // Fallback if no FFT data yet to determine bins
-        // Estimate based on a typical FFT window (e.g., 2 seconds)
-        // This is a rough estimation and might not match actual FFT output bins perfectly initially.
-        // const estimatedFftWindowSamples = 2 * sampleRate; // 2 seconds of data
-        // numFftBins = estimatedFftWindowSamples / 2;
-        // For now, if numFftBins is 0, we can't create lines properly.
-        // This will be resolved once fftDataRef is populated.
-        console.warn('[FftRenderer] numFftBins is 0. Lines will be created/updated once FFT data arrives.');
-        // Clear existing lines if numFftBins becomes 0 after being non-zero
+    if (numFftBins === 0) { 
+        console.warn('[AppletFftRenderer] numFftBins is 0. Lines will be created/updated once FFT data arrives.');
         if (linesRef.current.length > 0) {
             linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
             linesRef.current = [];
             xFreqRef.current = [];
             previousXCoordsLengthRef.current = null;
         }
-        // setFftLinesReady(false); // Already set at the start
         return;
     }
 
@@ -241,82 +216,62 @@ export function FftRenderer({
     });
 
     if (xCoords.length === 0) {
-        console.warn(`[FftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
+        console.warn(`[AppletFftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
         if (linesRef.current.length > 0) {
             linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
             linesRef.current = [];
             xFreqRef.current = [];
             previousXCoordsLengthRef.current = null;
         }
-        // setFftLinesReady(false); // Already set at the start
         return;
     }
 
-    // If xCoords.length has changed, it means the fundamental structure of the plot points has changed.
-    // Clear all existing lines to force a full recreation.
     if (previousXCoordsLengthRef.current !== null && previousXCoordsLengthRef.current !== xCoords.length) {
-      console.log(`[FftRenderer] xCoords.length changed from ${previousXCoordsLengthRef.current} to ${xCoords.length}. Recreating all lines.`);
+      console.log(`[AppletFftRenderer] xCoords.length changed from ${previousXCoordsLengthRef.current} to ${xCoords.length}. Recreating all lines.`);
       linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
       linesRef.current = [];
-      // xFreqRef will be repopulated naturally.
     }
-    previousXCoordsLengthRef.current = xCoords.length; // Update for the next run.
+    previousXCoordsLengthRef.current = xCoords.length; 
 
     const newLines: WebglLine[] = [];
     const newXFreqs: number[][] = [];
-    // const ySpacing = 2.0 / numChannels; // Removed for overlaying lines
 
     for (let i = 0; i < numChannels; i++) {
       const colorTuple = getChannelColor(i);
       const color = new ColorRGBA(colorTuple[0], colorTuple[1], colorTuple[2], 1);
       
-      let line = linesRef.current[i]; // Try to get existing line
+      let line = linesRef.current[i]; 
 
-      // If line doesn't exist or its numPoints is incorrect, create/recreate it.
       if (!(line instanceof WebglLine) || line.numPoints !== xCoords.length) {
         if (line instanceof WebglLine && wglpRef.current) {
-          wglpRef.current.removeLine(line); // Remove old one if it exists
+          wglpRef.current.removeLine(line); 
         }
         line = new WebglLine(color, xCoords.length);
-        // console.log(`[FftRenderer] Ch ${i}: Created/Recreated WebglLine with ${xCoords.length} points.`);
       } else {
-        // Line exists and numPoints is correct, just update its color
         line.color = color;
       }
       
       line.lineWidth = 1.5;
       
-      // Ensure X and initial Y coordinates are set correctly for the line
       if (line.xy) {
         for (let j = 0; j < xCoords.length; j++) {
-          if ((j * 2 + 1) < line.xy.length) { // Check bounds for xy array
-            line.xy[j * 2] = xCoords[j];         // Set X coordinate
-            line.xy[j * 2 + 1] = -0.5;           // Initialize Y to normalized bottom
+          if ((j * 2 + 1) < line.xy.length) { 
+            line.xy[j * 2] = xCoords[j];         
+            line.xy[j * 2 + 1] = -0.5;           
           }
         }
       }
-      newXFreqs[i] = relevantFreqIndices; // Store indices of the FFT output to use
+      newXFreqs[i] = relevantFreqIndices; 
 
-      // Scale Y and OffsetY for overlaying lines:
-      // Data is normalized to [-0.5, 0.5] in the animation loop.
-      // scaleY = 2.0 maps this [-0.5, 0.5] range to the full WebGL Y range of [-1, 1].
-      // offsetY = 0 centers the lines.
       line.scaleY = 2.0;
       line.offsetY = 0;
 
       newLines.push(line);
-      // Assuming addLine is idempotent or handles existing lines appropriately
-      // Removed hasLine check as it's not a function on the actual object
       if (wglpRef.current) {
         wglpRef.current.addLine(line);
       }
     }
 
-    // Remove old lines not in newLines (e.g. if numChannels decreased)
-    // This check should only run if we didn't just clear all lines due to xCoords.length changing.
-    // If xCoords.length changed, linesRef.current was already empty before this loop,
-    // and newLines contains all fresh lines.
-    // This handles the case where numChannels decreases but xCoords.length remains the same.
     if (linesRef.current.length > newLines.length && previousXCoordsLengthRef.current === xCoords.length) {
         linesRef.current.forEach(oldLine => {
             if (!newLines.includes(oldLine) && wglpRef.current) {
@@ -327,10 +282,9 @@ export function FftRenderer({
 
     linesRef.current = newLines;
     xFreqRef.current = newXFreqs;
-    setFftLinesReady(true); // Lines are now successfully created/updated
-    // console.log(`[FftRenderer] Updated ${numChannels} FFT lines with ${xCoords.length} points each (freq range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz). fftLinesReady: true`);
+    setFftLinesReady(true); 
 
-  }, [config, containerWidth, containerHeight, fftDataVersion]); // Rerun if these change. fftDataVersion signals new data structure.
+  }, [config, containerWidth, containerHeight, fftDataVersion, fftDataRef]); // Added fftDataRef
 
   // Animation loop to update FFT lines
   useEffect(() => {
@@ -357,63 +311,44 @@ export function FftRenderer({
 
       for (let i = 0; i < activeChannels; i++) {
         const line = linesRef.current[i];
-        const relevantIndices = xFreqRef.current[i]; // Indices for the visible frequency range
+        const relevantIndices = xFreqRef.current[i]; 
         const channelFullFft = currentFftDataAllBins[i];
 
         if (line && relevantIndices && channelFullFft) {
           if (line.numPoints !== relevantIndices.length) {
-            // This case should ideally be handled by the line creation effect.
-            // console.warn(`[FftRenderer Ch ${i}] Mismatch line points (${line.numPoints}) vs relevant indices (${relevantIndices.length}). Recreating lines might be needed.`);
             continue; 
           }
           for (let j = 0; j < relevantIndices.length; j++) {
             const fftBinIndex = relevantIndices[j];
             let currentMagnitude = channelFullFft[fftBinIndex];
 
-            // Sanitize and clamp the magnitude before normalization
-            // 1. Ensure it's a finite number; if not, treat as 0.
             if (!isFinite(currentMagnitude)) {
               currentMagnitude = 0;
             }
-            // 2. Ensure it's not negative (power should not be negative).
             currentMagnitude = Math.max(0, currentMagnitude);
-            // 3. Clamp to DATA_Y_MAX before log.
             const cappedMagnitude = Math.min(currentMagnitude, DATA_Y_MAX);
             
-            // 4. Ensure a minimum positive value before taking log10.
             const clampedPositiveMagnitude = Math.max(cappedMagnitude, Y_AXIS_LOG_MIN_POWER_CLAMP);
 
-            // 5. Apply log10 transformation.
             let logMagnitude = Math.log10(clampedPositiveMagnitude);
 
-            // 6. Clamp logMagnitude to the defined display range [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY]
-            // This ensures that values outside this range are pinned to the edges of the graph.
             logMagnitude = Math.max(LOG_Y_MIN_DISPLAY, Math.min(logMagnitude, LOG_Y_MAX_DISPLAY));
 
-            // 7. Normalize logMagnitude from [LOG_Y_MIN_DISPLAY, LOG_Y_MAX_DISPLAY] to [-0.5, 0.5]
-            // LOG_Y_MIN_DISPLAY maps to -0.5 (bottom of its scaled range).
-            // LOG_Y_MAX_DISPLAY maps to  0.5 (top of its scaled range).
             let normalizedMagnitude = (logMagnitude - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) - 0.5;
 
-            // Final check: ensure normalizedMagnitude is finite, otherwise default to bottom.
             if (!isFinite(normalizedMagnitude)) {
-                normalizedMagnitude = -0.5; // Corresponds to LOG_Y_MIN_DISPLAY
+                normalizedMagnitude = -0.5; 
             }
 
-            // Use the line's setY method to update the Y coordinate.
-            // The index 'j' corresponds to the data point index.
-            // normalizedMagnitude is calculated to be in the [-0.5, 0.5] range.
-            // The line.scaleY=2.0 and line.offsetY=0 will map this to WebGL's [-1, 1] range.
             if (line.xy && (j * 2 + 1) < line.xy.length) {
                 line.xy[j * 2 + 1] = normalizedMagnitude;
             }
           }
         } else if (line) {
-          // Clear line if data is missing by setting to the bottom of its range
           if (line.xy) {
             for (let j = 0; j < line.numPoints; j++) {
                 if ((j * 2 + 1) < line.xy.length) {
-                    line.xy[j * 2 + 1] = -0.5; // Y coordinate (normalized to bottom)
+                    line.xy[j * 2 + 1] = -0.5; 
                 }
             }
           }
@@ -430,7 +365,7 @@ export function FftRenderer({
         animationFrameIdRef.current = null;
       }
     };
-  }, [fftLinesReady, fftDataVersion, config, fftDataRef, targetFps, plotWidth, plotHeight]); // Use plotWidth/Height
+  }, [fftLinesReady, fftDataVersion, config, fftDataRef, targetFps, plotWidth, plotHeight]); 
 
   return (
     <div style={{ width: containerWidth, height: containerHeight, position: 'relative', backgroundColor: `rgba(${CANVAS_BG_COLOR.r*255}, ${CANVAS_BG_COLOR.g*255}, ${CANVAS_BG_COLOR.b*255}, ${CANVAS_BG_COLOR.a})` }}>
@@ -449,7 +384,7 @@ export function FftRenderer({
           style={{
             position: 'absolute',
             left: label.position,
-            bottom: MARGIN_BOTTOM - 20, // Position below the plot area
+            bottom: MARGIN_BOTTOM - 20, 
             transform: 'translateX(-50%)',
             color: LABEL_COLOR,
             fontSize: '10px',
@@ -464,12 +399,12 @@ export function FftRenderer({
           key={`y-label-${index}`}
           style={{
             position: 'absolute',
-            left: MARGIN_LEFT - 30, // Position left of the plot area
-            bottom: label.position, // Y is from bottom up for positioning
-            transform: 'translateY(50%)', // Center vertically
+            left: MARGIN_LEFT - 30, 
+            bottom: label.position, 
+            transform: 'translateY(50%)', 
             color: LABEL_COLOR,
             fontSize: '10px',
-            width: '25px', // Ensure space for label
+            width: '25px', 
             textAlign: 'right',
           }}
         >
@@ -481,7 +416,7 @@ export function FftRenderer({
         style={{
           position: 'absolute',
           left: MARGIN_LEFT + plotWidth / 2,
-          bottom: 5, // Below X-axis labels
+          bottom: 5, 
           transform: 'translateX(-50%)',
           color: AXIS_TITLE_COLOR,
           fontSize: '12px',
@@ -494,8 +429,8 @@ export function FftRenderer({
         style={{
           position: 'absolute',
           top: MARGIN_TOP + plotHeight / 2,
-          left: 10, // Far left
-          transform: 'translateY(-50%) rotate(-90deg)', // Rotate for vertical display
+          left: 10, 
+          transform: 'translateY(-50%) rotate(-90deg)', 
           transformOrigin: 'left top',
           color: AXIS_TITLE_COLOR,
           fontSize: '12px',

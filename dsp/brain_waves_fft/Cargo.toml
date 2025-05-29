@@ -1,0 +1,14 @@
+[package]
+name = "elata_dsp_brain_waves_fft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# For FFT. Consider `rustfft`.
+rustfft = "6.1"
+# For windowing functions if implementing Welch's method (e.g., Hann).
+# ndarray = "0.15"
+
+[lib]
+name = "elata_dsp_brain_waves_fft" # Ensure this matches the package name for clarity
+path = "src/lib.rs"

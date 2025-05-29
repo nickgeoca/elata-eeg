@@ -10,6 +10,9 @@ use eeg_driver::AdcConfig;
 
 use crate::driver_handler::{EegBatchData, CsvRecorder};
 
+#[cfg(feature = "brain_waves_fft_feature")]
+use elata_dsp_brain_waves_fft;
+
 /// Command message for WebSocket control
 #[derive(Deserialize, Debug)]
 #[serde(tag = "command")] // Use the "command" field as the tag
@@ -80,72 +83,103 @@ pub struct CommandResponse {
     pub message: String,
 }
 
-/// Creates a binary EEG packet according to the specified format:
-/// [timestamp (8 bytes)] [channel_samples...] for each channel in the data
+#[cfg(feature = "brain_waves_fft_feature")]
+#[derive(Serialize)]
+struct BrainWavesChannelData {
+    power_spectrum: Vec<f32>,
+    frequency_bins: Vec<f32>,
+}
+
+#[cfg(feature = "brain_waves_fft_feature")]
+#[derive(Serialize)]
+struct BrainWavesAppletResponse {
+    timestamp: u64, // From EegBatchData
+    channels_data: Vec<Option<BrainWavesChannelData>>, // Option in case of processing error for a channel
+    error: Option<String>, // Global error for the applet processing
+}
+
+/// Creates a binary EEG packet.
+/// Format: [timestamp_u64_le] [error_flag_u8] [fft_flag_u8] [payload]
+/// error_flag_u8: 0 = no error, 1 = error
+/// fft_flag_u8: 0 = no FFT data, 1 = FFT data included
+/// Payload:
+///   If error_flag = 1: UTF-8 error message
+///   If error_flag = 0, fft_flag = 0: f32_le raw samples for each channel
+///   If error_flag = 0, fft_flag = 1:
+///     num_fft_channels_u8
+///     For each FFT channel:
+///       power_spectrum_len_u32_le
+///       power_spectrum_data_f32_le...
+///       frequency_bins_len_u32_le
+///       frequency_bins_data_f32_le...
+///     Then, f32_le raw samples for each channel (as in fft_flag = 0 case)
 pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
-    // Check if this is an error packet
-    if let Some(error) = &eeg_batch_data.error {
-        // For error packets, we'll use a special format:
-        // - timestamp (8 bytes)
-        // - error flag (1 byte, value 1)
-        // - error message (UTF-8 encoded)
-        let mut buffer = Vec::with_capacity(9 + error.len());
-        
-        // Write timestamp (8 bytes) in little-endian format
-        buffer.extend_from_slice(&eeg_batch_data.timestamp.to_le_bytes());
-        
-        // Write error flag (1 byte)
-        buffer.push(1);
-        
-        // Write error message as UTF-8 bytes
-        buffer.extend_from_slice(error.as_bytes());
-        
+    let mut buffer = Vec::new();
+
+    // Write timestamp (8 bytes)
+    buffer.extend_from_slice(&eeg_batch_data.timestamp.to_le_bytes());
+
+    // Handle error packet
+    if let Some(error_msg) = &eeg_batch_data.error {
+        buffer.push(1); // error_flag = 1
+        buffer.push(0); // fft_flag = 0 (no FFT data in error packets)
+        buffer.extend_from_slice(error_msg.as_bytes());
         return buffer;
     }
+
+    // No error, proceed with data
+    buffer.push(0); // error_flag = 0
+
+    let has_fft_data = eeg_batch_data.power_spectrums.is_some() && eeg_batch_data.frequency_bins.is_some();
     
-    // For normal data packets:
-    // Get timestamp in milliseconds
-    let timestamp = eeg_batch_data.timestamp;
-    
-    // Use the actual number of channels from the data
-    let num_channels = eeg_batch_data.channels.len();
-    
-    // Check if we have any channels with data
-    if num_channels == 0 {
-        // Return just a timestamp with no data
-        let mut buffer = Vec::with_capacity(9);
-        buffer.extend_from_slice(&timestamp.to_le_bytes());
-        buffer.push(0); // Not an error
-        return buffer;
-    }
-    
-    let samples_per_channel = eeg_batch_data.channels[0].len();
-    
-    // Calculate buffer size: 8 bytes for timestamp + 1 byte for error flag + 4 bytes per float per channel
-    let buffer_size = 9 + (num_channels * samples_per_channel * 4);
-    let mut buffer = Vec::with_capacity(buffer_size);
-    
-    // Write timestamp (8 bytes) in little-endian format
-    buffer.extend_from_slice(&timestamp.to_le_bytes());
-    
-    // Write error flag (1 byte, value 0 for no error)
-    buffer.push(0);
-    
-    // Write each channel's samples
-    // Use all available channels from the data
-    for channel_idx in 0..num_channels {
-        let channel_data = if channel_idx < eeg_batch_data.channels.len() {
-            &eeg_batch_data.channels[channel_idx]
-        } else {
-            // If we don't have enough channels, use the last available channel
-            &eeg_batch_data.channels[eeg_batch_data.channels.len() - 1]
-        };
+    if has_fft_data {
+        buffer.push(1); // fft_flag = 1
+
+        let power_spectrums = eeg_batch_data.power_spectrums.as_ref().unwrap();
+        let frequency_bins = eeg_batch_data.frequency_bins.as_ref().unwrap();
         
-        for &sample in channel_data {
-            buffer.extend_from_slice(&sample.to_le_bytes());
+        // Ensure we have the same number of channels for spectrums and bins
+        // and it matches the number of raw data channels if that's a constraint.
+        // For simplicity, assuming they match or the first one dictates.
+        let num_fft_channels = power_spectrums.len().min(frequency_bins.len()) as u8;
+        buffer.push(num_fft_channels);
+
+        for i in 0..num_fft_channels as usize {
+            let spectrum = &power_spectrums[i];
+            let bins = &frequency_bins[i];
+
+            // Write power spectrum length and data
+            buffer.extend_from_slice(&(spectrum.len() as u32).to_le_bytes());
+            for &val in spectrum {
+                buffer.extend_from_slice(&val.to_le_bytes());
+            }
+
+            // Write frequency bins length and data
+            buffer.extend_from_slice(&(bins.len() as u32).to_le_bytes());
+            for &val in bins {
+                buffer.extend_from_slice(&val.to_le_bytes());
+            }
+        }
+    } else {
+        buffer.push(0); // fft_flag = 0
+    }
+
+    // Append raw channel data (always, regardless of FFT flag if no error)
+    let num_raw_channels = eeg_batch_data.channels.len();
+    if num_raw_channels > 0 {
+        // It's implied that if channels is not empty, channels[0] exists.
+        // If channels can be empty but power_spectrums is not, this needs adjustment.
+        // For now, assuming if there's data, there are raw channels.
+        for channel_data in &eeg_batch_data.channels {
+            for &sample in channel_data {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
         }
     }
-    
+    // If num_raw_channels is 0 and no FFT data and no error, the packet will be:
+    // timestamp (8) + error_flag (1, 0) + fft_flag (1, 0) = 10 bytes.
+    // This case should be handled by the client if it's possible.
+
     buffer
 }
 
@@ -328,7 +362,7 @@ pub async fn handle_config_websocket(
                                     
                                     // ADD THIS LOG
                                     println!("[SERVER_DEBUG] About to acquire config lock.");
-                                    let mut config_guard = config.lock().await;
+                                    let config_guard = config.lock().await;
                                     // ADD THIS LOG
                                     println!("[SERVER_DEBUG] Config lock acquired. Current shared PL: {:?}", config_guard.powerline_filter_hz);
                                     let mut updated_config = config_guard.clone();
@@ -669,7 +703,7 @@ pub async fn handle_command_websocket(
                                             message: format!("Invalid powerline filter value: {:?}. Valid: 50, 60, or null (off)", new_powerline_filter_opt)
                                         }
                                     } else {
-                                        let mut config_guard = config.lock().await;
+                                        let config_guard = config.lock().await;
                                         let mut updated_config = config_guard.clone();
                                         let mut config_changed = false;
 
@@ -729,6 +763,97 @@ pub async fn handle_command_websocket(
     println!("Command WebSocket client disconnected");
 }
 
+#[cfg(feature = "brain_waves_fft_feature")]
+async fn handle_brain_waves_fft_websocket(
+    ws: WebSocket,
+    mut rx_eeg: broadcast::Receiver<EegBatchData>,
+    config: Arc<Mutex<AdcConfig>>,
+) {
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    println!("Brain Waves FFT WebSocket client connected");
+
+    loop {
+        tokio::select! {
+            // Handle incoming EEG data to process and send
+            Ok(eeg_batch_data) = rx_eeg.recv() => {
+                let sample_rate = {
+                    let config_guard = config.lock().await;
+                    config_guard.sample_rate as f32
+                };
+
+                let mut channels_fft_data: Vec<Option<BrainWavesChannelData>> = Vec::new();
+                let mut overall_error: Option<String> = None;
+
+                if let Some(err_msg) = &eeg_batch_data.error {
+                    overall_error = Some(err_msg.clone());
+                } else if eeg_batch_data.channels.is_empty() {
+                    overall_error = Some("Received EegBatchData with no channels".to_string());
+                } else {
+                    for channel_data_vec in &eeg_batch_data.channels {
+                        if channel_data_vec.is_empty() {
+                            channels_fft_data.push(None);
+                            println!("Warning: Empty channel data encountered for Brain Waves FFT applet.");
+                            continue;
+                        }
+                        match elata_dsp_brain_waves_fft::process_eeg_data(channel_data_vec, sample_rate) {
+                            Ok((power_spectrum, frequency_bins)) => {
+                                channels_fft_data.push(Some(BrainWavesChannelData {
+                                    power_spectrum,
+                                    frequency_bins,
+                                }));
+                            }
+                            Err(e) => {
+                                println!("Error processing FFT for a channel in Brain Waves applet: {}", e);
+                                channels_fft_data.push(None);
+                            }
+                        }
+                    }
+                }
+
+                let response = BrainWavesAppletResponse {
+                    timestamp: eeg_batch_data.timestamp,
+                    channels_data: channels_fft_data, // Corrected variable name
+                    error: overall_error,
+                };
+
+                if let Ok(response_json) = serde_json::to_string(&response) {
+                    if let Err(e) = ws_tx.send(Message::text(response_json)).await {
+                        println!("Brain Waves FFT WebSocket client disconnected while sending: {}", e);
+                        break; // Exit loop
+                    }
+                } else {
+                    println!("Error serializing Brain Waves FFT response for WebSocket");
+                }
+            },
+            // Handle incoming messages from the client (e.g., close frames)
+            Some(result) = ws_rx.next() => {
+                match result {
+                    Ok(msg) => {
+                        if msg.is_close() {
+                            println!("Brain Waves FFT WebSocket: client sent close frame.");
+                            break; // Exit loop
+                        }
+                        // Optionally handle other message types like ping/pong or text/binary if needed
+                        // For now, we just log them if they are not close frames
+                        println!("Brain Waves FFT WebSocket: received message: {:?}", msg);
+                    }
+                    Err(e) => {
+                        println!("Brain Waves FFT WebSocket: error receiving message: {}", e);
+                        break; // Exit loop on error
+                    }
+                }
+            },
+            else => {
+                // Both rx_eeg and ws_rx streams have closed
+                println!("Brain Waves FFT WebSocket: both streams closed.");
+                break;
+            }
+        }
+    }
+    println!("Brain Waves FFT WebSocket connection handler finished.");
+}
+
 // Set up WebSocket routes and server
 pub fn setup_websocket_routes(
     tx: broadcast::Sender<EegBatchData>, // For EEG data
@@ -739,9 +864,11 @@ pub fn setup_websocket_routes(
 ) -> (impl warp::Filter<Extract = impl warp::Reply> + Clone, mpsc::Receiver<AdcConfig>) {
     // Channel for clients to send proposed config updates TO main.rs
     let (config_update_to_main_tx, config_update_to_main_rx) = mpsc::channel::<AdcConfig>(32);
+    
+    let tx_for_eeg_route = tx.clone();
     let eeg_ws_route = warp::path("eeg")
         .and(warp::ws())
-        .and(warp::any().map(move || tx.subscribe()))
+        .and(warp::any().map(move || tx_for_eeg_route.subscribe()))
         .map(|ws: warp::ws::Ws, rx: broadcast::Receiver<EegBatchData>| {
             ws.on_upgrade(move |socket| handle_websocket(socket, rx))
         });
@@ -777,5 +904,25 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_command_websocket(socket, recorder, is_recording, cfg, cfg_upd_tx))
         });
     
-    (eeg_ws_route.or(config_ws_route).or(command_ws_route), config_update_to_main_rx)
+    let base_routes = eeg_ws_route.or(config_ws_route).or(command_ws_route);
+
+    #[cfg(feature = "brain_waves_fft_feature")]
+    let routes = {
+        let tx_for_fft_route = tx.clone(); // Clone the original tx for the FFT route
+        // config_shared is from the setup_websocket_routes function parameters
+        let brain_waves_fft_ws_route = warp::path("applet")
+            .and(warp::path("brain_waves"))
+            .and(warp::path("data"))
+            .and(warp::ws())
+            .and(warp::any().map(move || tx_for_fft_route.subscribe())) // Use the new clone
+            .and(warp::any().map(move || config.clone()))
+            .map(|ws: warp::ws::Ws, rx_eeg: broadcast::Receiver<EegBatchData>, current_config: Arc<Mutex<AdcConfig>>| {
+                ws.on_upgrade(move |socket| handle_brain_waves_fft_websocket(socket, rx_eeg, current_config))
+            });
+        base_routes.or(brain_waves_fft_ws_route).boxed()
+    };
+    #[cfg(not(feature = "brain_waves_fft_feature"))]
+    let routes = base_routes.boxed();
+
+    (routes, config_update_to_main_rx)
 }

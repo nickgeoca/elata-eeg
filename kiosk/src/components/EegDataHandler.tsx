@@ -17,8 +17,8 @@ import {
     FFT_WINDOW_DURATION_MS, // Import from constants
     FFT_HOP_DURATION_MS     // Import from constants
 } from '../utils/eegConstants';
-import { calculateFft } from '../utils/fftUtils';
-
+// import { calculateFft } from '../utils/fftUtils'; // Removed: FFT calculation is now backend-driven
+ 
 interface EegDataHandlerProps {
   config: any;
   onDataUpdate: (dataReceived: boolean) => void;
@@ -53,8 +53,8 @@ export function useEegDataHandler({
   const isProduction = process.env.NODE_ENV === 'production';
   // No queues or animation frame needed for immediate display
   const sampleBuffersRef = useRef<Float32Array[]>([]); // For raw data display
-  const fftBuffersRef = useRef<number[][]>([]); // Buffers for accumulating FFT window data per channel
-  const samplesSinceLastFftRef = useRef<number[]>([]); // Samples received since last FFT calc per channel
+  // const fftBuffersRef = useRef<number[][]>([]); // Removed: FFT calculation is now backend-driven
+  // const samplesSinceLastFftRef = useRef<number[]>([]); // Removed: FFT calculation is now backend-driven
   
   // createMessageHandler logic is now moved inside connectWebSocket
 
@@ -111,125 +111,110 @@ export function useEegDataHandler({
           return;
         }
         const dataView = new DataView(event.data);
+        let bufferOffset = 0;
 
-        // Timestamp parsing removed - not used in immediate display mode
+        // const timestamp = dataView.getBigUint64(bufferOffset, true); // BigInt, not directly used yet
+        bufferOffset += 8;
 
-        const errorFlag = dataView.getUint8(8); // Error flag at offset 8
+        const errorFlag = dataView.getUint8(bufferOffset);
+        bufferOffset += 1;
+
+        const fftFlag = dataView.getUint8(bufferOffset);
+        bufferOffset += 1;
+
         if (errorFlag === 1) {
-          const errorBytes = new Uint8Array(event.data.slice(9));
+          const errorBytes = new Uint8Array(event.data.slice(bufferOffset));
           const errorMessage = new TextDecoder().decode(errorBytes);
           console.error("EEG driver error:", errorMessage);
           if (typeof onError === 'function') onError(`EEG driver error: ${errorMessage}`);
           return;
         }
 
-        const channelCount = currentConfig?.channels?.length || 0;
-        const sampleRate = currentConfig?.sample_rate || DEFAULT_SAMPLE_RATE;
-        if (channelCount === 0 || sampleRate <= 0) return;
+        const configuredChannelCount = currentConfig?.channels?.length || 0;
+        if (configuredChannelCount === 0) return;
 
-        // Queue logic removed
-        // Data starts at offset 9
-        const samplesPerChannel = Math.floor((event.data.byteLength - 9) / 4 / channelCount);
-        if (samplesPerChannel <= 0) {
-            if (!isProduction) console.warn("Received packet with no samples.");
-            return;
+        // --- FFT Data Parsing ---
+        if (fftFlag === 1) {
+          const numFftChannels = dataView.getUint8(bufferOffset);
+          bufferOffset += 1;
+
+          for (let i = 0; i < numFftChannels; i++) {
+            // Power Spectrum
+            const powerSpectrumLen = dataView.getUint32(bufferOffset, true);
+            bufferOffset += 4;
+            const powerSpectrum = new Float32Array(powerSpectrumLen);
+            for (let j = 0; j < powerSpectrumLen; j++) {
+              powerSpectrum[j] = dataView.getFloat32(bufferOffset, true);
+              bufferOffset += 4;
+            }
+
+            // Frequency Bins
+            const freqBinsLen = dataView.getUint32(bufferOffset, true);
+            bufferOffset += 4;
+            const freqBins = new Float32Array(freqBinsLen); // Though onFftData expects number[] for power
+            for (let j = 0; j < freqBinsLen; j++) {
+              freqBins[j] = dataView.getFloat32(bufferOffset, true);
+              bufferOffset += 4;
+            }
+            // Assuming onFftData is primarily interested in the power spectrum for now.
+            // The `fftOutput` in `onFftData` was originally just the power.
+            // If `freqBins` are also needed by the renderer, `onFftData` signature and FftRenderer might need updates.
+            if (onFftData) {
+              onFftData(i, Array.from(powerSpectrum)); // Pass channel index and power spectrum
+            }
+          }
         }
+        // --- End FFT Data Parsing ---
 
-        let bufferOffset = 9; // Start reading samples after timestamp (8) and error flag (1)
+        // --- Raw EEG Sample Parsing ---
+        // Calculate remaining bytes for raw samples
+        const remainingBytes = event.data.byteLength - bufferOffset;
+        // Each sample is 4 bytes (float32). configuredChannelCount is from the UI/config.
+        const samplesPerChannel = Math.floor(remainingBytes / 4 / configuredChannelCount);
+
+        if (samplesPerChannel <= 0 && fftFlag === 0) { // Only warn if no FFT and no raw samples
+            if (!isProduction) console.warn("Received packet with no raw EEG samples.");
+            // Do not return if there was FFT data, as that might be the primary content.
+            if (fftFlag === 0) return;
+        }
         
-        // Ensure sampleBuffersRef has enough slots, primarily for when channelCount increases
-        if (sampleBuffersRef.current.length < channelCount) {
-          sampleBuffersRef.current = Array(channelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
+        if (sampleBuffersRef.current.length < configuredChannelCount) {
+          sampleBuffersRef.current = Array(configuredChannelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
         }
 
-
-        for (let ch = 0; ch < channelCount; ch++) {
+        for (let ch = 0; ch < configuredChannelCount; ch++) {
           let currentSampleBuffer = sampleBuffersRef.current[ch];
 
-          // Check if buffer needs to be created or resized
           if (!currentSampleBuffer || currentSampleBuffer.length !== samplesPerChannel) {
-            if (!isProduction && currentSampleBuffer) {
-              console.log(`[EegDataHandler] Ch ${ch} resizing sample buffer from ${currentSampleBuffer.length} to ${samplesPerChannel}`);
-            } else if (!isProduction && !currentSampleBuffer) {
-              console.log(`[EegDataHandler] Ch ${ch} creating sample buffer with size ${samplesPerChannel}`);
-            }
-            currentSampleBuffer = new Float32Array(samplesPerChannel);
+            currentSampleBuffer = new Float32Array(samplesPerChannel > 0 ? samplesPerChannel : 0);
             sampleBuffersRef.current[ch] = currentSampleBuffer;
           }
-
-          for (let i = 0; i < samplesPerChannel; i++) {
-            const sampleBufferOffset = bufferOffset + i * 4;
-            if (sampleBufferOffset + 4 <= event.data.byteLength) {
-              const rawValue = dataView.getFloat32(sampleBufferOffset, true);
-              currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
-            } else {
-              currentSampleBuffer[i] = 0; // Handle potential buffer overrun
-              if (!isProduction) console.warn(`Buffer overrun detected at sample ${i}, channel ${ch}`);
+          
+          if (samplesPerChannel > 0) {
+            for (let i = 0; i < samplesPerChannel; i++) {
+              const sampleBufferOffset = bufferOffset + i * 4;
+              if (sampleBufferOffset + 4 <= event.data.byteLength) {
+                const rawValue = dataView.getFloat32(sampleBufferOffset, true);
+                currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
+              } else {
+                currentSampleBuffer[i] = 0;
+                if (!isProduction) console.warn(`Buffer overrun for raw samples at sample ${i}, channel ${ch}`);
+              }
             }
+            bufferOffset += samplesPerChannel * 4;
           }
-          bufferOffset += samplesPerChannel * 4; // Move offset for the next channel
 
-          // Update per-channel timestamp
+
           if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
               lastDataChunkTimeRef.current[ch] = performance.now();
           }
-          // Feed data directly into WebGL line
-          if (linesRef.current && linesRef.current[ch]) {
-            // Log the first few samples to check if they are non-zero
-            if (!isProduction && currentSampleBuffer.length > 0) {
-                // console.log(`[EegDataHandler] Ch ${ch} samples (first 5):`, currentSampleBuffer.slice(0, 5)); // Reduce noise
-            }
-            linesRef.current[ch].shiftAdd(currentSampleBuffer); // Add the whole batch
-          } else if (!isProduction) {
-            // console.warn(`linesRef missing or channel ${ch} not initialized`); // Reduce noise
+
+          if (linesRef.current && linesRef.current[ch] && samplesPerChannel > 0) {
+            linesRef.current[ch].shiftAdd(currentSampleBuffer);
           }
-
-          // --- FFT Processing ---
-          if (onFftData) {
-            if (!fftBuffersRef.current[ch]) {
-              fftBuffersRef.current[ch] = [];
-            }
-            if (samplesSinceLastFftRef.current[ch] === undefined) {
-              samplesSinceLastFftRef.current[ch] = 0;
-            }
-
-            // Append new samples to the FFT buffer for this channel
-            // Convert Float32Array to number[] before concatenating
-            // Convert Float32Array to number[] and scale from V to µV
-            const newSamplesArray = Array.from(currentSampleBuffer, v => v * 1e6); // Convert V to µV
-            fftBuffersRef.current[ch].push(...newSamplesArray);
-            samplesSinceLastFftRef.current[ch] += samplesPerChannel;
-
-            const fftWindowSamples = (FFT_WINDOW_DURATION_MS / 1000) * sampleRate;
-            const fftHopSamples = (FFT_HOP_DURATION_MS / 1000) * sampleRate;
-
-            // Check if enough new samples have arrived for an FFT calculation
-            // and if the buffer has enough total samples for a full window
-            while (samplesSinceLastFftRef.current[ch] >= fftHopSamples && fftBuffersRef.current[ch].length >= fftWindowSamples) {
-              // Extract the latest window of data for FFT
-              const currentFftWindowData = fftBuffersRef.current[ch].slice(-fftWindowSamples);
-              
-              if (currentFftWindowData.length === fftWindowSamples) {
-                const fftResult = calculateFft(currentFftWindowData, sampleRate);
-                onFftData(ch, fftResult);
-              } else if (!isProduction) {
-                console.warn(`[EegDataHandler FFT] Ch ${ch} - Not enough data for FFT window after slice. Expected ${fftWindowSamples}, got ${currentFftWindowData.length}. Buffer length: ${fftBuffersRef.current[ch].length}`);
-              }
-              
-              // Decrement samplesSinceLastFftRef by one hop size
-              samplesSinceLastFftRef.current[ch] -= fftHopSamples;
-            }
-
-            // Trim the FFT buffer to prevent it from growing indefinitely
-            // Keep a bit more than one window to ensure data for the next hop is likely there
-            const desiredFftBufferSize = fftWindowSamples + fftHopSamples; // Keep enough for one full window and the next hop
-            if (fftBuffersRef.current[ch].length > desiredFftBufferSize) {
-              fftBuffersRef.current[ch] = fftBuffersRef.current[ch].slice(-desiredFftBufferSize);
-            }
-          }
-          // --- End FFT Processing ---
         }
-        // Update the single latest timestamp ref after processing all channels for this packet
+        // --- End Raw EEG Sample Parsing ---
+        
         if (latestTimestampRef) {
             latestTimestampRef.current = performance.now();
         }
@@ -238,7 +223,7 @@ export function useEegDataHandler({
         if (debugInfoRef) {
           debugInfoRef.current.packetsReceived++;
           debugInfoRef.current.lastPacketTime = performance.now();
-          debugInfoRef.current.samplesProcessed += samplesPerChannel * channelCount;
+          debugInfoRef.current.samplesProcessed += samplesPerChannel * configuredChannelCount;
         }
 
         if (typeof onDataUpdate === 'function') {
@@ -320,15 +305,15 @@ export function useEegDataHandler({
     const numChannels = currentConfig?.channels?.length || 0;
     const sampleRate = currentConfig?.sample_rate || DEFAULT_SAMPLE_RATE;
 
-    // Initialize/Reset FFT buffers when config changes (e.g., channel count)
-    if (numChannels > 0) {
-      fftBuffersRef.current = Array(numChannels).fill(null).map(() => []);
-      samplesSinceLastFftRef.current = Array(numChannels).fill(0);
-    } else {
-      fftBuffersRef.current = [];
-      samplesSinceLastFftRef.current = [];
-    }
-
+    // Initialize/Reset FFT buffers when config changes (e.g., channel count) - REMOVED
+    // if (numChannels > 0) {
+    //   fftBuffersRef.current = Array(numChannels).fill(null).map(() => []);
+    //   samplesSinceLastFftRef.current = Array(numChannels).fill(0);
+    // } else {
+    //   fftBuffersRef.current = [];
+    //   samplesSinceLastFftRef.current = [];
+    // }
+ 
     // --- Connect WebSocket ---
     if (currentConfig) {
       connectWebSocket(currentConfig);
