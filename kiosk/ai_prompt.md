@@ -1,3 +1,5 @@
+this is an architecture doc for the ai to understand the context of this directory rapidly
+
 # Kiosk Application Architecture
 
 ## 1. Introduction

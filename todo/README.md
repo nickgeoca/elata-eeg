@@ -7,7 +7,7 @@
 
 # TODO Docs
 - security.md... security hardening
-- dsp.md... more flexible dsp
+- applets.md... way to add applets new dsp to code
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
 
 ### TODO MVP
