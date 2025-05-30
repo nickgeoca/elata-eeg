@@ -4,7 +4,6 @@ import { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 // @ts-ignore: WebglLine might be missing from types or setY might be, but setY exists at runtime
 import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
 import { getChannelColor } from '../../../kiosk/src/utils/colorUtils';
-import { getFrequencyBins } from '../../../kiosk/src/utils/fftUtils'; // To get X-axis values
 import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../kiosk/src/utils/eegConstants'; // Import constants
 
 const DATA_Y_MAX = 4000.0; // Expected maximum for FFT power data (µV²/Hz)
@@ -31,17 +30,25 @@ interface LabelInfo {
 }
 
 interface FftRendererProps {
-  fftDataRef: React.MutableRefObject<Record<number, number[]>>;
-  fftDataVersion: number; // To trigger updates
   config: any; // EEG configuration (for sample_rate, channels)
   containerWidth: number;
   containerHeight: number;
   targetFps?: number; // Optional, for controlling update rate
 }
 
+// Interface for DSP WebSocket response
+interface ChannelFftResult {
+  power: number[];
+  frequencies: number[];
+}
+
+interface BrainWavesAppletResponse {
+  timestamp: number;
+  fft_results: ChannelFftResult[];
+  error?: string;
+}
+
 export function AppletFftRenderer({ // Renamed from FftRenderer
-  fftDataRef,
-  fftDataVersion,
   config,
   containerWidth,
   containerHeight,
@@ -54,14 +61,79 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
   const gridLinesRef = useRef<WebglLine[]>([]); // Holds WebglLine objects for the grid
   const animationFrameIdRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
-  const xFreqRef = useRef<number[][]>([]); // Store X-axis frequency values for each line
-  const previousXCoordsLengthRef = useRef<number | null>(null); // Store previous xCoords.length
+  const wsRef = useRef<WebSocket | null>(null);
+  const [fftData, setFftData] = useState<ChannelFftResult[]>([]);
+  const [wsError, setWsError] = useState<string | null>(null);
 
   const [axisLabels, setAxisLabels] = useState<{ x: LabelInfo[], y: LabelInfo[] }>({ x: [], y: [] });
 
   const plotWidth = useMemo(() => Math.max(0, containerWidth - MARGIN_LEFT - MARGIN_RIGHT), [containerWidth]);
   const plotHeight = useMemo(() => Math.max(0, containerHeight - MARGIN_TOP - MARGIN_BOTTOM), [containerHeight]);
 
+  // WebSocket connection effect
+  useEffect(() => {
+    if (!config || !config.channels || config.channels.length === 0) {
+      return;
+    }
+
+    const connectWebSocket = () => {
+      try {
+        // Connect to DSP WebSocket endpoint
+        const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+        const ws = new WebSocket(`ws://${wsHost}:8081/applet/brain_waves/data`);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          console.log('[AppletFftRenderer] Connected to DSP WebSocket');
+          setWsError(null);
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const response: BrainWavesAppletResponse = JSON.parse(event.data);
+            
+            if (response.error) {
+              console.error('[AppletFftRenderer] DSP error:', response.error);
+              setWsError(response.error);
+              return;
+            }
+
+            if (response.fft_results && response.fft_results.length > 0) {
+              setFftData(response.fft_results);
+              setWsError(null);
+            }
+          } catch (error) {
+            console.error('[AppletFftRenderer] Error parsing WebSocket message:', error);
+            setWsError('Failed to parse FFT data');
+          }
+        };
+
+        ws.onerror = (error) => {
+          console.error('[AppletFftRenderer] WebSocket error:', error);
+          setWsError('WebSocket connection error');
+        };
+
+        ws.onclose = () => {
+          console.log('[AppletFftRenderer] WebSocket connection closed');
+          wsRef.current = null;
+          // Attempt to reconnect after 2 seconds
+          setTimeout(connectWebSocket, 2000);
+        };
+      } catch (error) {
+        console.error('[AppletFftRenderer] Failed to create WebSocket:', error);
+        setWsError('Failed to connect to DSP service');
+      }
+    };
+
+    connectWebSocket();
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [config]);
 
   // Initialize WebGL context and plot instance
   useLayoutEffect(() => {
@@ -73,7 +145,6 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
           transparent: false, // Keep canvas opaque for performance
           powerPerformance: "high-performance", // Corrected property name
         });
-        // wglpRef.current.setBackgroundColor(CANVAS_BG_COLOR.r, CANVAS_BG_COLOR.g, CANVAS_BG_COLOR.b, CANVAS_BG_COLOR.a); // Removed, not a valid method
         console.log('[AppletFftRenderer] WebGLPlot instance created.');
       }
       internalCanvasRef.current.width = containerWidth; // Full container size for canvas
@@ -82,7 +153,6 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       wglpRef.current.viewport(MARGIN_LEFT, MARGIN_BOTTOM, plotWidth, plotHeight);
     }
   }, [containerWidth, containerHeight, plotWidth, plotHeight]);
-
 
   // Effect to create/update grid lines and labels
   useLayoutEffect(() => {
@@ -127,13 +197,6 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       yLogExponentTicks.push(i);
     }
 
-    if (!yLogExponentTicks.includes(LOG_Y_MIN_DISPLAY) && LOG_Y_MIN_DISPLAY > Math.floor(LOG_Y_MIN_DISPLAY)) {
-        // yLogExponentTicks.unshift(LOG_Y_MIN_DISPLAY); // Add at the beginning if not integer
-    }
-    if (!yLogExponentTicks.includes(LOG_Y_MAX_DISPLAY) && LOG_Y_MAX_DISPLAY < Math.ceil(LOG_Y_MAX_DISPLAY)) {
-        // yLogExponentTicks.push(LOG_Y_MAX_DISPLAY); // Add at the end if not integer
-    }
-
     yLogExponentTicks.forEach(logExponent => {
       const normalizedY = (logExponent - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) * 2 - 1;
 
@@ -153,8 +216,7 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
 
   }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ]);
 
-
-  // Effect to create/update FFT lines
+  // Effect to create/update FFT lines based on WebSocket data
   useEffect(() => {
     setFftLinesReady(false); 
 
@@ -162,106 +224,63 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       if (linesRef.current.length > 0) {
         linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
         linesRef.current = [];
-        xFreqRef.current = [];
-        previousXCoordsLengthRef.current = null;
       }
       return;
     }
 
     const numChannels = config.channels.length;
-    const sampleRate = config.sample_rate;
 
-    if (numChannels === 0) {
+    if (numChannels === 0 || fftData.length === 0) {
       if (linesRef.current.length > 0) {
         linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
         linesRef.current = [];
-        xFreqRef.current = [];
-        previousXCoordsLengthRef.current = null;
       }
       return;
     }
 
-    let numFftBins = 0;
-    if (fftDataRef.current && typeof fftDataRef.current === 'object' && Object.keys(fftDataRef.current).length > 0) {
-        const channelDataArrays = Object.values(fftDataRef.current);
-        for (const dataArray of channelDataArrays) {
-            if (dataArray && typeof dataArray.length === 'number' && dataArray.length > 0) {
-                numFftBins = dataArray.length;
-                break; 
-            }
-        }
-    }
-    
-    if (numFftBins === 0) { 
-        console.warn('[AppletFftRenderer] numFftBins is 0. Lines will be created/updated once FFT data arrives.');
-        if (linesRef.current.length > 0) {
-            linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
-            linesRef.current = [];
-            xFreqRef.current = [];
-            previousXCoordsLengthRef.current = null;
-        }
-        return;
-    }
-
-    const allFreqs = getFrequencyBins(numFftBins, sampleRate);
+    // Use the first channel's frequency data to determine the relevant frequency range
+    const firstChannelFreqs = fftData[0]?.frequencies || [];
     const relevantFreqIndices: number[] = [];
     const xCoords: number[] = [];
 
-    allFreqs.forEach((freq, index) => {
-        if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
-            relevantFreqIndices.push(index);
-            const normalizedX = 2 * (freq - FFT_MIN_FREQ_HZ) / (FFT_MAX_FREQ_HZ - FFT_MIN_FREQ_HZ) - 1;
-            xCoords.push(normalizedX);
-        }
+    firstChannelFreqs.forEach((freq, index) => {
+      if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
+        relevantFreqIndices.push(index);
+        const normalizedX = 2 * (freq - FFT_MIN_FREQ_HZ) / (FFT_MAX_FREQ_HZ - FFT_MIN_FREQ_HZ) - 1;
+        xCoords.push(normalizedX);
+      }
     });
 
     if (xCoords.length === 0) {
-        console.warn(`[AppletFftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
-        if (linesRef.current.length > 0) {
-            linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
-            linesRef.current = [];
-            xFreqRef.current = [];
-            previousXCoordsLengthRef.current = null;
-        }
-        return;
+      console.warn(`[AppletFftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
+      if (linesRef.current.length > 0) {
+        linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+        linesRef.current = [];
+      }
+      return;
     }
 
-    if (previousXCoordsLengthRef.current !== null && previousXCoordsLengthRef.current !== xCoords.length) {
-      console.log(`[AppletFftRenderer] xCoords.length changed from ${previousXCoordsLengthRef.current} to ${xCoords.length}. Recreating all lines.`);
-      linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
-      linesRef.current = [];
-    }
-    previousXCoordsLengthRef.current = xCoords.length; 
+    // Clear existing lines
+    linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+    linesRef.current = [];
 
     const newLines: WebglLine[] = [];
-    const newXFreqs: number[][] = [];
 
     for (let i = 0; i < numChannels; i++) {
       const colorTuple = getChannelColor(i);
       const color = new ColorRGBA(colorTuple[0], colorTuple[1], colorTuple[2], 1);
       
-      let line = linesRef.current[i]; 
-
-      if (!(line instanceof WebglLine) || line.numPoints !== xCoords.length) {
-        if (line instanceof WebglLine && wglpRef.current) {
-          wglpRef.current.removeLine(line); 
-        }
-        line = new WebglLine(color, xCoords.length);
-      } else {
-        line.color = color;
-      }
-      
+      const line = new WebglLine(color, xCoords.length);
       line.lineWidth = 1.5;
       
       if (line.xy) {
         for (let j = 0; j < xCoords.length; j++) {
           if ((j * 2 + 1) < line.xy.length) { 
             line.xy[j * 2] = xCoords[j];         
-            line.xy[j * 2 + 1] = -0.5;           
+            line.xy[j * 2 + 1] = -0.5; // Default Y position          
           }
         }
       }
-      newXFreqs[i] = relevantFreqIndices; 
 
       line.scaleY = 2.0;
       line.offsetY = 0;
@@ -272,23 +291,14 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       }
     }
 
-    if (linesRef.current.length > newLines.length && previousXCoordsLengthRef.current === xCoords.length) {
-        linesRef.current.forEach(oldLine => {
-            if (!newLines.includes(oldLine) && wglpRef.current) {
-                 wglpRef.current.removeLine(oldLine);
-            }
-        });
-    }
-
     linesRef.current = newLines;
-    xFreqRef.current = newXFreqs;
     setFftLinesReady(true); 
 
-  }, [config, containerWidth, containerHeight, fftDataVersion, fftDataRef]); // Added fftDataRef
+  }, [config, containerWidth, containerHeight, fftData]);
 
-  // Animation loop to update FFT lines
+  // Animation loop to update FFT lines with WebSocket data
   useEffect(() => {
-    if (!wglpRef.current || !fftLinesReady || linesRef.current.length === 0 || xFreqRef.current.length === 0) {
+    if (!wglpRef.current || !fftLinesReady || linesRef.current.length === 0 || fftData.length === 0) {
       if (animationFrameIdRef.current) {
         cancelAnimationFrame(animationFrameIdRef.current);
         animationFrameIdRef.current = null;
@@ -307,20 +317,30 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       lastUpdateTimeRef.current = timestamp;
 
       const activeChannels = config?.channels?.length || 0;
-      const currentFftDataAllBins = fftDataRef.current;
 
-      for (let i = 0; i < activeChannels; i++) {
+      for (let i = 0; i < activeChannels && i < fftData.length; i++) {
         const line = linesRef.current[i];
-        const relevantIndices = xFreqRef.current[i]; 
-        const channelFullFft = currentFftDataAllBins[i];
+        const channelFftResult = fftData[i];
 
-        if (line && relevantIndices && channelFullFft) {
+        if (line && channelFftResult && channelFftResult.power && channelFftResult.frequencies) {
+          const frequencies = channelFftResult.frequencies;
+          const powerData = channelFftResult.power;
+
+          // Find relevant frequency indices for this channel
+          const relevantIndices: number[] = [];
+          frequencies.forEach((freq, index) => {
+            if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
+              relevantIndices.push(index);
+            }
+          });
+
           if (line.numPoints !== relevantIndices.length) {
             continue; 
           }
+
           for (let j = 0; j < relevantIndices.length; j++) {
             const fftBinIndex = relevantIndices[j];
-            let currentMagnitude = channelFullFft[fftBinIndex];
+            let currentMagnitude = powerData[fftBinIndex] || 0;
 
             if (!isFinite(currentMagnitude)) {
               currentMagnitude = 0;
@@ -345,6 +365,7 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
             }
           }
         } else if (line) {
+          // No data available, set to baseline
           if (line.xy) {
             for (let j = 0; j < line.numPoints; j++) {
                 if ((j * 2 + 1) < line.xy.length) {
@@ -365,7 +386,7 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
         animationFrameIdRef.current = null;
       }
     };
-  }, [fftLinesReady, fftDataVersion, config, fftDataRef, targetFps, plotWidth, plotHeight]); 
+  }, [fftLinesReady, fftData, config, targetFps, plotWidth, plotHeight]); 
 
   return (
     <div style={{ width: containerWidth, height: containerHeight, position: 'relative', backgroundColor: `rgba(${CANVAS_BG_COLOR.r*255}, ${CANVAS_BG_COLOR.g*255}, ${CANVAS_BG_COLOR.b*255}, ${CANVAS_BG_COLOR.a})` }}>
@@ -377,6 +398,23 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
           display: 'block',
         }}
       />
+      {/* Error display */}
+      {wsError && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 10,
+            left: 10,
+            color: '#ff6b6b',
+            fontSize: '12px',
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            padding: '5px 10px',
+            borderRadius: '3px',
+          }}
+        >
+          DSP Error: {wsError}
+        </div>
+      )}
       {/* X-Axis Labels */}
       {axisLabels.x.map((label, index) => (
         <div

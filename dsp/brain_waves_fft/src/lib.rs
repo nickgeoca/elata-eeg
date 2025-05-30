@@ -157,9 +157,10 @@ pub fn process_eeg_data(data: &[f32], sample_rate: f32) -> Result<(Vec<f32>, Vec
 ///
 /// A warp filter that can be combined with other routes
 pub fn setup_fft_websocket_endpoint(
-    _config: &DspSharedConfig,
+    _config: &DspSharedConfig, // Remains for now, though unused
     eeg_data_tx: broadcast::Sender<EegBatchData>,
-    adc_config_tx: broadcast::Sender<AdcConfig>,
+    adc_config_tx: broadcast::Sender<AdcConfig>, // For subscribing to updates
+    shared_adc_config_arc: Arc<tokio::sync::Mutex<AdcConfig>>, // For getting initial state
 ) -> warp::filters::BoxedFilter<(impl warp::Reply,)> {
     warp::path("applet")
         .and(warp::path("brain_waves"))
@@ -167,8 +168,9 @@ pub fn setup_fft_websocket_endpoint(
         .and(warp::ws())
         .and(warp::any().map(move || eeg_data_tx.subscribe()))
         .and(warp::any().map(move || adc_config_tx.subscribe()))
-        .map(|ws: warp::ws::Ws, eeg_rx: broadcast::Receiver<EegBatchData>, config_rx: broadcast::Receiver<AdcConfig>| {
-            ws.on_upgrade(move |socket| handle_brain_waves_fft_websocket(socket, eeg_rx, config_rx))
+        .and(warp::any().map(move || shared_adc_config_arc.clone())) // Pass the Arc
+        .map(|ws: warp::ws::Ws, eeg_rx: broadcast::Receiver<EegBatchData>, config_rx: broadcast::Receiver<AdcConfig>, initial_config_arc_cloned: Arc<tokio::sync::Mutex<AdcConfig>>| {
+            ws.on_upgrade(move |socket| handle_brain_waves_fft_websocket(socket, eeg_rx, config_rx, initial_config_arc_cloned))
         })
         .boxed()
 }
@@ -177,10 +179,13 @@ pub fn setup_fft_websocket_endpoint(
 async fn handle_brain_waves_fft_websocket(
     ws: WebSocket,
     mut rx_eeg: broadcast::Receiver<EegBatchData>,
-    mut rx_config: broadcast::Receiver<AdcConfig>,
+    mut rx_config: broadcast::Receiver<AdcConfig>, // For updates
+    shared_adc_config_arc: Arc<tokio::sync::Mutex<AdcConfig>>, // For initial state
 ) {
+    println!("[BW_FFT_HANDLER_TRACE] Entered handle_brain_waves_fft_websocket");
     let (mut ws_tx, mut ws_rx) = ws.split();
-    println!("Brain Waves FFT WebSocket client connected");
+    println!("[BW_FFT_HANDLER_TRACE] WebSocket split into sender and receiver.");
+    println!("Brain Waves FFT WebSocket client connected"); // Existing log
 
     const FFT_WINDOW_DURATION_SECONDS: f32 = 1.0; // Process 1 second of data for FFT
     const FFT_WINDOW_SLIDE_SECONDS: f32 = 0.5; // Slide window by 0.5 seconds (50% overlap if duration is 1s)
@@ -200,6 +205,7 @@ async fn handle_brain_waves_fft_websocket(
         fft_slide_samples: &mut usize,
         config: &AdcConfig
     | {
+        println!("[BW_FFT_HANDLER_TRACE] reinitialize called.");
         *num_channels = config.channels.len();
         *sample_rate_f32 = config.sample_rate as f32;
         *channel_buffers = vec![Vec::new(); *num_channels];
@@ -216,22 +222,53 @@ async fn handle_brain_waves_fft_websocket(
         );
     };
 
-    // Try to get initial config - if this fails, we'll wait for the first config update
-    if let Ok(initial_config) = rx_config.try_recv() {
-        reinitialize(&mut num_channels, &mut sample_rate_f32, &mut channel_buffers, &mut fft_window_samples, &mut fft_slide_samples, &initial_config);
+    // Get initial config directly from the shared Arc<Mutex<AdcConfig>>
+    println!("[BW_FFT_HANDLER_TRACE] Attempting to get initial config from shared Arc<Mutex<AdcConfig>>.");
+    let initial_config_from_arc = {
+        let guard = shared_adc_config_arc.lock().await;
+        guard.clone()
+    };
+    println!("[BW_FFT_HANDLER_TRACE] Cloned initial config from Arc: {:?}", initial_config_from_arc);
+    reinitialize(&mut num_channels, &mut sample_rate_f32, &mut channel_buffers, &mut fft_window_samples, &mut fft_slide_samples, &initial_config_from_arc);
+
+    // The following try_recv() is now less critical for initial setup,
+    // but we can keep it to see if any broadcast happened *just* after subscription and before this.
+    // It's unlikely to succeed if the Arc method worked.
+    match rx_config.try_recv() {
+        Ok(initial_config_broadcast) => {
+            println!("[BW_FFT_HANDLER_TRACE] Initial config also received via try_recv() (unexpected but handled): {:?}", initial_config_broadcast);
+            // Optionally, re-reinitialize or just log if it differs, though Arc should be canonical.
+            // For now, just log. If it's different, it implies a race condition or very fast update.
+            if initial_config_broadcast != initial_config_from_arc {
+                println!("[BW_FFT_HANDLER_TRACE] WARNING: Config from try_recv() differs from Arc config. Arc: {:?}, Broadcast: {:?}", initial_config_from_arc, initial_config_broadcast);
+            }
+        }
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+            println!("[BW_FFT_HANDLER_TRACE] rx_config.try_recv() found channel empty (expected after Arc init).");
+        }
+        Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+            println!("[BW_FFT_HANDLER_TRACE] rx_config.try_recv() found channel closed.");
+        }
+        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+            println!("[BW_FFT_HANDLER_TRACE] rx_config.try_recv() found channel lagged by {}.", n);
+        }
     }
 
-    if num_channels == 0 {
-        println!("Brain Waves FFT: Warning - No initial config available, waiting for config update");
+
+    if num_channels == 0 { // This check should ideally not be true if Arc init worked
+        println!("Brain Waves FFT: Warning - num_channels is 0 after Arc init, check config. Waiting for broadcast update.");
     }
 
+    println!("[BW_FFT_HANDLER_TRACE] Entering main select loop.");
     loop {
         tokio::select! {
             // Handle EEG data
             Ok(eeg_batch_data) = rx_eeg.recv() => {
+                println!("[BW_FFT_HANDLER_TRACE] Received EegBatchData.");
                 // Check for errors in the EEG data
                 if let Some(err_msg) = &eeg_batch_data.error {
-                    println!("Brain Waves FFT: Received error in EegBatchData: {}", err_msg);
+                    println!("[BW_FFT_HANDLER_TRACE] EegBatchData contains error: {}", err_msg);
+                    println!("Brain Waves FFT: Received error in EegBatchData: {}", err_msg); // Existing log
                     let response = BrainWavesAppletResponse {
                         timestamp: eeg_batch_data.timestamp,
                         fft_results: Vec::new(),
@@ -239,7 +276,8 @@ async fn handle_brain_waves_fft_websocket(
                     };
                     if let Ok(json_response) = serde_json::to_string(&response) {
                         if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending error.");
+                            println!("[BW_FFT_HANDLER_TRACE] WebSocket send error failed, breaking loop.");
+                            println!("Brain Waves FFT: WebSocket client disconnected while sending error."); // Existing log
                             break;
                         }
                     }
@@ -248,19 +286,21 @@ async fn handle_brain_waves_fft_websocket(
 
                 // Check if we have valid configuration
                 if num_channels == 0 {
-                    println!("Brain Waves FFT: No configuration available, skipping data processing");
+                    println!("[BW_FFT_HANDLER_TRACE] No configuration (num_channels == 0), skipping data processing.");
+                    println!("Brain Waves FFT: No configuration available, skipping data processing"); // Existing log
                     continue;
                 }
 
                 // Check for channel count mismatch
                 if eeg_batch_data.channels.len() != num_channels {
+                    println!("[BW_FFT_HANDLER_TRACE] Channel count mismatch. Expected {}, got {}. Skipping.", num_channels, eeg_batch_data.channels.len());
                     println!(
-                        "Brain Waves FFT: Channel count mismatch. Expected {}, got {}. Skipping this batch.",
+                        "Brain Waves FFT: Channel count mismatch. Expected {}, got {}. Skipping this batch.", // Existing log
                         num_channels, eeg_batch_data.channels.len()
                     );
                     continue;
                 }
-
+                println!("[BW_FFT_HANDLER_TRACE] Adding data to channel buffers. Batch channel count: {}", eeg_batch_data.channels.len());
                 // Add data to channel buffers
                 for (i, data_vec) in eeg_batch_data.channels.iter().enumerate() {
                     if i < num_channels {
@@ -275,14 +315,16 @@ async fn handle_brain_waves_fft_websocket(
                 for i in 0..num_channels {
                     if channel_buffers[i].len() >= fft_window_samples {
                         let window_data: Vec<f32> = channel_buffers[i][..fft_window_samples].to_vec();
-                        
+                        println!("[BW_FFT_HANDLER_TRACE] Processing FFT for channel {} with {} samples.", i, window_data.len());
                         // Perform FFT
                         match process_eeg_data(&window_data, sample_rate_f32) {
                             Ok((power, frequencies)) => {
+                                println!("[BW_FFT_HANDLER_TRACE] FFT success for channel {}. Power len: {}, Freq len: {}", i, power.len(), frequencies.len());
                                 all_channel_fft_results.push(ChannelFftResult { power, frequencies });
                             }
                             Err(e) => {
-                                println!("Brain Waves FFT: Error processing channel {}: {}", i, e);
+                                println!("[BW_FFT_HANDLER_TRACE] FFT error for channel {}: {}", i, e);
+                                println!("Brain Waves FFT: Error processing channel {}: {}", i, e); // Existing log
                                 processing_error = Some(format!("FFT processing error on channel {}: {}", i, e));
                                 // Add an empty result to maintain channel order if one fails
                                 all_channel_fft_results.push(ChannelFftResult { power: Vec::new(), frequencies: Vec::new()});
@@ -301,6 +343,7 @@ async fn handle_brain_waves_fft_websocket(
 
                 // Send response if we have any results or errors
                 if !all_channel_fft_results.iter().all(|res| res.power.is_empty()) || processing_error.is_some() {
+                    println!("[BW_FFT_HANDLER_TRACE] Preparing to send FFT results. Has error: {}", processing_error.is_some());
                     let response = BrainWavesAppletResponse {
                         timestamp: eeg_batch_data.timestamp,
                         fft_results: all_channel_fft_results,
@@ -308,45 +351,82 @@ async fn handle_brain_waves_fft_websocket(
                     };
 
                     if let Ok(json_response) = serde_json::to_string(&response) {
+                        println!("[BW_FFT_HANDLER_TRACE] Sending JSON response ({} bytes).", json_response.len());
                         if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending FFT results.");
+                            println!("[BW_FFT_HANDLER_TRACE] WebSocket send FFT results failed, breaking loop.");
+                            println!("Brain Waves FFT: WebSocket client disconnected while sending FFT results."); // Existing log
                             break;
                         }
+                    } else {
+                        println!("[BW_FFT_HANDLER_TRACE] Failed to serialize FFT response to JSON.");
                     }
+                } else {
+                    println!("[BW_FFT_HANDLER_TRACE] No FFT results to send and no processing error.");
                 }
             },
 
             // Handle configuration updates
-            Ok(new_config) = rx_config.recv() => {
-                println!("Brain Waves FFT: Received config update - reinitializing");
-                reinitialize(&mut num_channels, &mut sample_rate_f32, &mut channel_buffers, &mut fft_window_samples, &mut fft_slide_samples, &new_config);
+            config_result = rx_config.recv() => {
+                match config_result {
+                    Ok(new_config) => {
+                        println!("[BW_FFT_HANDLER_TRACE] Successfully received new AdcConfig: {:?}", new_config);
+                        println!("Brain Waves FFT: Received config update - reinitializing"); // Existing log
+                        reinitialize(&mut num_channels, &mut sample_rate_f32, &mut channel_buffers, &mut fft_window_samples, &mut fft_slide_samples, &new_config);
+                    }
+                    Err(e) => {
+                        println!("[BW_FFT_HANDLER_TRACE] Error receiving AdcConfig from rx_config.recv(): {:?}", e);
+                        // If the channel is closed, we can't get any more configs, so break.
+                        if matches!(e, tokio::sync::broadcast::error::RecvError::Closed) {
+                            println!("[BW_FFT_HANDLER_TRACE] AdcConfig broadcast channel is closed. Breaking loop.");
+                            break;
+                        }
+                        // For RecvError::Lagged, we might have missed some messages.
+                        // We'll log it and continue, hoping a future config update might arrive.
+                        // Or, if initial config was missed, this handler might remain unconfigured.
+                    }
+                }
             },
 
             // Handle incoming WebSocket messages (currently not used, but good to have)
             msg = ws_rx.next() => {
+                println!("[BW_FFT_HANDLER_TRACE] Received message from WebSocket client or stream ended.");
                 match msg {
                     Some(Ok(msg)) => {
+                        println!("[BW_FFT_HANDLER_TRACE] Message content: {:?}", msg);
+                        if msg.is_text() {
+                            println!("[BW_FFT_HANDLER_TRACE] Received text message: {}", msg.to_str().unwrap_or_default());
+                        } else if msg.is_binary() {
+                            println!("[BW_FFT_HANDLER_TRACE] Received binary message (len: {}).", msg.as_bytes().len());
+                        } else if msg.is_ping() {
+                            println!("[BW_FFT_HANDLER_TRACE] Received ping message.");
+                        } else if msg.is_pong() {
+                            println!("[BW_FFT_HANDLER_TRACE] Received pong message.");
+                        }
+
                         if msg.is_close() {
-                            println!("Brain Waves FFT: WebSocket client requested close");
+                            println!("[BW_FFT_HANDLER_TRACE] WebSocket client requested close. Breaking loop.");
+                            println!("Brain Waves FFT: WebSocket client requested close"); // Existing log
                             break;
                         }
                         // For now, we don't handle any incoming messages from the client
                         // In the future, this could be used for custom FFT configuration
                     }
                     Some(Err(e)) => {
-                        println!("Brain Waves FFT: WebSocket error: {}", e);
+                        println!("[BW_FFT_HANDLER_TRACE] WebSocket receive error: {}. Breaking loop.", e);
+                        println!("Brain Waves FFT: WebSocket error: {}", e); // Existing log
                         break;
                     }
                     None => {
-                        println!("Brain Waves FFT: WebSocket stream ended");
+                        println!("[BW_FFT_HANDLER_TRACE] WebSocket stream ended (None received). Breaking loop.");
+                        println!("Brain Waves FFT: WebSocket stream ended"); // Existing log
                         break;
                     }
                 }
             }
         }
     }
-
-    println!("Brain Waves FFT: WebSocket client disconnected");
+    println!("[BW_FFT_HANDLER_TRACE] Exited main select loop.");
+    println!("Brain Waves FFT: WebSocket client disconnected"); // Existing log
 }
 
 #[cfg(test)]

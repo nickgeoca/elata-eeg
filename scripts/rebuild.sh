@@ -17,7 +17,7 @@ fi
 echo "🔧 Rebuilding Rust daemon..."
 cd daemon
 cargo clean  # Ensures a fresh build
-cargo build --release
+cargo build --release --features brain_waves_fft_feature
 sudo mv target/release/eeg_daemon /usr/local/bin/
 cd ..
 echo "✅ Daemon rebuild complete!"

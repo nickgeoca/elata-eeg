@@ -119,9 +119,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         
         let dsp_config = DspSharedConfig {};
         let eeg_data_tx_for_dsp = tx_eeg_batch_data.clone();
-        let adc_config_tx_for_dsp = config_applied_tx.clone();
+        let adc_config_tx_for_dsp = config_applied_tx.clone(); // This is the broadcast sender for updates
+        let shared_adc_config_for_dsp = config.clone(); // This is the Arc<Mutex<AdcConfig>> for initial state
         
-        let fft_route = setup_fft_websocket_endpoint(&dsp_config, eeg_data_tx_for_dsp, adc_config_tx_for_dsp);
+        let fft_route = setup_fft_websocket_endpoint(
+            &dsp_config,
+            eeg_data_tx_for_dsp,
+            adc_config_tx_for_dsp,
+            shared_adc_config_for_dsp, // Pass the Arc<Mutex<AdcConfig>>
+        );
         
         // Spawn DSP server on port 8081 (separate from main server due to warp type constraints)
         tokio::spawn(warp::serve(fft_route).run(([0, 0, 0, 0], 8081)));

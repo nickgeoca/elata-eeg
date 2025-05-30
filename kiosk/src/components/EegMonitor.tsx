@@ -359,6 +359,15 @@ export default function EegMonitorWebGL() {
             const { width, height } = entry.contentRect;
             console.log(`[EegMonitor ResizeObserver] Observed size change: ${width}x${height}. Current activeView: ${activeView}`);
             
+            // Additional debugging for height issues
+            if (height === 0) {
+              console.warn(`[EegMonitor ResizeObserver] WARNING: Container height is 0! This will make the graph invisible.`);
+              console.log(`[EegMonitor ResizeObserver] Container element:`, target);
+              console.log(`[EegMonitor ResizeObserver] Container computed style:`, target ? window.getComputedStyle(target) : 'N/A');
+              console.log(`[EegMonitor ResizeObserver] Container parent:`, target?.parentElement);
+              console.log(`[EegMonitor ResizeObserver] Container parent computed style:`, target?.parentElement ? window.getComputedStyle(target.parentElement) : 'N/A');
+            }
+            
             // Clear any existing timeout to avoid multiple rapid updates
             if (sizeUpdateTimeoutId) {
               clearTimeout(sizeUpdateTimeoutId);
@@ -396,31 +405,20 @@ export default function EegMonitorWebGL() {
       const MIN_VALID_WIDTH = 50; // Minimum width to consider container properly measured
       
       // Depend on config, channels, and the container SIZE state
-      if (config && config.channels && containerSize.width > MIN_VALID_WIDTH) {
+      // More robust condition checking: config exists, channels array exists and has elements, container width is valid
+      if (config && config.channels && Array.isArray(config.channels) && config.channels.length > 0 && containerSize.width > MIN_VALID_WIDTH) {
         const numChannels = config.channels.length;
         const width = containerSize.width; // Use width from state
-      const sampleRate = config.sample_rate || 250; // Use default if needed
+        const sampleRate = config.sample_rate || 250; // Use default if needed
 
-      // Calculate points needed based on current width
-      const initialNumPoints = Math.max(10, Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000))); // Ensure at least 10 points
+        // Calculate points needed based on current width
+        const initialNumPoints = Math.max(10, Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000))); // Ensure at least 10 points
 
-      console.log(`[EegMonitor] Measured container width: ${width}`); // Log width
-      console.log(`[EegMonitor] Calculated initialNumPoints: ${initialNumPoints}`); // Log points
-      console.log(`[EegMonitor] Container size from state:`, containerSize);
-      console.log(`[EegMonitor] Container element rect:`, containerRef.current?.getBoundingClientRect());
-      console.log(`[EegMonitor] activeView:`, activeView);
-
-      // Width check is now handled by the MIN_VALID_WIDTH check in the if condition
-
-      if (numChannels === 0) {
-          console.warn("[EegMonitor LineEffect] Zero channels configured. Clearing lines.");
-          if (dataRef.current.length > 0 || linesReady) {
-            dataRef.current = [];
-            setLinesReady(false);
-            setDataVersion(v => v + 1);
-          }
-          return;
-      }
+        console.log(`[EegMonitor] Measured container width: ${width}`); // Log width
+        console.log(`[EegMonitor] Calculated initialNumPoints: ${initialNumPoints}`); // Log points
+        console.log(`[EegMonitor] Container size from state:`, containerSize);
+        console.log(`[EegMonitor] Container element rect:`, containerRef.current?.getBoundingClientRect());
+        console.log(`[EegMonitor] activeView:`, activeView);
 
       // Skip condition removed to ensure lines are always reconfigured when config.channels changes.
       // The useEffect dependency on config.channels handles triggering this.
@@ -463,9 +461,12 @@ export default function EegMonitorWebGL() {
         // const calculatedScaleY = (ySpacing * VISUAL_AMPLITUDE_SCALE) * MICROVOLT_CONVERSION_FACTOR;
         // New calculation using uiVoltageScaleFactor:
         const finalVisualAmplitudeScale = BASE_VISUAL_AMPLITUDE_SCALE * uiVoltageScaleFactor;
-        const calculatedScaleY = (ySpacing * finalVisualAmplitudeScale) * MICROVOLT_CONVERSION_FACTOR;
+        
+        // Since we're now using filtered data from the DSP, the data should be in the proper range
+        // Start with a moderate scaling and adjust based on the actual data range
+        const calculatedScaleY = (ySpacing * finalVisualAmplitudeScale) * 1000; // Use 1000 instead of 1e6 for more reasonable scaling
         line.scaleY = calculatedScaleY;
-        // console.log(`[EegMonitor LineEffect] Ch ${i}: ySpacing=${ySpacing.toFixed(4)}, finalVisualAmplitudeScale=${finalVisualAmplitudeScale}, calculatedScaleY=${calculatedScaleY}`);
+        console.log(`[EegMonitor LineEffect] Ch ${i}: ySpacing=${ySpacing.toFixed(4)}, finalVisualAmplitudeScale=${finalVisualAmplitudeScale}, calculatedScaleY=${calculatedScaleY} (using filtered data with moderate scaling)`);
 
         // Center channel i vertically within its allocated space
         line.offsetY = 1 - (i + 0.5) * ySpacing;
@@ -481,11 +482,23 @@ export default function EegMonitorWebGL() {
       setDataVersion(v => v + 1); // Increment version
 
       } else {
-          // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is 0)
-          // The specific check for numChannels === 0 inside the 'if' block already handles clearing.
-          // This 'else' handles cases where the outer 'if (config && config.channels && containerSize.width > 0)' fails.
-          console.log(`[EegMonitor LineEffect SKIPPING line creation for ${activeView}] Condition not met: config=${!!config}, config.channels=${!!config?.channels}, containerSize.width=${containerSize.width} > MIN_VALID_WIDTH=${MIN_VALID_WIDTH}`);
+          // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is invalid)
+          // Provide detailed logging for debugging
+          const configExists = !!config;
+          const channelsExist = !!config?.channels;
+          const channelsIsArray = Array.isArray(config?.channels);
+          const channelsLength = config?.channels?.length || 0;
+          const containerWidthValid = containerSize.width > MIN_VALID_WIDTH;
+          
+          console.log(`[EegMonitor LineEffect SKIPPING line creation for ${activeView}] Condition not met:`);
+          console.log(`  - config exists: ${configExists}`);
+          console.log(`  - config.channels exists: ${channelsExist}`);
+          console.log(`  - config.channels is array: ${channelsIsArray}`);
+          console.log(`  - config.channels.length: ${channelsLength}`);
+          console.log(`  - containerSize.width (${containerSize.width}) > MIN_VALID_WIDTH (${MIN_VALID_WIDTH}): ${containerWidthValid}`);
+          
           if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
+              console.log(`[EegMonitor LineEffect] Clearing existing lines due to failed conditions.`);
               dataRef.current = [];
               setLinesReady(false);
               setDataVersion(v => v + 1);
@@ -872,15 +885,32 @@ export default function EegMonitorWebGL() {
           </div>
         ) : activeView === 'signalGraph' ? (
           <div className="h-full p-4"> {/* This outer div might be slightly different from original, ensure it matches structure */}
-            {/* Time markers */}
-            <div className="relative h-full"> {/* This div is important for positioning */}
-              <div className="absolute w-full flex justify-between px-2 -top-6 text-gray-400 text-sm">
-                {[...TIME_TICKS].reverse().map(time => (
-                  <div key={time}>{time}s</div>
-                ))}
+            {/* Show loading state if config is not ready */}
+            {!config || !config.channels || !Array.isArray(config.channels) || config.channels.length === 0 ? (
+              <div className="h-full flex items-center justify-center">
+                <div className="text-center">
+                  <div className="text-gray-400 text-lg mb-2">Loading EEG Configuration...</div>
+                  <div className="text-gray-500 text-sm">
+                    Status: {configStatus}
+                  </div>
+                  {config && (
+                    <div className="text-gray-600 text-xs mt-2">
+                      Config loaded but channels: {config.channels ? `${config.channels.length} channels` : 'not available'}
+                    </div>
+                  )}
+                </div>
               </div>
-              
-              <div className="relative h-full" ref={containerRef}> {/* EegRenderer and related elements */}
+            ) : (
+              <>
+                {/* Time markers */}
+                <div className="relative h-full"> {/* This div is important for positioning */}
+                  <div className="absolute w-full flex justify-between px-2 -top-6 text-gray-400 text-sm">
+                    {[...TIME_TICKS].reverse().map(time => (
+                      <div key={time}>{time}s</div>
+                    ))}
+                  </div>
+                  
+                  <div className="relative h-full min-h-[300px]" ref={containerRef}> {/* EegRenderer and related elements - added min-height */}
                 {/* Channel labels */}
                 <div className="absolute -left-8 h-full flex flex-col justify-between">
                   {config?.channels && config.channels.length > 0 ? (
@@ -915,10 +945,11 @@ export default function EegMonitorWebGL() {
                    dataReceived={dataReceived}
                    packetsReceived={debugInfoRef.current.packetsReceived}
                  />
-             </div>
-           </div>
-         </div>
-       // Removed 'fftGraph' view case entirely
+                </div>
+              </div>
+            </>
+            )}
+          </div>
         ) : activeView === 'appletBrainWaves' ? (
           // Brain Waves Applet View
           <div className="relative h-full p-2" ref={containerRef}> {/* Added padding for aesthetics */}

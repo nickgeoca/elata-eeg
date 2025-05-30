@@ -88,7 +88,8 @@ export function useEegDataHandler({
     }
  
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-    const ws = new WebSocket(`ws://${wsHost}:8080/eeg`);
+    // Use the filtered data endpoint instead of the raw /eeg endpoint
+    const ws = new WebSocket(`ws://${wsHost}:8080/ws/eeg/data__basic_voltage_filter`);
     wsRef.current = ws;
     
     // Set binary type for WebSocket
@@ -107,128 +108,95 @@ export function useEegDataHandler({
 
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
+        // Handle JSON data from the filtered endpoint
+        if (typeof event.data === 'string') {
+          const filteredData = JSON.parse(event.data);
+          
+          // Handle error messages
+          if (filteredData.error) {
+            console.error("EEG driver error:", filteredData.error);
+            if (typeof onError === 'function') onError(`EEG driver error: ${filteredData.error}`);
+            return;
+          }
+
+          // Handle filtered voltage samples
+          if (filteredData.filtered_voltage_samples && Array.isArray(filteredData.filtered_voltage_samples)) {
+            const configuredChannelCount = currentConfig?.channels?.length || 0;
+            if (configuredChannelCount === 0) return;
+
+            const channelData = filteredData.filtered_voltage_samples;
+            if (channelData.length === 0) {
+              if (!isProduction) console.warn("Received packet with no filtered voltage samples.");
+              return;
+            }
+
+            const samplesPerChannel = channelData[0]?.length || 0;
+            if (samplesPerChannel <= 0) {
+              if (!isProduction) console.warn("Received packet with empty channel data.");
+              return;
+            }
+
+            // Ensure we have enough sample buffers
+            if (sampleBuffersRef.current.length < configuredChannelCount) {
+              sampleBuffersRef.current = Array(configuredChannelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
+            }
+
+            for (let ch = 0; ch < Math.min(configuredChannelCount, channelData.length); ch++) {
+              let currentSampleBuffer = sampleBuffersRef.current[ch];
+
+              if (!currentSampleBuffer || currentSampleBuffer.length !== samplesPerChannel) {
+                currentSampleBuffer = new Float32Array(samplesPerChannel);
+                sampleBuffersRef.current[ch] = currentSampleBuffer;
+              }
+
+              // Copy filtered data to buffer
+              const channelSamples = channelData[ch];
+              for (let i = 0; i < samplesPerChannel; i++) {
+                const rawValue = channelSamples[i];
+                currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
+                
+                // DEBUG: Log some sample values to understand the data range
+                if (ch === 0 && i < 3 && debugInfoRef.current.packetsReceived % 100 === 0) {
+                  console.log(`[EegDataHandler DEBUG FILTERED] Ch${ch} Sample${i}: ${rawValue} (finite: ${isFinite(rawValue)})`);
+                }
+              }
+
+              // Update timestamps
+              if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
+                lastDataChunkTimeRef.current[ch] = performance.now();
+              }
+
+              // Add data to WebGL lines
+              if (linesRef.current && linesRef.current[ch] && samplesPerChannel > 0) {
+                linesRef.current[ch].shiftAdd(currentSampleBuffer);
+              }
+            }
+
+            // Update global timestamp
+            if (latestTimestampRef) {
+              latestTimestampRef.current = performance.now();
+            }
+
+            // Update debug info
+            if (debugInfoRef) {
+              debugInfoRef.current.packetsReceived++;
+              debugInfoRef.current.lastPacketTime = performance.now();
+              debugInfoRef.current.samplesProcessed += samplesPerChannel * Math.min(configuredChannelCount, channelData.length);
+            }
+
+            if (typeof onDataUpdate === 'function') {
+              onDataUpdate(true);
+            }
+          }
+          return;
+        }
+
+        // Fallback: Handle binary data (in case we need to support both formats)
         if (!(event.data instanceof ArrayBuffer)) {
           return;
         }
-        const dataView = new DataView(event.data);
-        let bufferOffset = 0;
-
-        // const timestamp = dataView.getBigUint64(bufferOffset, true); // BigInt, not directly used yet
-        bufferOffset += 8;
-
-        const errorFlag = dataView.getUint8(bufferOffset);
-        bufferOffset += 1;
-
-        const fftFlag = dataView.getUint8(bufferOffset);
-        bufferOffset += 1;
-
-        if (errorFlag === 1) {
-          const errorBytes = new Uint8Array(event.data.slice(bufferOffset));
-          const errorMessage = new TextDecoder().decode(errorBytes);
-          console.error("EEG driver error:", errorMessage);
-          if (typeof onError === 'function') onError(`EEG driver error: ${errorMessage}`);
-          return;
-        }
-
-        const configuredChannelCount = currentConfig?.channels?.length || 0;
-        if (configuredChannelCount === 0) return;
-
-        // --- FFT Data Parsing ---
-        if (fftFlag === 1) {
-          const numFftChannels = dataView.getUint8(bufferOffset);
-          bufferOffset += 1;
-
-          for (let i = 0; i < numFftChannels; i++) {
-            // Power Spectrum
-            const powerSpectrumLen = dataView.getUint32(bufferOffset, true);
-            bufferOffset += 4;
-            const powerSpectrum = new Float32Array(powerSpectrumLen);
-            for (let j = 0; j < powerSpectrumLen; j++) {
-              powerSpectrum[j] = dataView.getFloat32(bufferOffset, true);
-              bufferOffset += 4;
-            }
-
-            // Frequency Bins
-            const freqBinsLen = dataView.getUint32(bufferOffset, true);
-            bufferOffset += 4;
-            const freqBins = new Float32Array(freqBinsLen); // Though onFftData expects number[] for power
-            for (let j = 0; j < freqBinsLen; j++) {
-              freqBins[j] = dataView.getFloat32(bufferOffset, true);
-              bufferOffset += 4;
-            }
-            // Assuming onFftData is primarily interested in the power spectrum for now.
-            // The `fftOutput` in `onFftData` was originally just the power.
-            // If `freqBins` are also needed by the renderer, `onFftData` signature and FftRenderer might need updates.
-            if (onFftData) {
-              onFftData(i, Array.from(powerSpectrum)); // Pass channel index and power spectrum
-            }
-          }
-        }
-        // --- End FFT Data Parsing ---
-
-        // --- Raw EEG Sample Parsing ---
-        // Calculate remaining bytes for raw samples
-        const remainingBytes = event.data.byteLength - bufferOffset;
-        // Each sample is 4 bytes (float32). configuredChannelCount is from the UI/config.
-        const samplesPerChannel = Math.floor(remainingBytes / 4 / configuredChannelCount);
-
-        if (samplesPerChannel <= 0 && fftFlag === 0) { // Only warn if no FFT and no raw samples
-            if (!isProduction) console.warn("Received packet with no raw EEG samples.");
-            // Do not return if there was FFT data, as that might be the primary content.
-            if (fftFlag === 0) return;
-        }
         
-        if (sampleBuffersRef.current.length < configuredChannelCount) {
-          sampleBuffersRef.current = Array(configuredChannelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
-        }
-
-        for (let ch = 0; ch < configuredChannelCount; ch++) {
-          let currentSampleBuffer = sampleBuffersRef.current[ch];
-
-          if (!currentSampleBuffer || currentSampleBuffer.length !== samplesPerChannel) {
-            currentSampleBuffer = new Float32Array(samplesPerChannel > 0 ? samplesPerChannel : 0);
-            sampleBuffersRef.current[ch] = currentSampleBuffer;
-          }
-          
-          if (samplesPerChannel > 0) {
-            for (let i = 0; i < samplesPerChannel; i++) {
-              const sampleBufferOffset = bufferOffset + i * 4;
-              if (sampleBufferOffset + 4 <= event.data.byteLength) {
-                const rawValue = dataView.getFloat32(sampleBufferOffset, true);
-                currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
-              } else {
-                currentSampleBuffer[i] = 0;
-                if (!isProduction) console.warn(`Buffer overrun for raw samples at sample ${i}, channel ${ch}`);
-              }
-            }
-            bufferOffset += samplesPerChannel * 4;
-          }
-
-
-          if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
-              lastDataChunkTimeRef.current[ch] = performance.now();
-          }
-
-          if (linesRef.current && linesRef.current[ch] && samplesPerChannel > 0) {
-            linesRef.current[ch].shiftAdd(currentSampleBuffer);
-          }
-        }
-        // --- End Raw EEG Sample Parsing ---
-        
-        if (latestTimestampRef) {
-            latestTimestampRef.current = performance.now();
-        }
-
-        // Update debug info - increment packets received counter
-        if (debugInfoRef) {
-          debugInfoRef.current.packetsReceived++;
-          debugInfoRef.current.lastPacketTime = performance.now();
-          debugInfoRef.current.samplesProcessed += samplesPerChannel * configuredChannelCount;
-        }
-
-        if (typeof onDataUpdate === 'function') {
-          onDataUpdate(true);
-        }
+        console.warn("[EegDataHandler] Received binary data but expected JSON from filtered endpoint");
 
         if (dataReceivedTimeoutRef.current) {
           clearTimeout(dataReceivedTimeoutRef.current);
