@@ -4,10 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# For FFT. Consider `rustfft`.
+# For FFT processing
 rustfft = "6.1"
-# For windowing functions if implementing Welch's method (e.g., Hann).
-ndarray = "0.15"
 # For WebSocket handling
 warp = "0.3"
 tokio = { version = "1.0", features = ["full"] }

@@ -6,8 +6,8 @@ import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
 import { getChannelColor } from '../../../kiosk/src/utils/colorUtils';
 import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../kiosk/src/utils/eegConstants'; // Import constants
 
-const DATA_Y_MAX = 4000.0; // Expected maximum for FFT power data (µV²/Hz)
-const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.0001; // Clamp input power to this minimum before log10
+const DATA_Y_MAX = 10000.0; // Expected maximum for FFT power data (µV²/Hz)
+const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.01; // Clamp input power to this minimum before log10
 const LOG_Y_MIN_DISPLAY = Math.log10(Y_AXIS_LOG_MIN_POWER_CLAMP); // e.g., -2 for 0.01
 const LOG_Y_MAX_DISPLAY = Math.ceil(Math.log10(DATA_Y_MAX));    // e.g., Math.ceil(log10(4000)) = 4
                                                               // This defines the log display range, e.g., [-2, 4]
@@ -152,6 +152,41 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       // Viewport is set for the actual plotting area, offset by margins
       wglpRef.current.viewport(MARGIN_LEFT, MARGIN_BOTTOM, plotWidth, plotHeight);
     }
+
+    // Cleanup function
+    return () => {
+      if (wglpRef.current) {
+        // Clear all lines before destroying the plot
+        try {
+          if (typeof wglpRef.current.removeAllLines === 'function') {
+            wglpRef.current.removeAllLines();
+          } else if (typeof wglpRef.current.clear === 'function') {
+            wglpRef.current.clear();
+          } else if (typeof wglpRef.current.removeLine === 'function') {
+            [...gridLinesRef.current, ...linesRef.current].forEach(line => {
+              wglpRef.current!.removeLine(line);
+            });
+          }
+        } catch (error) {
+          console.warn('[AppletFftRenderer] Error clearing lines during cleanup:', error);
+        }
+        
+        gridLinesRef.current = [];
+        linesRef.current = [];
+        
+        // Destroy the WebGL plot instance
+        try {
+          if (typeof wglpRef.current.destroy === 'function') {
+            wglpRef.current.destroy();
+          }
+        } catch (error) {
+          console.warn('[AppletFftRenderer] Error destroying WebGL plot:', error);
+        }
+        
+        wglpRef.current = null;
+        console.log('[AppletFftRenderer] WebGLPlot instance cleaned up.');
+      }
+    };
   }, [containerWidth, containerHeight, plotWidth, plotHeight]);
 
   // Effect to create/update grid lines and labels
@@ -161,15 +196,34 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
     }
     const wglp = wglpRef.current;
 
-    // Clear existing grid lines
-    gridLinesRef.current.forEach(line => {
-      if (wglp && typeof wglp.removeLine === 'function') {
-        wglp.removeLine(line);
-      } else {
-        console.warn('[AppletFftRenderer] wglp.removeLine is not a function or wglp is not available. Cannot remove grid line. This may lead to visual artifacts.');
+    // Clear existing grid lines - use a more robust approach
+    if (gridLinesRef.current.length > 0) {
+      try {
+        // Try different methods to clear lines
+        if (wglp && typeof wglp.removeAllLines === 'function') {
+          wglp.removeAllLines();
+        } else if (wglp && typeof wglp.clear === 'function') {
+          wglp.clear();
+        } else if (wglp && typeof wglp.removeLine === 'function') {
+          gridLinesRef.current.forEach(line => wglp.removeLine(line));
+        } else {
+          console.warn('[AppletFftRenderer] No clear method available, recreating WebGL plot instance');
+          // Recreate the WebGL plot instance as a fallback
+          if (internalCanvasRef.current) {
+            wglpRef.current = new WebglPlot(internalCanvasRef.current, {
+              antialias: true,
+              transparent: false,
+              powerPerformance: "high-performance",
+            });
+            const newWglp = wglpRef.current;
+            newWglp.viewport(MARGIN_LEFT, MARGIN_BOTTOM, plotWidth, plotHeight);
+          }
+        }
+      } catch (error) {
+        console.warn('[AppletFftRenderer] Error clearing grid lines:', error);
       }
-    });
-    gridLinesRef.current = [];
+      gridLinesRef.current = [];
+    }
 
     const newGridLines: WebglLine[] = [];
     const newXLabels: LabelInfo[] = [];
@@ -222,7 +276,17 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
 
     if (!wglpRef.current || !config || !config.channels || !config.sample_rate || containerWidth <= 0) {
       if (linesRef.current.length > 0) {
-        linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+        try {
+          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
+            wglpRef.current.removeAllLines();
+          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
+            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
+          } else {
+            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
+          }
+        } catch (error) {
+          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
+        }
         linesRef.current = [];
       }
       return;
@@ -232,7 +296,17 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
 
     if (numChannels === 0 || fftData.length === 0) {
       if (linesRef.current.length > 0) {
-        linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+        try {
+          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
+            wglpRef.current.removeAllLines();
+          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
+            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
+          } else {
+            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
+          }
+        } catch (error) {
+          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
+        }
         linesRef.current = [];
       }
       return;
@@ -254,14 +328,36 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
     if (xCoords.length === 0) {
       console.warn(`[AppletFftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
       if (linesRef.current.length > 0) {
-        linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+        try {
+          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
+            wglpRef.current.removeAllLines();
+          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
+            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
+          } else {
+            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
+          }
+        } catch (error) {
+          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
+        }
         linesRef.current = [];
       }
       return;
     }
 
     // Clear existing lines
-    linesRef.current.forEach(line => wglpRef.current?.removeLine(line));
+    if (linesRef.current.length > 0) {
+      try {
+        if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
+          wglpRef.current.removeAllLines();
+        } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
+          linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
+        } else {
+          console.warn('[AppletFftRenderer] No remove method available for FFT lines');
+        }
+      } catch (error) {
+        console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
+      }
+    }
     linesRef.current = [];
 
     const newLines: WebglLine[] = [];
@@ -343,17 +439,9 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
             let currentMagnitude = powerData[fftBinIndex] || 0;
 
             if (!isFinite(currentMagnitude)) {
-              currentMagnitude = 0;
+              currentMagnitude = 10;
             }
-            currentMagnitude = Math.max(0, currentMagnitude);
-            const cappedMagnitude = Math.min(currentMagnitude, DATA_Y_MAX);
-            
-            const clampedPositiveMagnitude = Math.max(cappedMagnitude, Y_AXIS_LOG_MIN_POWER_CLAMP);
-
-            let logMagnitude = Math.log10(clampedPositiveMagnitude);
-
-            logMagnitude = Math.max(LOG_Y_MIN_DISPLAY, Math.min(logMagnitude, LOG_Y_MAX_DISPLAY));
-
+            const logMagnitude = Math.log10(currentMagnitude);
             let normalizedMagnitude = (logMagnitude - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) - 0.5;
 
             if (!isFinite(normalizedMagnitude)) {
