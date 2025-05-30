@@ -1,7 +1,6 @@
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
-use serde::{Serialize, Deserialize, Deserializer};
-use serde_json::Value;
+use serde::{Serialize, Deserialize};
 use futures_util::{StreamExt, SinkExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,8 +9,6 @@ use eeg_driver::AdcConfig;
 
 use crate::driver_handler::{EegBatchData, CsvRecorder, FilteredEegData}; // Added FilteredEegData
 
-#[cfg(feature = "brain_waves_fft_feature")]
-use elata_dsp_brain_waves_fft;
 
 /// Command message for WebSocket control
 #[derive(Deserialize, Debug)]
@@ -33,46 +30,48 @@ enum DaemonCommand {
 
 /// Configuration message for WebSocket control
 
-// Custom deserializer for Option<Option<u32>>
-// Maps JSON `null` to `Some(None)` and missing field to `None`.
-fn deserialize_option_option_u32<'de, D>(deserializer: D) -> Result<Option<Option<u32>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    // Deserialize the field's content directly as a Value.
-    // This bypasses Option<T>'s default "null -> None" behavior at this stage.
-    let v = Value::deserialize(deserializer)?;
+// Helper functions for warp filters
+fn with_broadcast_rx<T: Clone + Send + 'static>(
+    rx: broadcast::Sender<T>,
+) -> impl Filter<Extract = (broadcast::Receiver<T>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || rx.subscribe())
+}
 
-    match v {
-        Value::Null => Ok(Some(None)), // If the value was JSON null, make it Some(None)
-        actual_value => {
-            // If it was some other JSON value, try to parse it as u32
-            match serde_json::from_value::<u32>(actual_value) {
-                Ok(n) => Ok(Some(Some(n))),
-                Err(e) => Err(serde::de::Error::custom(e)),
-            }
-        }
-    }
+fn with_shared_state<T: Clone + Send + Sync + 'static>(
+    state: Arc<Mutex<T>>,
+) -> impl Filter<Extract = (Arc<Mutex<T>>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || state.clone())
+}
+
+fn with_mpsc_tx<T: Send + 'static>(
+    tx: mpsc::Sender<T>,
+) -> impl Filter<Extract = (mpsc::Sender<T>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || tx.clone())
+}
+
+fn with_atomic_bool(
+    atomic: Arc<AtomicBool>,
+) -> impl Filter<Extract = (Arc<AtomicBool>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || atomic.clone())
+}
+
+fn with_shared_recorder(
+    recorder: Arc<Mutex<CsvRecorder>>,
+) -> impl Filter<Extract = (Arc<Mutex<CsvRecorder>>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || recorder.clone())
 }
 
 #[derive(Deserialize, Debug)]
 pub struct ConfigMessage {
     pub channels: Option<Vec<u32>>,
     pub sample_rate: Option<u32>,
-    #[serde(default, deserialize_with = "deserialize_option_option_u32")]
-    pub powerline_filter_hz: Option<Option<u32>>,
+    // powerline_filter_hz field removed as part of DSP refactor
 }
 
 impl ConfigMessage {
-    // Helper method to debug the powerline filter value
-    pub fn debug_powerline(&self) {
-        println!("[CONFIG_DEBUG] ConfigMessage.powerline_filter_hz: {:?}", self.powerline_filter_hz);
-        if let Some(inner) = &self.powerline_filter_hz {
-            println!("[CONFIG_DEBUG] Inner value is: {:?}", inner);
-            if inner.is_none() {
-                println!("[CONFIG_DEBUG] CONFIRMED: Inner value is None (powerline filter OFF)");
-            }
-        }
+    // Helper method for debugging (powerline filter functionality removed)
+    pub fn debug_config(&self) {
+        println!("[CONFIG_DEBUG] ConfigMessage channels: {:?}, sample_rate: {:?}", self.channels, self.sample_rate);
     }
 }
 
@@ -83,20 +82,7 @@ pub struct CommandResponse {
     pub message: String,
 }
 
-#[cfg(feature = "brain_waves_fft_feature")]
-#[derive(Serialize, Debug, Clone)]
-struct ChannelFftResult {
-    power: Vec<f32>,
-    frequencies: Vec<f32>,
-}
-
-#[cfg(feature = "brain_waves_fft_feature")]
-#[derive(Serialize)]
-struct BrainWavesAppletResponse {
-    timestamp: u64,
-    fft_results: Vec<ChannelFftResult>,
-    error: Option<String>,
-}
+// FFT data structures moved to elata_dsp_brain_waves_fft crate
 
 /// Creates a binary EEG packet.
 /// Format: [timestamp_u64_le] [error_flag_u8] [payload]
@@ -291,7 +277,7 @@ pub async fn handle_config_websocket(
             match config_applied_rx.recv().await {
                 Ok(applied_config) => {
                     println!("Config WebSocket: Received applied config from main: {:?}", applied_config.channels);
-                    println!("Config WebSocket: Applied config powerline_filter_hz: {:?}", applied_config.powerline_filter_hz);
+                    // powerline_filter_hz field removed as part of DSP refactor
                     if let Ok(config_json) = serde_json::to_string(&applied_config) {
                         println!("Config WebSocket: Sending JSON to client: {}", config_json);
                         if let Err(e) = ws_tx_forwarder.send(Message::text(config_json)).await {
@@ -347,10 +333,10 @@ pub async fn handle_config_websocket(
                             match serde_json::from_str::<ConfigMessage>(text_from_client) {
                                 Ok(mut config_msg) => {
                                     // Use our new debug method
-                                    config_msg.debug_powerline();
+                                    config_msg.debug_config();
                                     
                                     // ADD THIS LOG
-                                    println!("[SERVER_DEBUG] Parsed config_msg.powerline_filter_hz: {:?}", config_msg.powerline_filter_hz);
+                                    println!("[SERVER_DEBUG] Parsed config_msg - channels: {:?}, sample_rate: {:?}", config_msg.channels, config_msg.sample_rate);
 
                                     // ADD THIS LOG
                                     println!("[SERVER_DEBUG] Checking is_recording status: {}", is_recording.load(Ordering::Relaxed));
@@ -373,13 +359,13 @@ pub async fn handle_config_websocket(
                                     println!("[SERVER_DEBUG] About to acquire config lock.");
                                     let config_guard = config.lock().await;
                                     // ADD THIS LOG
-                                    println!("[SERVER_DEBUG] Config lock acquired. Current shared PL: {:?}", config_guard.powerline_filter_hz);
+                                    println!("[SERVER_DEBUG] Config lock acquired. Current shared config: channels={:?}, sample_rate={}", config_guard.channels, config_guard.sample_rate);
                                     let mut updated_config = config_guard.clone();
                                     let mut config_changed = false;
                                     let mut update_message = String::new();
                                     let no_params_provided = config_msg.channels.is_none() &&
                                                             config_msg.sample_rate.is_none() &&
-                                                            config_msg.powerline_filter_hz.is_none();
+                                                            false; // powerline filter removed
  
                                     // ADD THIS LOG
                                     println!("[SERVER_DEBUG] About to process channels. config_msg.channels.is_some(): {}", config_msg.channels.is_some());
@@ -393,28 +379,7 @@ pub async fn handle_config_websocket(
                                             }
                                             continue;
                                         }
-                                        let mut unique_channels = new_channels.clone();
-                                        unique_channels.sort();
-                                        unique_channels.dedup();
-                                        if unique_channels.len() != new_channels.len() {
-                                            let response = CommandResponse { status: "error".to_string(), message: "Duplicate channels detected".to_string() };
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
-                                                    println!("Config WebSocket: Error queueing 'duplicate channels' response: {}", e);
-                                                }
-                                            }
-                                            continue;
-                                        }
-                                        let max_channel = *new_channels.iter().max().unwrap_or(&0);
-                                        if max_channel > 7 {
-                                            let response = CommandResponse { status: "error".to_string(), message: format!("Invalid channel index: {}. Max is 7.", max_channel) };
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
-                                                    println!("Config WebSocket: Error queueing 'invalid channel idx' response: {}", e);
-                                                }
-                                            }
-                                            continue;
-                                        }
+                                        // Channel validation is now handled by the driver
                                         let new_channels_usize: Vec<usize> = new_channels.iter().map(|&x| x as usize).collect();
                                         if updated_config.channels != new_channels_usize {
                                             updated_config.channels = new_channels_usize;
@@ -424,16 +389,7 @@ pub async fn handle_config_websocket(
                                     }
 
                                     if let Some(new_sample_rate) = config_msg.sample_rate {
-                                        let valid_sample_rates = vec![250, 500, 1000, 2000];
-                                        if !valid_sample_rates.contains(&new_sample_rate) {
-                                            let response = CommandResponse { status: "error".to_string(), message: format!("Invalid sample rate: {}. Valid: {:?}", new_sample_rate, valid_sample_rates) };
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
-                                                    println!("Config WebSocket: Error queueing 'invalid sample rate' response: {}", e);
-                                                }
-                                            }
-                                            continue;
-                                        }
+                                        // Sample rate validation is now handled by the driver
                                         if updated_config.sample_rate != new_sample_rate {
                                             updated_config.sample_rate = new_sample_rate;
                                             config_changed = true;
@@ -442,46 +398,7 @@ pub async fn handle_config_websocket(
                                         }
                                     }
 
-                                    // Handle powerline filter update
-                                    println!("[SERVER_DEBUG] Processing powerline filter. config_msg.powerline_filter_hz: {:?}", config_msg.powerline_filter_hz);
-                                    
-                                    if let Some(new_powerline_filter) = config_msg.powerline_filter_hz.clone() {
-                                        // Validate the powerline filter value
-                                        if new_powerline_filter.is_some() && ![50, 60].contains(&new_powerline_filter.unwrap()) {
-                                            let response = CommandResponse {
-                                                status: "error".to_string(),
-                                                message: format!("Invalid powerline filter: {:?}. Valid: 50Hz, 60Hz, or null (off)", new_powerline_filter)
-                                            };
-                                            if let Ok(json) = serde_json::to_string(&response) {
-                                                if let Err(e) = mpsc_tx.send(Message::text(json)).await {
-                                                    println!("Config WebSocket: Error queueing 'invalid powerline filter' response: {}", e);
-                                                }
-                                            }
-                                            continue;
-                                        }
-                                        
-                                        println!("[SERVER_DEBUG] Comparing powerline_filter_hz: current_in_shared_config={:?}, from_client_message={:?}",
-                                            updated_config.powerline_filter_hz, new_powerline_filter);
-                                        
-                                        // ALWAYS update powerline filter when explicitly set to None
-                                        if new_powerline_filter.is_none() {
-                                            println!("[SERVER_DEBUG] CRITICAL: Setting powerline filter to None (turning off)");
-                                            updated_config.powerline_filter_hz = None;
-                                            config_changed = true;
-                                            if !update_message.is_empty() { update_message.push_str(", "); }
-                                            update_message.push_str("powerline filter: Off");
-                                        }
-                                        // Otherwise, only update if different
-                                        else if updated_config.powerline_filter_hz != new_powerline_filter {
-                                            println!("[SERVER_DEBUG] Updating powerline filter from {:?} to {:?}",
-                                                updated_config.powerline_filter_hz, new_powerline_filter);
-                                            updated_config.powerline_filter_hz = new_powerline_filter;
-                                            config_changed = true;
-                                            if !update_message.is_empty() { update_message.push_str(", "); }
-                                            update_message.push_str(&format!("powerline filter: {:?}",
-                                                new_powerline_filter.map_or("Off".to_string(), |f| f.to_string() + "Hz")));
-                                        }
-                                    }
+                                    // Powerline filter handling removed as part of DSP refactor
                                     
                                     if !config_changed {
                                         let msg_text_response = if no_params_provided { "No channels or sample rate provided" } else { "Configuration unchanged" };
@@ -713,13 +630,11 @@ pub async fn handle_command_websocket(
                                         }
                                     } else {
                                         let config_guard = config.lock().await;
-                                        let mut updated_config = config_guard.clone();
-                                        let mut config_changed = false;
+                                        let updated_config = config_guard.clone();
+                                        let config_changed = false;
 
-                                        if updated_config.powerline_filter_hz != new_powerline_filter_opt {
-                                            updated_config.powerline_filter_hz = new_powerline_filter_opt;
-                                            config_changed = true;
-                                        }
+                                        // Powerline filter handling removed as part of DSP refactor
+                                        // config_changed remains false since no powerline filter to update
 
                                         if config_changed {
                                             drop(config_guard); // Release lock before sending to channel
@@ -772,187 +687,7 @@ pub async fn handle_command_websocket(
     println!("Command WebSocket client disconnected");
 }
 
-#[cfg(feature = "brain_waves_fft_feature")]
-async fn handle_brain_waves_fft_websocket(
-    ws: WebSocket,
-    mut rx_eeg: broadcast::Receiver<EegBatchData>,
-    config_arc: Arc<Mutex<AdcConfig>>,
-) {
-    let (mut ws_tx, mut ws_rx) = ws.split();
-    println!("Brain Waves FFT WebSocket client connected");
-
-    const FFT_WINDOW_DURATION_SECONDS: f32 = 1.0; // Process 1 second of data for FFT
-    const FFT_WINDOW_SLIDE_SECONDS: f32 = 0.5; // Slide window by 0.5 seconds (50% overlap if duration is 1s)
-
-    let mut channel_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut num_channels = 0;
-    let mut sample_rate_f32 = 250.0; // Default, will be updated
-
-    // Initialize buffers and parameters based on current config
-    {
-        let config_guard = config_arc.lock().await;
-        num_channels = config_guard.channels.len();
-        sample_rate_f32 = config_guard.sample_rate as f32;
-        channel_buffers = vec![Vec::new(); num_channels];
-        println!(
-            "Brain Waves FFT: Initialized for {} channels, sample rate: {} Hz",
-            num_channels, sample_rate_f32
-        );
-    }
-
-    let fft_window_samples = (sample_rate_f32 * FFT_WINDOW_DURATION_SECONDS).round() as usize;
-    let fft_slide_samples = (sample_rate_f32 * FFT_WINDOW_SLIDE_SECONDS).round() as usize;
-
-    if num_channels == 0 {
-        println!("Brain Waves FFT: Error - 0 channels configured. Closing WebSocket.");
-        let response = BrainWavesAppletResponse {
-            timestamp: 0,
-            fft_results: Vec::new(),
-            error: Some("Daemon configured with 0 channels for FFT.".to_string()),
-        };
-        if let Ok(json_response) = serde_json::to_string(&response) {
-            let _ = ws_tx.send(Message::text(json_response)).await;
-        }
-        return;
-    }
-    
-    println!(
-        "Brain Waves FFT: Window size: {} samples, Slide size: {} samples",
-        fft_window_samples, fft_slide_samples
-    );
-
-    loop {
-        tokio::select! {
-            Ok(eeg_batch_data) = rx_eeg.recv() => {
-                if let Some(err_msg) = &eeg_batch_data.error {
-                    println!("Brain Waves FFT: Received error in EegBatchData: {}", err_msg);
-                    let response = BrainWavesAppletResponse {
-                        timestamp: eeg_batch_data.timestamp,
-                        fft_results: Vec::new(),
-                        error: Some(err_msg.clone()),
-                    };
-                    if let Ok(json_response) = serde_json::to_string(&response) {
-                        if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending error.");
-                            break;
-                        }
-                    }
-                    continue;
-                }
-
-                if eeg_batch_data.channels.len() != num_channels {
-                    println!(
-                        "Brain Waves FFT: Mismatch in channel count. Expected {}, got {}. Re-initializing.",
-                        num_channels, eeg_batch_data.channels.len()
-                    );
-                    // Potentially re-initialize or send error
-                    // For now, let's update num_channels and re-initialize buffers if it's the first valid data
-                    // Or if it changes mid-stream, which might indicate a config change not fully propagated here.
-                    // A more robust solution might involve listening to config_applied_rx as well.
-                    let config_guard = config_arc.lock().await;
-                    num_channels = config_guard.channels.len(); // Re-fetch from potentially updated config
-                    sample_rate_f32 = config_guard.sample_rate as f32; // Re-fetch sample rate
-                    channel_buffers = vec![Vec::new(); num_channels]; // Re-initialize buffers
-                    // fft_window_samples and fft_slide_samples would also need recalculation here.
-                    // This simple re-init might lose some buffered data.
-                    if num_channels == 0 || eeg_batch_data.channels.len() != num_channels {
-                        let err_msg = format!("Channel count mismatch or 0 channels after re-check. Expected {}, got {}. Aborting.", num_channels, eeg_batch_data.channels.len());
-                        println!("Brain Waves FFT: {}", err_msg);
-                         let response = BrainWavesAppletResponse {
-                            timestamp: eeg_batch_data.timestamp,
-                            fft_results: Vec::new(),
-                            error: Some(err_msg),
-                        };
-                        if let Ok(json_response) = serde_json::to_string(&response) {
-                            if ws_tx.send(Message::text(json_response)).await.is_err() {
-                                break;
-                            }
-                        }
-                        continue;
-                    }
-                }
-
-                for (i, data_vec) in eeg_batch_data.channels.iter().enumerate() {
-                    if i < num_channels {
-                        channel_buffers[i].extend_from_slice(data_vec);
-                    }
-                }
-
-                let mut all_channel_fft_results: Vec<ChannelFftResult> = Vec::with_capacity(num_channels);
-                let mut processing_error: Option<String> = None;
-
-                for i in 0..num_channels {
-                    if channel_buffers[i].len() >= fft_window_samples {
-                        let window_data: Vec<f32> = channel_buffers[i][..fft_window_samples].to_vec();
-                        
-                        // Perform FFT
-                        match elata_dsp_brain_waves_fft::process_eeg_data(&window_data, sample_rate_f32) {
-                            Ok((power, frequencies)) => {
-                                all_channel_fft_results.push(ChannelFftResult { power, frequencies });
-                            }
-                            Err(fft_err) => {
-                                println!("Brain Waves FFT: Error processing FFT for channel {}: {}", i, fft_err);
-                                processing_error = Some(format!("FFT error on channel {}: {}", i, fft_err));
-                                // Add an empty result to maintain channel order if one fails
-                                all_channel_fft_results.push(ChannelFftResult { power: Vec::new(), frequencies: Vec::new()});
-                            }
-                        }
-                        
-                        // Slide window: remove processed part
-                        if fft_slide_samples > 0 && channel_buffers[i].len() >= fft_slide_samples {
-                            channel_buffers[i].drain(0..fft_slide_samples);
-                        } else {
-                            // If slide is too large or buffer too small, just clear (or keep remaining for next full window)
-                            channel_buffers[i].clear();
-                        }
-                    } else {
-                        // Not enough data yet for this channel, push empty result to maintain order
-                        // Or, decide not to send until all channels have data. For now, send what we have.
-                         all_channel_fft_results.push(ChannelFftResult { power: Vec::new(), frequencies: Vec::new()});
-                    }
-                }
-                
-                // Only send if we have some results or an error to report
-                if !all_channel_fft_results.iter().all(|res| res.power.is_empty()) || processing_error.is_some() {
-                    let response = BrainWavesAppletResponse {
-                        timestamp: eeg_batch_data.timestamp, // Use timestamp of the incoming batch
-                        fft_results: all_channel_fft_results,
-                        error: processing_error,
-                    };
-
-                    if let Ok(json_response) = serde_json::to_string(&response) {
-                        if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending data.");
-                            break;
-                        }
-                    } else {
-                        println!("Brain Waves FFT: Error serializing response for WebSocket");
-                    }
-                }
-            },
-            Some(result) = ws_rx.next() => {
-                match result {
-                    Ok(msg) => {
-                        if msg.is_close() {
-                            println!("Brain Waves FFT WebSocket: client sent close frame.");
-                            break;
-                        }
-                        println!("Brain Waves FFT WebSocket: received message: {:?}", msg);
-                    }
-                    Err(e) => {
-                        println!("Brain Waves FFT WebSocket: error receiving message: {}", e);
-                        break;
-                    }
-                }
-            },
-            else => {
-                println!("Brain Waves FFT WebSocket: both streams closed.");
-                break;
-            }
-        }
-    }
-    println!("Brain Waves FFT WebSocket connection handler finished.");
-}
+// Brain waves FFT WebSocket handler moved to elata_dsp_brain_waves_fft crate
 
 // Set up WebSocket routes and server
 pub fn setup_websocket_routes(
@@ -962,7 +697,7 @@ pub fn setup_websocket_routes(
     csv_recorder: Arc<Mutex<CsvRecorder>>,
     is_recording: Arc<AtomicBool>,
     config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
-) -> (impl warp::Filter<Extract = impl warp::Reply> + Clone, mpsc::Receiver<AdcConfig>) {
+) -> (warp::filters::BoxedFilter<(impl warp::Reply,)>, mpsc::Receiver<AdcConfig>) {
     // Channel for clients to send proposed config updates TO main.rs
     let (config_update_to_main_tx, config_update_to_main_rx) = mpsc::channel::<AdcConfig>(32);
     
@@ -1016,28 +751,12 @@ pub fn setup_websocket_routes(
         });
     
     // Combine base routes including the new filtered data route
-    let base_routes = eeg_ws_route
+    // Return base routes - DSP routes will be combined in main.rs
+    let routes = eeg_ws_route
         .or(config_ws_route)
         .or(command_ws_route)
-        .or(filtered_eeg_data_route);
-
-    #[cfg(feature = "brain_waves_fft_feature")]
-    let routes = {
-        // Ensure tx_eeg_batch_data is used for the FFT route as it expects unfiltered data
-        let tx_for_fft_route = tx_eeg_batch_data.clone();
-        let brain_waves_fft_ws_route = warp::path("applet") // Corrected path as per original
-            .and(warp::path("brain_waves"))
-            .and(warp::path("data"))
-            .and(warp::ws())
-            .and(with_broadcast_rx(tx_for_fft_route)) // Use the EegBatchData sender
-            .and(with_shared_state(config.clone())) // Pass AdcConfig
-            .map(|ws: warp::ws::Ws, rx_eeg: broadcast::Receiver<EegBatchData>, current_config: Arc<Mutex<AdcConfig>>| {
-                ws.on_upgrade(move |socket| handle_brain_waves_fft_websocket(socket, rx_eeg, current_config))
-            });
-        base_routes.or(brain_waves_fft_ws_route).boxed()
-    };
-    #[cfg(not(feature = "brain_waves_fft_feature"))]
-    let routes = base_routes.boxed();
+        .or(filtered_eeg_data_route)
+        .boxed();
 
     (routes, config_update_to_main_rx)
 }

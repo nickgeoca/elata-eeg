@@ -21,12 +21,23 @@ pub struct ProcessedData {
     pub error: Option<String>,
 }
 
+/// EEG batch data structure for WebSocket streaming
+/// This is used by both the daemon and DSP modules for data exchange
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct EegBatchData {
+    pub channels: Vec<Vec<f32>>,  // Each inner Vec represents a channel's data for the batch
+    pub timestamp: u64,           // Timestamp for the start of the batch (milliseconds)
+    pub power_spectrums: Option<Vec<Vec<f32>>>, // Optional FFT power spectrums
+    pub frequency_bins: Option<Vec<Vec<f32>>>,   // Optional FFT frequency bins
+    pub error: Option<String>,    // Optional error message from the driver
+}
+
 impl Default for ProcessedData {
     fn default() -> Self {
         Self {
             timestamp: 0,
             raw_samples: Vec::new(),
-            processed_voltage_samples: Vec::new(),
+            voltage_samples: Vec::new(),
             power_spectrums: None,
             frequency_bins: None,
             error: None,

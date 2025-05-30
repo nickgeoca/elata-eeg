@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::collections::HashSet;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
@@ -87,6 +88,39 @@ impl MockDriver {
             ));
         }
         
+        // Validate channels
+        if config.channels.is_empty() {
+            // Release the lock if we're returning an error
+            *hardware_in_use = false;
+            return Err(DriverError::ConfigurationError(
+                "At least one channel must be configured".to_string()
+            ));
+        }
+
+        // Check for duplicate channels
+        let mut unique_channels = std::collections::HashSet::new();
+        for &channel in &config.channels {
+            if !unique_channels.insert(channel) {
+                // Release the lock if we're returning an error
+                *hardware_in_use = false;
+                return Err(DriverError::ConfigurationError(
+                    format!("Duplicate channel detected: {}", channel)
+                ));
+            }
+        }
+
+        // For MockDriver, we can be more flexible with channel indices
+        // but still validate they're reasonable
+        for &channel in &config.channels {
+            if channel > 31 {  // Allow more channels for mock testing
+                // Release the lock if we're returning an error
+                *hardware_in_use = false;
+                return Err(DriverError::ConfigurationError(
+                    format!("Invalid channel index: {}. MockDriver supports channels 0-31", channel)
+                ));
+            }
+        }
+
         // Validate batch size
         if config.batch_size == 0 {
             // Release the lock if we're returning an error

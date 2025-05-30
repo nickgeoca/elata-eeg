@@ -14,17 +14,8 @@ use basic_voltage_filter::SignalProcessor; // Added for Phase 2
 use crate::config::DaemonConfig;
 
 
-// This struct is for the existing /eeg endpoint (unfiltered or pre-basic_voltage_filter data)
-#[derive(Clone, Serialize, Debug)]
-pub struct EegBatchData {
-    pub channels: Vec<Vec<f32>>,  // Each inner Vec represents a channel's data for the batch
-    pub timestamp: u64,           // Timestamp for the start of the batch (milliseconds)
-    /// Optional FFT power spectrums. Populated by applet DSPs if results are routed this way, otherwise None.
-    pub power_spectrums: Option<Vec<Vec<f32>>>, // Remains from ProcessedData
-    /// Optional FFT frequency bins. Populated by applet DSPs if results are routed this way, otherwise None.
-    pub frequency_bins: Option<Vec<f32>>,   // Corrected type based on ProcessedData, remains from ProcessedData
-    pub error: Option<String>,    // Optional error message from the driver
-}
+// Re-export EegBatchData from the driver crate to avoid duplication
+pub use eeg_driver::EegBatchData;
 
 /// Data structure for the new WebSocket endpoint (/ws/eeg/data__basic_voltage_filter)
 /// This will contain data processed by basic_voltage_filter::SignalProcessor
@@ -277,16 +268,16 @@ pub async fn process_eeg_data(
 
     // Initialize SignalProcessor once
     // We need sample_rate and num_channels from AdcConfig, and filter settings from DaemonConfig
-    let (daemon_config_clone, adc_config_clone, sample_rate_f32, num_channels_usize) = {
+    let (daemon_config_clone, adc_config_clone, sample_rate_u32, num_channels_usize) = {
         let recorder_guard = csv_recorder.lock().await;
         let adc_conf = recorder_guard.current_adc_config.clone(); // Clone AdcConfig
-        let sample_r = adc_conf.sample_rate as f32;
+        let sample_r = adc_conf.sample_rate; // Keep as u32
         let num_ch = adc_conf.channels.len();
         (recorder_guard.config.clone(), adc_conf, sample_r, num_ch) // Clone DaemonConfig
     };
 
     let mut signal_processor = SignalProcessor::new(
-        sample_rate_f32,
+        sample_rate_u32, // Use u32 directly
         num_channels_usize,
         daemon_config_clone.filter_config.dsp_high_pass_cutoff_hz,
         daemon_config_clone.filter_config.dsp_low_pass_cutoff_hz,
@@ -375,7 +366,9 @@ pub async fn process_eeg_data(
                         // It also needs the channel index.
                         // Ensure channel_idx is within bounds for the signal_processor's configuration
                         if channel_idx < num_channels_usize { // num_channels_usize was derived from adc_config for signal_processor init
-                            match signal_processor.process_chunk(channel_idx, channel_samples_vec.as_slice(), channel_samples_vec.as_mut_slice()) {
+                            // Create a copy of the input samples for processing
+                            let input_samples = channel_samples_vec.clone();
+                            match signal_processor.process_chunk(channel_idx, &input_samples, channel_samples_vec.as_mut_slice()) {
                                 Ok(_) => {} // Successfully processed
                                 Err(e) => {
                                     println!("Error processing chunk for channel {}: {}", channel_idx, e);

@@ -1,6 +1,7 @@
 //! Main driver implementation for the ADS1299 chip.
 
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::collections::HashSet;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use log::{info, warn, debug, error};
@@ -73,6 +74,44 @@ impl Ads1299Driver {
             return Err(DriverError::ConfigurationError(
                 "Ads1299Driver requires config.board_driver=DriverType::Ads1299".to_string()
             ));
+        }
+
+        // Validate channels
+        if config.channels.is_empty() {
+            return Err(DriverError::ConfigurationError(
+                "At least one channel must be configured".to_string()
+            ));
+        }
+
+        // Check for duplicate channels
+        let mut unique_channels = std::collections::HashSet::new();
+        for &channel in &config.channels {
+            if !unique_channels.insert(channel) {
+                return Err(DriverError::ConfigurationError(
+                    format!("Duplicate channel detected: {}", channel)
+                ));
+            }
+        }
+
+        // Validate channel indices for ADS1299 (0-7)
+        for &channel in &config.channels {
+            if channel > 7 {
+                return Err(DriverError::ConfigurationError(
+                    format!("Invalid channel index: {}. ADS1299 supports channels 0-7", channel)
+                ));
+            }
+        }
+
+        // Validate sample rate for ADS1299
+        match config.sample_rate {
+            250 | 500 | 1000 | 2000 | 4000 | 8000 | 16000 => {
+                // Valid sample rates for ADS1299
+            }
+            _ => {
+                return Err(DriverError::ConfigurationError(
+                    format!("Invalid sample rate: {}. ADS1299 supports: 250, 500, 1000, 2000, 4000, 8000, 16000 Hz", config.sample_rate)
+                ));
+            }
         }
 
         // Validate batch size
