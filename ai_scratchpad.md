@@ -1,53 +1,65 @@
-# EEG Kiosk Signal Graph & Applet Debugging Notes (Paused)
+# Revised Plan for Brain Waves Applet FFT Fix (Rust/WASM Approach)
 
-**Date:** 2025-05-29
+**Goal:** Fix the FFT artifact in the `brain_waves` applet by performing FFT on larger, properly windowed data segments using Rust DSP compiled to WebAssembly (WASM), ensuring applet independence.
 
-**Task Context:**
-Investigate and fix the "crazier" EEG signal graph display in the Kiosk frontend. This issue appeared after backend changes were made to incorporate FFT data processing and update the WebSocket binary packet format. The "Brain Waves" applet (first_applet.md) was also reported as not working.
+**Phase 1: Reversion and Cleanup**
 
-**Primary Issue Identified:**
-The root cause of the corrupted signal graph was in [`kiosk/src/components/EegDataHandler.tsx`](./kiosk/src/components/EegDataHandler.tsx:1). When the `fftFlag` in an incoming WebSocket binary message was set to `1` (indicating FFT data is present), but the `onFftData` callback was not provided (e.g., because the main signal graph view was active, not the FFT-specific applet view), the code would skip parsing the FFT data block. This resulted in an incorrect `bufferOffset`, causing the subsequent raw EEG sample parsing logic to read from the wrong part of the buffer (i.e., misinterpreting FFT data as raw samples).
+1.  **Revert Incorrect JavaScript FFT Changes:**
+    *   **`kiosk/src/utils/fftUtils.ts`**:
+        *   Re-comment the `import FFT from 'fft.js';`.
+        *   Re-comment the `calculateFft`, `applyHannWindow`, and `getNextPowerOfTwo` functions.
+    *   **`applets/brain_waves/ui/BrainWavesDisplay.tsx`**:
+        *   Remove the import of `calculateFft` from `kiosk/src/utils/fftUtils.ts`.
+        *   Remove the JavaScript-based FFT processing logic (data accumulation for JS FFT, `channelBuffersRef`, `lastProcessTimeRef`, calls to the JS `calculateFft`).
+        *   The `BrainWavesAppletResponse` interface should be temporarily adjusted to expect the *original* PSD structure from the daemon (as it was before my daemon changes), or simply expect raw data but without any client-side JS FFT processing logic. This is a temporary state before WASM integration.
+        *   The `fftDataRef` will temporarily not be populated correctly by `BrainWavesDisplay.tsx` until the WASM solution is in place.
+    *   **`kiosk/tsconfig.json`**:
+        *   Revert the `"include"` path changes. Remove `../applets/**/*.ts` and `../applets/**/*.tsx` from the `include` array.
 
-**Fixes Applied to [`kiosk/src/components/EegDataHandler.tsx`](./kiosk/src/components/EegDataHandler.tsx:1):**
-1.  **Modified line 137:**
-    *   **Original:** `if (fftFlag === 1 && onFftData) {`
-    *   **Changed to:** `if (fftFlag === 1) {`
-    *   **Reason:** This ensures that the code block responsible for parsing FFT data (and thus correctly advancing the `bufferOffset`) is always entered if the `fftFlag` is `1`, irrespective of whether the `onFftData` callback is currently active.
+2.  **User Actions (To be performed by the user after Phase 1):**
+    *   Delete the file `kiosk/src/utils/fftUtils.ts`.
+    *   Remove the `"fft.js": "^4.0.4"` dependency from `kiosk/package.json`.
+    *   Run `npm install` or `yarn install` in the `kiosk` directory to update `package-lock.json` or `yarn.lock`.
 
-2.  **Modified line 162 (original line number):**
-    *   **Original:** `onFftData(i, Array.from(powerSpectrum)); // Pass channel index and power spectrum`
-    *   **Changed to:**
-        ```typescript
-        if (onFftData) {
-          onFftData(i, Array.from(powerSpectrum)); // Pass channel index and power spectrum
-        }
-        ```
-    *   **Reason:** This conditionally calls `onFftData` only if the callback prop is actually provided. This resolved a TypeScript error (`Cannot invoke an object which is possibly 'undefined'`) that arose after the first change and ensures the FFT data is only passed along if a component is expecting it.
+**Phase 2: Rust DSP and WASM Implementation**
 
-**Expected Outcome of Fixes:**
-*   The main EEG signal graph in the Kiosk should now display correctly because the raw sample data will be parsed from the correct offset in the WebSocket message buffer.
-*   The "Brain Waves" applet should also benefit, as the underlying data parsing for FFT data is now more robust. If its `onFftData` handler is active, it should receive the correctly parsed power spectrum.
+3.  **Enhance Rust `elata_dsp_brain_waves_fft` Crate (`dsp/brain_waves_fft/src/lib.rs`):**
+    *   Modify the `process_eeg_data` function (or create a new one for WASM) to:
+        *   Accept a slice of raw voltage samples (`Vec<f32>` or `&[f32]`) representing a single channel's data window.
+        *   Accept the sample rate.
+        *   Implement a windowing function (e.g., Hann window) to be applied to the input data.
+        *   Perform FFT on the windowed data.
+        *   Calculate the Power Spectral Density (PSD).
+        *   Return the PSD (`Vec<f32>`) and the corresponding frequency bins (`Vec<f32>`).
+    *   Consider integrating a well-tested crate like `welch_sde` or `rustfft` directly for robust FFT and PSD calculations if the current implementation is insufficient.
+    *   Ensure the output is suitable for the `AppletFftRenderer.tsx`.
 
-**Secondary Concern (Reviewed & Appears OK based on provided diff):**
-*   **Initial Concern:** Potential loss of `fft_error` (an error string originating from FFT processing in the `driver` crate) before it reaches the Kiosk.
-*   **Review Findings:** The git diff provided by the user for backend changes indicates that:
-    *   In [`driver/src/eeg_system/mod.rs`](./driver/src/eeg_system/mod.rs:1), `fft_error` is correctly placed into the `error` field of `ProcessedData`.
-    *   In [`daemon/src/driver_handler.rs`](./daemon/src/driver_handler.rs:1), `ProcessedData.error` is cloned into `EegBatchData.error` (specifically, the line `error: data.error.clone(),`).
-    *   In [`daemon/src/server.rs`](./daemon/src/server.rs:1), the `create_eeg_binary_packet` function uses `EegBatchData.error` to set the `error_flag` in the binary packet sent to the Kiosk.
-    *   The Kiosk's [`EegDataHandler.tsx`](./kiosk/src/components/EegDataHandler.tsx:1) already has logic to check this `errorFlag` and display any associated error message.
-*   **Conclusion:** The error propagation path for `fft_error` seems to be correctly handled by the changes in the provided diff.
+4.  **Compile `elata_dsp_brain_waves_fft` to WebAssembly (WASM):**
+    *   Add necessary dependencies like `wasm-bindgen`.
+    *   Create a WASM-compatible public function (e.g., annotated with `#[wasm_bindgen]`) that wraps the enhanced FFT processing logic. This function will be callable from JavaScript.
+    *   Build the crate as a WASM module (e.g., using `wasm-pack`). The output `.wasm` and generated JavaScript binding files will be used by the applet.
+    *   The WASM module should ideally be placed in a location accessible to the applet, perhaps within the `applets/brain_waves/ui/` directory or a shared `applets/pkg/` directory.
 
-**Applet Status (`todo/first_applet.md`):**
-The work done directly addresses a data integrity issue that would affect both the main signal graph and the data pipeline for any applet consuming FFT data. The "Brain Waves" applet should now have a more reliable data stream.
+**Phase 3: Frontend Integration (Applet)**
 
-**Next Steps (Upon Resuming Task):**
-1.  **Verify Frontend Fix:** Run the application.
-    *   Confirm that the main EEG signal graph displays correctly and no longer looks "crazier".
-    *   Ensure no new console errors appear in the Kiosk related to data parsing.
-2.  **Test "Brain Waves" Applet:**
-    *   Switch to the "Brain Waves" applet view (or the view that consumes `onFftData`).
-    *   Verify that it receives and displays FFT data as expected.
-    *   Confirm that the applet works as intended (as much as its current implementation allows).
-3.  **Test FFT Error Propagation (If Possible):**
-    *   If there's a way to reliably trigger an `fft_error` in the `driver` (e.g., by feeding it invalid data for FFT if that's handled by an error return), test if this error message correctly appears in the Kiosk UI. This would fully confirm the error propagation path.
-4.  **Address any further issues** based on testing.
+5.  **Update Applet Frontend (`applets/brain_waves/ui/BrainWavesDisplay.tsx`):**
+    *   **WebSocket Data:**
+        *   Ensure the `BrainWavesAppletResponse` interface correctly reflects that it receives raw voltage samples (`channels: number[][]`) from the daemon (this matches the daemon change already made).
+    *   **WASM Integration:**
+        *   Load and instantiate the compiled WASM module.
+        *   Create new `channelBuffersRef` (similar to what was attempted for JS FFT) to accumulate incoming raw samples for each channel from the WebSocket.
+    *   **FFT Processing:**
+        *   When enough data is accumulated in a buffer for a channel (e.g., 2000ms window):
+            *   Call the exported WASM function, passing the accumulated data window and sample rate.
+            *   Receive the PSD and frequency bins from the WASM function.
+        *   Use a sliding window approach (e.g., process every 1000ms hop).
+    *   **Data for Renderer:**
+        *   Populate `fftDataRef.current` with the PSD data received from the WASM module for each channel.
+        *   The `AppletFftRenderer.tsx` will also need the frequency bins. This might require passing them alongside the PSD or having `AppletFftRenderer.tsx` calculate them based on sample rate and FFT size (if the WASM module provides the FFT size).
+        *   Trigger `setFftDataVersion` to update `AppletFftRenderer.tsx`.
+
+6.  **Update `applets/brain_waves/ui/AppletFftRenderer.tsx`:**
+    *   Ensure it can correctly use the frequency bins provided or calculated based on the output of the WASM FFT processing. If the number of bins or frequency resolution changes due to the new WASM processing, adjustments to x-axis scaling or label generation might be needed.
+
+**Expected Outcome:**
+The Brain Waves applet will perform FFT on larger, windowed data segments using Rust code compiled to WASM, leading to a more accurate and stable FFT plot, resolving the visual artifacts. The applet will be more self-contained regarding its core DSP logic.

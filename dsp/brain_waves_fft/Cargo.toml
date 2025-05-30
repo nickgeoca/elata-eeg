@@ -7,7 +7,7 @@ edition = "2021"
 # For FFT. Consider `rustfft`.
 rustfft = "6.1"
 # For windowing functions if implementing Welch's method (e.g., Hann).
-# ndarray = "0.15"
+ndarray = "0.15"
 
 [lib]
 name = "elata_dsp_brain_waves_fft" # Ensure this matches the package name for clarity

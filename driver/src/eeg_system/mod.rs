@@ -8,9 +8,8 @@ use tokio_util::sync::CancellationToken;
 use crate::board_drivers::{
     create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
 };
-use crate::dsp::filters::SignalProcessor;
+// use crate::dsp::filters::SignalProcessor; // Removed as per DSP refactor plan
 use super::ProcessedData;
-use elata_dsp_brain_waves_fft; // Import for FFT processing
 
 /// Helper function to process a batch of data
 ///
@@ -18,8 +17,7 @@ use elata_dsp_brain_waves_fft; // Import for FFT processing
 async fn process_data_batch(
     data_batch: &[AdcData],
     channel_count: usize,
-    sample_rate: f32, // Added sample_rate for FFT
-    processor: &Arc<Mutex<SignalProcessor>>,
+    // processor: &Arc<Mutex<SignalProcessor>>, // This line was already commented, ensuring it stays so.
     tx: &mpsc::Sender<ProcessedData>,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     if data_batch.is_empty() {
@@ -30,10 +28,10 @@ async fn process_data_batch(
     let batch_size = data_batch.len();
     let samples_per_channel = data_batch[0].voltage_samples[0].len();
     
-    // Pre-allocate for processed voltage samples
-    let mut processed_voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
+    // Pre-allocate for voltage samples (previously processed_voltage_samples)
+    let mut voltage_samples: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
     for _ in 0..channel_count {
-        processed_voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
+        voltage_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
     }
     
     // Pre-allocate for raw samples
@@ -42,11 +40,11 @@ async fn process_data_batch(
         raw_samples.push(Vec::with_capacity(batch_size * samples_per_channel));
     }
     
-    // Single lock acquisition for the batch
-    let mut proc_guard = match processor.lock().await {
-        guard => guard,
-        // This would only happen if a thread panicked while holding the lock
-    };
+    // // Single lock acquisition for the batch // Removed as per DSP refactor plan
+    // let mut proc_guard = match processor.lock().await {
+    //     guard => guard,
+    //     // This would only happen if a thread panicked while holding the lock
+    // };
     
     // Process all samples in the batch
     for data in data_batch {
@@ -57,68 +55,29 @@ async fn process_data_batch(
             }
         }
         
-        // Process voltage samples using the new process_chunk method
-        for (ch_idx, channel_samples) in data.voltage_samples.iter().enumerate() {
+        // Collect voltage samples directly (no filtering in driver)
+        for (ch_idx, channel_voltage_s) in data.voltage_samples.iter().enumerate() {
             if ch_idx < channel_count {
-                // Create a temporary buffer for the processed samples
-                let mut processed_buffer = vec![0.0; channel_samples.len()];
-                
-                // Process the entire chunk at once
-                if let Err(err) = proc_guard.process_chunk(ch_idx, channel_samples, &mut processed_buffer) {
-                    return Err(format!("Error processing chunk for channel {}: {}", ch_idx, err).into());
-                }
-                
-                // Add the processed samples to our result
-                processed_voltage_samples[ch_idx].extend(processed_buffer);
+                voltage_samples[ch_idx].extend(channel_voltage_s.iter().cloned());
             }
         }
     }
-    drop(proc_guard);
-
-    // --- FFT Processing ---
-    let mut all_power_spectrums: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
-    let mut all_frequency_bins: Vec<Vec<f32>> = Vec::with_capacity(channel_count);
-    let mut fft_error: Option<String> = None;
-
-    for ch_data in processed_voltage_samples.iter() {
-        if ch_data.is_empty() {
-            // Handle empty channel data if necessary, perhaps by adding empty vecs or specific error
-            all_power_spectrums.push(Vec::new());
-            all_frequency_bins.push(Vec::new());
-            continue;
-        }
-        match elata_dsp_brain_waves_fft::process_eeg_data(ch_data, sample_rate) {
-            Ok((power, freqs)) => {
-                all_power_spectrums.push(power);
-                all_frequency_bins.push(freqs);
-            }
-            Err(e) => {
-                eprintln!("FFT processing error for a channel: {}", e);
-                // Store empty vecs for this channel on error, and set a global FFT error
-                all_power_spectrums.push(Vec::new());
-                all_frequency_bins.push(Vec::new());
-                if fft_error.is_none() {
-                    fft_error = Some(format!("FFT error on one or more channels: {}", e));
-                }
-            }
-        }
-    }
-    // --- End FFT Processing ---
+    // drop(proc_guard); // Removed as per DSP refactor plan
 
     // Send the processed data
     tx.send(ProcessedData {
         timestamp: data_batch.last().unwrap().timestamp,
         raw_samples,
-        processed_voltage_samples,
-        power_spectrums: Some(all_power_spectrums),
-        frequency_bins: Some(all_frequency_bins),
-        error: fft_error, // Use FFT error if present, otherwise None
+        voltage_samples, // Renamed from processed_voltage_samples
+        power_spectrums: None,
+        frequency_bins: None,
+        error: None,
     }).await.map_err(|e| format!("Failed to send processed data: {}", e).into())
 }
 
 pub struct EegSystem {
     driver: Box<dyn AdcDriver>,
-    processor: Arc<Mutex<SignalProcessor>>,
+    // processor: Arc<Mutex<SignalProcessor>>, // Removed as per DSP refactor plan
     processing_task: Option<JoinHandle<()>>,
     tx: mpsc::Sender<ProcessedData>,
     event_rx: Option<mpsc::Receiver<DriverEvent>>,
@@ -131,19 +90,19 @@ impl EegSystem {
         config: AdcConfig
     ) -> Result<(Self, mpsc::Receiver<ProcessedData>), Box<dyn Error>> {
         let (driver, event_rx) = create_driver(config.clone()).await?;
-        let processor = Arc::new(Mutex::new(SignalProcessor::new(
-            config.sample_rate,
-            config.channels.len(),
-            config.dsp_high_pass_cutoff_hz,
-            config.dsp_low_pass_cutoff_hz,
-            config.powerline_filter_hz,
-        )));
+        // let processor = Arc::new(Mutex::new(SignalProcessor::new( // Removed as per DSP refactor plan
+        //     config.sample_rate,
+        //     config.channels.len(),
+        //     config.dsp_high_pass_cutoff_hz,
+        //     config.dsp_low_pass_cutoff_hz,
+        //     config.powerline_filter_hz,
+        // )));
         let (tx, rx) = mpsc::channel(100);
         let cancel_token = CancellationToken::new();
 
         let system = Self {
             driver,
-            processor,
+            // processor, // Removed as per DSP refactor plan
             processing_task: None,
             tx,
             event_rx: Some(event_rx),
@@ -179,23 +138,23 @@ impl EegSystem {
             // Create a new token for the next task
             self.cancel_token = CancellationToken::new();
         }
-
-        // Reset the signal processor
-        {
-            let mut proc_guard = match self.processor.lock().await {
-                guard => guard,
-                // This would only happen if a thread panicked while holding the lock
-                // In a real system, we might want to recreate the processor entirely
-            };
+ 
+        // // Reset the signal processor // Removed as per DSP refactor plan
+        // {
+        //     let mut proc_guard = match self.processor.lock().await {
+        //         guard => guard,
+        //         // This would only happen if a thread panicked while holding the lock
+        //         // In a real system, we might want to recreate the processor entirely
+        //     };
             
-            proc_guard.reset(
-                config.sample_rate,
-                config.channels.len(),
-                config.dsp_high_pass_cutoff_hz,
-                config.dsp_low_pass_cutoff_hz,
-                config.powerline_filter_hz
-            );
-        }
+        //     proc_guard.reset(
+        //         config.sample_rate,
+        //         config.channels.len(),
+        //         config.dsp_high_pass_cutoff_hz,
+        //         config.dsp_low_pass_cutoff_hz,
+        //         config.powerline_filter_hz
+        //     );
+        // }
 
         self.driver.start_acquisition().await?;
 
@@ -203,11 +162,10 @@ impl EegSystem {
         let mut event_rx = self.event_rx.take().expect("Event receiver should exist");
 
         // Start the processing task
-        let processor: Arc<Mutex<SignalProcessor>> = Arc::clone(&self.processor);
+        // let processor: Arc<Mutex<SignalProcessor>> = Arc::clone(&self.processor); // Removed as per DSP refactor plan
         let tx = self.tx.clone();
         // Capture the channel count from the configuration
         let channel_count = config.channels.len();
-        let sample_rate_for_fft = config.sample_rate as f32; // Capture sample rate for FFT
         // Clone the cancellation token for the task
         let cancel_token = self.cancel_token.clone();
 
@@ -230,8 +188,7 @@ impl EegSystem {
                                         if let Err(e) = process_data_batch(
                                             &data_batch,
                                             channel_count,
-                                            sample_rate_for_fft, // Pass sample_rate
-                                            &processor,
+                                            // &processor, // This line was already commented, ensuring it stays so.
                                             &tx
                                         ).await {
                                             eprintln!("Error processing data batch: {}", e);
@@ -239,7 +196,7 @@ impl EegSystem {
                                             let _ = tx.send(ProcessedData {
                                                 timestamp: data_batch.last().map_or(0, |d| d.timestamp),
                                                 raw_samples: Vec::new(),
-                                                processed_voltage_samples: Vec::new(),
+                                                voltage_samples: Vec::new(), // Renamed
                                                 power_spectrums: None, // Ensure all fields are present
                                                 frequency_bins: None,  // Ensure all fields are present
                                                 error: Some(format!("Processing error: {}", e)),
@@ -260,7 +217,7 @@ impl EegSystem {
                                                 .unwrap_or_default()
                                                 .as_micros() as u64,
                                             raw_samples: Vec::new(),
-                                            processed_voltage_samples: Vec::new(),
+                                            voltage_samples: Vec::new(), // Renamed
                                             power_spectrums: None,
                                             frequency_bins: None,
                                             error: Some(format!("Driver status changed: {:?}", status)),
@@ -276,7 +233,7 @@ impl EegSystem {
                                                 .unwrap_or_default()
                                                 .as_micros() as u64,
                                             raw_samples: Vec::new(),
-                                            processed_voltage_samples: Vec::new(),
+                                            voltage_samples: Vec::new(), // Renamed
                                             power_spectrums: None,
                                             frequency_bins: None,
                                             error: Some(format!("Driver error: {}", err_msg)),

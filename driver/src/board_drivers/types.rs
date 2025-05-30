@@ -43,12 +43,12 @@ pub struct AdcConfig {
     pub board_driver: DriverType,
     pub batch_size: usize,  // Number of samples to collect in a batch
     pub Vref: f32,  // Vref of adc
-    /// High-pass filter cutoff frequency in Hz
-    pub dsp_high_pass_cutoff_hz: f32,
-    /// Low-pass filter cutoff frequency in Hz
-    pub dsp_low_pass_cutoff_hz: f32,
-    /// Powerline filter frequency in Hz (50Hz, 60Hz, or None for off)
-    pub powerline_filter_hz: Option<u32>,
+    // /// High-pass filter cutoff frequency in Hz // Removed as per DSP refactor plan
+    // pub dsp_high_pass_cutoff_hz: f32, // Removed as per DSP refactor plan
+    // /// Low-pass filter cutoff frequency in Hz // Removed as per DSP refactor plan
+    // pub dsp_low_pass_cutoff_hz: f32, // Removed as per DSP refactor plan
+    // /// Powerline filter frequency in Hz (50Hz, 60Hz, or None for off) // Removed as per DSP refactor plan
+    // pub powerline_filter_hz: Option<u32>, // Removed as per DSP refactor plan
 }
 
 impl Default for AdcConfig {
@@ -60,9 +60,9 @@ impl Default for AdcConfig {
             board_driver: DriverType::Mock,
             batch_size: 32,    // Default batch size (typical SPI buffer size)
             Vref: 4.5,         // Vref for the ADC
-            dsp_high_pass_cutoff_hz: 0.1,  // Default high-pass filter cutoff (Hz)
-            dsp_low_pass_cutoff_hz: 100.0, // Default low-pass filter cutoff (Hz)
-            powerline_filter_hz: Some(60), // Default to 60Hz powerline filter
+            // dsp_high_pass_cutoff_hz: 0.1,  // Removed as per DSP refactor plan
+            // dsp_low_pass_cutoff_hz: 100.0, // Removed as per DSP refactor plan
+            // powerline_filter_hz: Some(60), // Removed as per DSP refactor plan
         }
     }
 }

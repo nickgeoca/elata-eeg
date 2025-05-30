@@ -49,20 +49,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Increase channel capacity but not too much to avoid excessive buffering
-    let (tx, _) = broadcast::channel::<driver_handler::EegBatchData>(32);  // Reduced from 1024
-    let tx_ws = tx.clone();
+    // Channel for existing /eeg endpoint (unfiltered EegBatchData)
+    let (tx_eeg_batch_data, _) = broadcast::channel::<driver_handler::EegBatchData>(32);
+    let tx_eeg_batch_data_ws = tx_eeg_batch_data.clone();
+
+    // Channel for new /ws/eeg/data__basic_voltage_filter endpoint (FilteredEegData)
+    let (tx_filtered_eeg_data, _) = broadcast::channel::<driver_handler::FilteredEegData>(32);
+    let tx_filtered_eeg_data_ws = tx_filtered_eeg_data.clone();
 
     // Create the ADC configuration
     let initial_config = AdcConfig {
-        sample_rate: 500,
-        channels: vec![0, 1],
-        gain: 24.0,
+        sample_rate: 500, // Example, should ideally come from a more specific hardware config or AdcConfig defaults
+        channels: vec![0, 1], // Example
+        gain: 24.0, // Example
         board_driver: daemon_config.driver_type,
-        batch_size: daemon_config.batch_size,
-        Vref: 4.5,
-        dsp_high_pass_cutoff_hz: daemon_config.dsp_high_pass_cutoff_hz,
-        dsp_low_pass_cutoff_hz: daemon_config.dsp_low_pass_cutoff_hz,
-        powerline_filter_hz: daemon_config.powerline_filter_hz,
+        batch_size: daemon_config.batch_size, // This batch_size is for the driver
+        Vref: 4.5, // Example
+        // DSP fields are removed from AdcConfig as per Phase 1
+        // dsp_high_pass_cutoff_hz, dsp_low_pass_cutoff_hz, powerline_filter_hz
+        // are now managed by the daemon via daemon_config.filter_config for its own SignalProcessor
     };
     
     // Create shared state
@@ -98,7 +103,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Set up WebSocket routes and get config update channel
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
-        tx_ws,
+        tx_eeg_batch_data_ws, // For existing /eeg endpoint
+        tx_filtered_eeg_data_ws, // For new filtered data endpoint
         config.clone(),
         csv_recorder.clone(),
         is_recording.clone(),
@@ -109,6 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("- ws://0.0.0.0:8080/eeg (EEG data) - accessible via this machine's IP address");
     println!("- ws://0.0.0.0:8080/config (Configuration) - accessible via this machine's IP address");
     println!("- ws://0.0.0.0:8080/command (Recording control) - accessible via this machine's IP address");
+    println!("- ws://0.0.0.0:8080/ws/eeg/data__basic_voltage_filter (Filtered EEG data) - accessible via this machine's IP address");
 
     // Spawn WebSocket server
     let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
@@ -120,7 +127,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Process EEG data
     let processing_handle = tokio::spawn(driver_handler::process_eeg_data(
         data_rx,
-        tx.clone(),
+        tx_eeg_batch_data.clone(), // For existing /eeg endpoint
+        tx_filtered_eeg_data.clone(), // For new filtered data endpoint
         csv_recorder.clone(),
         is_recording.clone(),
         processing_token
@@ -259,7 +267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         // Start new processing task
                         let new_processing_handle = tokio::spawn(driver_handler::process_eeg_data(
                             new_data_rx,
-                            tx.clone(),
+                            tx_eeg_batch_data.clone(), // For existing /eeg endpoint
+                            tx_filtered_eeg_data.clone(), // For new filtered data endpoint
                             csv_recorder.clone(),
                             is_recording.clone(),
                             new_token.clone()

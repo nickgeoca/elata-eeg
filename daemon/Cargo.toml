@@ -15,6 +15,7 @@ csv = "1.2"
 chrono = "0.4"
 env_logger = "0.10" # Added logger
 elata_dsp_brain_waves_fft = { path = "../dsp/brain_waves_fft", optional = true }
+basic_voltage_filter = { path = "../dsp/basic_voltage_filter" }
 
 [dev-dependencies]
 tempfile = "3.8"

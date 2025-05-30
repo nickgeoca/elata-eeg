@@ -1,25 +1,29 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { AppletFftRenderer } from './AppletFftRenderer';
+import { calculateFft } from '../../../kiosk/src/utils/fftUtils'; // Adjusted path
+
+// FFT Processing parameters
+const FFT_WINDOW_DURATION_MS = 2000; // e.g., 2 seconds
+const FFT_HOP_DURATION_MS = 1000;   // e.g., 1 second overlap
 
 // Define the expected structure of the data from the WebSocket
-// This should match BrainWavesAppletResponse and BrainWavesChannelData from daemon/src/server.rs
-interface BrainWavesChannelData {
-    power_spectrum: number[];
-    frequency_bins: number[];
-}
-
+// This should match the updated BrainWavesAppletResponse from daemon/src/server.rs
 interface BrainWavesAppletResponse {
     timestamp: number;
-    channels_data: (BrainWavesChannelData | null)[];
+    channels: number[][]; // Array of channel data arrays (raw voltage samples)
     error?: string | null;
 }
 
 interface BrainWavesDisplayProps {
     containerWidth?: number;
     containerHeight?: number;
-    // This config would ideally come from a shared context or props
-    // For now, we'll define a basic one here or expect it.
-    eegConfig: any;
+    eegConfig: {
+        sample_rate: number;
+        channels: number[] | { channel_number: number; // Or whatever the actual structure is
+                                is_active: boolean
+                              }[];
+        // Add other properties of eegConfig if known and used
+    };
 }
 
 const BrainWavesDisplay: React.FC<BrainWavesDisplayProps> = ({
@@ -33,6 +37,8 @@ const BrainWavesDisplay: React.FC<BrainWavesDisplayProps> = ({
 
     const fftDataRef = useRef<Record<number, number[]>>({});
     const [fftDataVersion, setFftDataVersion] = useState(0);
+    const channelBuffersRef = useRef<Record<number, number[]>>({}); // To accumulate samples per channel
+    const lastProcessTimeRef = useRef<Record<number, number>>({}); // To track last FFT processing time per channel
 
     useEffect(() => {
         // Construct WebSocket URL
@@ -50,27 +56,59 @@ const BrainWavesDisplay: React.FC<BrainWavesDisplayProps> = ({
         socket.onmessage = (event) => {
             try {
                 const message: BrainWavesAppletResponse = JSON.parse(event.data as string);
-                setData(message); // Keep raw data if needed for other UI elements
+                setData(message);
 
                 if (message.error) {
                     console.error('Brain Waves Applet error:', message.error);
                     setError(`Applet Error: ${message.error}`);
-                    fftDataRef.current = {}; // Clear data on error
-                } else if (message.channels_data) {
-                    const newFftData: Record<number, number[]> = {};
-                    message.channels_data.forEach((channelData, index) => {
-                        if (channelData) {
-                            // Assuming channelData.power_spectrum is what FftRenderer needs
-                            newFftData[index] = channelData.power_spectrum;
+                    fftDataRef.current = {};
+                    channelBuffersRef.current = {};
+                    setFftDataVersion((prev: number) => prev + 1);
+                    return;
+                }
+
+                if (message.channels && eegConfig && eegConfig.sample_rate) {
+                    const sampleRate = eegConfig.sample_rate;
+                    const fftWindowSize = Math.floor(FFT_WINDOW_DURATION_MS / 1000 * sampleRate);
+                    const fftHopSize = Math.floor(FFT_HOP_DURATION_MS / 1000 * sampleRate);
+                    let newFftDataAvailable = false;
+
+                    message.channels.forEach((channelSamples, channelIndex) => {
+                        if (!channelBuffersRef.current[channelIndex]) {
+                            channelBuffersRef.current[channelIndex] = [];
+                        }
+                        channelBuffersRef.current[channelIndex].push(...channelSamples);
+
+                        // Initialize last process time if not set
+                        if (lastProcessTimeRef.current[channelIndex] === undefined) {
+                            lastProcessTimeRef.current[channelIndex] = Date.now();
+                        }
+
+                        // Check if enough data and time since last FFT
+                        while (channelBuffersRef.current[channelIndex].length >= fftWindowSize &&
+                               (Date.now() - (lastProcessTimeRef.current[channelIndex] || 0)) >= FFT_HOP_DURATION_MS) {
+
+                            const dataWindow = channelBuffersRef.current[channelIndex].slice(0, fftWindowSize);
+                            const psd = calculateFft(dataWindow, sampleRate);
+                            
+                            if (psd && psd.length > 0) {
+                                fftDataRef.current[channelIndex] = psd;
+                                newFftDataAvailable = true;
+                            }
+                            
+                            // Slide the buffer
+                            channelBuffersRef.current[channelIndex] = channelBuffersRef.current[channelIndex].slice(fftHopSize);
+                            lastProcessTimeRef.current[channelIndex] = Date.now(); // Update last process time
                         }
                     });
-                    fftDataRef.current = newFftData;
-                    // console.log('Processed FFT data for renderer:', newFftData);
+
+                    if (newFftDataAvailable) {
+                        setFftDataVersion((prev: number) => prev + 1);
+                    }
                 }
-                setFftDataVersion(prev => prev + 1); // Trigger re-render in AppletFftRenderer
             } catch (e) {
-                console.error('Error parsing Brain Waves applet message:', e);
-                setError('Error parsing message from applet.');
+                console.error('Error processing Brain Waves applet message:', e);
+                setError('Error processing message from applet.');
             }
         };
 
