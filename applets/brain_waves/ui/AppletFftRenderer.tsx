@@ -158,13 +158,14 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       if (wglpRef.current) {
         // Clear all lines before destroying the plot
         try {
-          if (typeof wglpRef.current.removeAllLines === 'function') {
-            wglpRef.current.removeAllLines();
-          } else if (typeof wglpRef.current.clear === 'function') {
+          if (typeof wglpRef.current.clear === 'function') {
             wglpRef.current.clear();
           } else if (typeof wglpRef.current.removeLine === 'function') {
+            // Fallback if clear is not available for some reason, or to be very thorough
             [...gridLinesRef.current, ...linesRef.current].forEach(line => {
-              wglpRef.current!.removeLine(line);
+              if (wglpRef.current?.removeLine) { // Ensure removeLine exists before calling
+                 wglpRef.current.removeLine(line);
+              }
             });
           }
         } catch (error) {
@@ -174,14 +175,9 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
         gridLinesRef.current = [];
         linesRef.current = [];
         
-        // Destroy the WebGL plot instance
-        try {
-          if (typeof wglpRef.current.destroy === 'function') {
-            wglpRef.current.destroy();
-          }
-        } catch (error) {
-          console.warn('[AppletFftRenderer] Error destroying WebGL plot:', error);
-        }
+        // WebGL plot instance is managed by React's lifecycle and garbage collection.
+        // The canvas element will be removed from the DOM.
+        // Previous steps (clear/removeLine) handle clearing plot contents.
         
         wglpRef.current = null;
         console.log('[AppletFftRenderer] WebGLPlot instance cleaned up.');

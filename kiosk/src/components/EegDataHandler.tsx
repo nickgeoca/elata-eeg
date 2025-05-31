@@ -17,7 +17,6 @@ import {
     FFT_WINDOW_DURATION_MS, // Import from constants
     FFT_HOP_DURATION_MS     // Import from constants
 } from '../utils/eegConstants';
-// import { calculateFft } from '../utils/fftUtils'; // Removed: FFT calculation is now backend-driven
  
 interface EegDataHandlerProps {
   config: any;

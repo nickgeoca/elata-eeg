@@ -368,4 +368,5 @@ echo "✅ Installation manifest created"
 
 print_header "Installation Complete"
 echo "🎉 Setup complete! Rebooting..."
+sudo sync # Ensure all disk writes are flushed before reboot
 sudo reboot

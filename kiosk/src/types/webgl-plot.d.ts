@@ -33,19 +33,27 @@ declare module 'webgl-plot' {
     // NOTE: addPoint(yValue: number) does NOT exist in this multi-line version.
   }
 
-  // Placeholder for WebglStep if it's a distinct class used with addLine/removeLine
-  // This might need to be more detailed based on the actual library structure.
-  export class WebglStep {
+  // Define WebglLine based on usage and example code
+  export class WebglLine {
     constructor(color: ColorRGBA, numPoints: number);
     numPoints: number;
     color: ColorRGBA;
     lineWidth: number;
-    // Add other properties/methods of WebglStep if known e.g. scaleY, offsetY, xy
-    // setX was removed as it's not a function on the actual object.
+    scaleX: number;
     scaleY: number;
+    offsetX: number;
     offsetY: number;
-    xy: Float32Array; // Assuming xy is a Float32Array based on typical WebGL usage
+    xy: Float32Array;
+    
+    arrangeX(): void;
+    setY(index: number, y: number): void;
+    // Add any other methods or properties if discovered
   }
+
+  // WebglStep might be an internal detail or a specific type of line.
+  // For now, focusing on WebglLine as the primary type used.
+  // If WebglStep is distinct and used, its definition can be refined.
+  // export class WebglStep { ... } // Original WebglStep definition can be kept if needed separately
 
   // Based on webglplot.d.ts - Declaring used parts
   export class WebglPlot {
@@ -63,13 +71,14 @@ declare module 'webgl-plot' {
         debug?: boolean;
     });
     // Method used
-    update(): void; // Keep for now
+    update(): void;
     // Method used
     clear(): void;
-    // Added missing methods based on FftRenderer.tsx usage
+    // Added missing methods based on FftRenderer.tsx usage and example
     viewport(x: number, y: number, width: number, height: number): void;
-    removeLine(line: WebglStep): void; // Assuming WebglStep is the correct type
-    // hasLine was removed as it's not a function on the actual object
-    addLine(line: WebglStep): void;    // Assuming WebglStep is the correct type
+    removeLine(line: WebglLine): void; // Changed to WebglLine
+    addLine(line: WebglLine): void;    // Changed to WebglLine
+    addAuxLine(line: WebglLine): void; // Added based on example
+    removeAllLines(): void; // Added based on example (even if implemented via clear or loop)
   }
 }

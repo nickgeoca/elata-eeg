@@ -8,7 +8,6 @@ import { useEegConfig } from './EegConfig';
 import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
-// import { FftRenderer } from './FftRenderer'; // No longer directly used here
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
 import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';

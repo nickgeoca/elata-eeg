@@ -28,6 +28,8 @@ cd kiosk
 rm -rf .next
 echo "⚙️ Rebuilding Next.js app..."
 npm run build
+echo "⚙️ Syncing kiosk build to disk..."
+sync          # Ensure all build files are written to disk
 cd ..
 echo "✅ Kiosk rebuild complete!"
 
