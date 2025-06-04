@@ -16,7 +16,7 @@ import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
 import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
-import BrainWavesDisplay from '../../../applets/brain_waves/ui/BrainWavesDisplay';
+import BrainWavesDisplay from '../../../plugins/ui/brain_waves/ui/BrainWavesDisplay';
  
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);

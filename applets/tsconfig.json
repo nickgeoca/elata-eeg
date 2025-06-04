@@ -1,9 +1,0 @@
-{
-  "extends": "../kiosk/tsconfig.json",
-  "compilerOptions": {
-  },
-  "include": [
-    "**/*.ts",
-    "**/*.tsx"
-  ]
-}
