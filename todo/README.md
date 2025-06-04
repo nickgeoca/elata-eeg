@@ -7,8 +7,11 @@
 
 # TODO Docs
 - security.md... security hardening
-- applets.md... way to add applets new dsp to code
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
+
+- [Kiosk Boot Failure Investigation](./boot_failures.md) - Diagnosing "site can't be reached" error after reboot.
+
+- [Next.js Build Error Session Notes](./next_js_build_error_session_notes.md) - Investigation of React dependency resolution issues with applet files outside kiosk project.
 
 ### TODO MVP
 - 3-d printed case

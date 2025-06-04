@@ -129,8 +129,12 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
 
     return () => {
       if (wsRef.current) {
+        // Prevent the onclose handler from trying to reconnect
+        // when we are intentionally closing due to unmount.
+        wsRef.current.onclose = null;
         wsRef.current.close();
         wsRef.current = null;
+        console.log('[AppletFftRenderer] WebSocket intentionally closed on unmount.');
       }
     };
   }, [config]);

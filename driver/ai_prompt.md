@@ -25,7 +25,7 @@ this is an architecture doc for the ai to understand the context of this directo
 4.  The **`driver` software** (this project) processes the raw data received from the ADS1299:
     *   **Parsing**: Parses the multi-byte data packets. Each packet typically contains a status word and 24-bit (3-byte) samples for each active channel.
     *   **Conversion**: Converts the raw integer ADC (Analog-to-Digital Converter) counts from each channel into floating-point voltage values. This conversion uses the known reference voltage (VREF) of the ADS1299 and the programmed gain for that channel.
-    *   **DSP**: Applies configured digital signal processing filters (e.g., high-pass to remove DC offset, low-pass for anti-aliasing or noise reduction, and notch filters to remove powerline interference) using the [`SignalProcessor`](./src/dsp/filters.rs:96).
+    *   **DSP**: *Note: The `SignalProcessor` ([`driver/src/dsp/filters.rs:96`](./src/dsp/filters.rs:96)) is designed to apply digital signal processing filters (e.g., high-pass, low-pass, notch). However, its integration into `EegSystem` is currently commented out as part of a DSP refactor plan. Therefore, the driver presently passes voltage-converted data without this DSP step.*
     *   **Batching**: Collects processed samples into batches, typically with an associated timestamp indicating the time of the first sample in the batch.
 5.  **Upstream Consumer** (e.g., the `daemon` application): Receives these processed EEG data batches. The [`EegSystem`](./src/eeg_system/mod.rs:85) provides an asynchronous MPSC (Multi-Producer, Single-Consumer) channel (`tokio::sync::mpsc::Receiver`) for this purpose.
 
@@ -42,17 +42,17 @@ sequenceDiagram
     ADS1299_EVM-->>Driver_RPi5: Data Ready Signal (DRDY GPIO Interrupt)
     Driver_RPi5->>ADS1299_EVM: Request Data Read (SPI Commands)
     ADS1299_EVM-->>Driver_RPi5: Raw Digital EEG Data (SPI Transfer)
-    Driver_RPi5->>Driver_RPi5: Process Data (Convert, Filter via SignalProcessor)
+    Driver_RPi5->>Driver_RPi5: Process Data (Convert to Voltage; Filtering via SignalProcessor currently bypassed)
     Driver_RPi5->>Upstream_Consumer: Processed EEG Data Batches (via MPSC Channel)
 ```
 
 **Key Data Structures**:
-*   [`AdcConfig`](./src/board_drivers/types.rs:39) (from [`driver/src/board_drivers/types.rs`](./src/board_drivers/types.rs:1)): The central configuration struct. It defines parameters like target sample rate, list of active channels, per-channel gain settings, the type of board driver to use (e.g., `Ads1299`, `Mock`), DSP filter cutoff frequencies (high-pass, low-pass, optional notch), reference voltage (Vref), and data batch size.
+*   [`AdcConfig`](./src/board_drivers/types.rs:39) (from [`driver/src/board_drivers/types.rs`](./src/board_drivers/types.rs:1)): The central configuration struct. It defines parameters like target sample rate, list of active channels, per-channel gain settings, the type of board driver to use (e.g., `Ads1299`, `Mock`), reference voltage (Vref), and data batch size. *Note: It does not currently include fields for DSP filter cutoff frequencies.*
 *   [`AdcData`](./src/board_drivers/types.rs:72) (from [`driver/src/board_drivers/types.rs`](./src/board_drivers/types.rs:1)): Represents a single raw sample or a small, minimally processed block of data from an ADC channel, typically before full voltage conversion or filtering.
 *   [`ProcessedData`](./src/lib.rs:12) (from [`driver/src/lib.rs`](./src/lib.rs:1)): Represents a batch of fully processed EEG data. This typically includes a timestamp for the batch, and a collection of voltage values for each active channel for the duration of the batch. This is the primary data type consumed by clients of the driver.
 *   [`DriverEvent`](./src/board_drivers/types.rs:14) (from [`driver/src/board_drivers/types.rs`](./src/board_drivers/types.rs:1)): An enum representing events that a board driver might emit, such as `DataReady` (though often handled internally), `Error`, or `StatusChange`.
 *   [`DriverError`](./src/board_drivers/types.rs:80) (from [`driver/src/board_drivers/types.rs`](./src/board_drivers/types.rs:1)): An enum used for error handling within the driver modules. It abstracts various underlying issues like I/O errors, SPI communication failures, or hardware-specific problems.
-*   [`SignalProcessor`](./src/dsp/filters.rs:96) (from [`driver/src/dsp/filters.rs`](./src/dsp/filters.rs:1)): A struct that encapsulates the DSP pipeline. It manages a set of digital filters (high-pass, low-pass, notch) for each channel and applies them to the incoming raw samples.
+*   [`SignalProcessor`](./src/dsp/filters.rs:96) (from [`driver/src/dsp/filters.rs`](./src/dsp/filters.rs:1)): A struct that encapsulates the DSP pipeline. It is designed to manage a set of digital filters (high-pass, low-pass, notch) for each channel and apply them to the incoming voltage-converted samples. *Note: Its usage in `EegSystem` is currently commented out.*
 
 ## 3. Driver Architecture Overview
 
@@ -63,7 +63,7 @@ The driver is architected with several layers of abstraction to separate concern
     *   This struct serves as the primary entry point and orchestrator for applications using the EEG driver.
     *   It provides public methods like `new(config: AdcConfig)`, `start()`, `stop()`, `reconfigure(new_config: AdcConfig)`, and `shutdown()`.
     *   Upon creation (`new`), it initializes and holds an instance of a specific `AdcDriver` (e.g., `Ads1299Driver` or `MockDriver`) based on the provided `AdcConfig`.
-    *   It also manages an instance of the [`SignalProcessor`](./src/dsp/filters.rs:96) for applying DSP to the data.
+    *   It is designed to manage an instance of the [`SignalProcessor`](./src/dsp/filters.rs:96) for applying DSP to the data, *however, this functionality is currently commented out in [`driver/src/eeg_system/mod.rs`](./src/eeg_system/mod.rs:1) as part of a DSP refactor plan.*
     *   It spawns `tokio` tasks for the data acquisition loop (managed by the `AdcDriver`) and the data processing pipeline.
     *   The `new` method returns a `tokio::sync::mpsc::Receiver<ProcessedData>`, which the client application uses to receive batches of processed EEG data.
 
@@ -93,14 +93,15 @@ The driver is architected with several layers of abstraction to separate concern
 
 *   **DSP (Digital Signal Processing) - `SignalProcessor`**:
     *   The `SignalProcessor` struct is defined in [`driver/src/dsp/filters.rs`](./src/dsp/filters.rs:96).
-    *   An instance of `SignalProcessor` is created and managed by `EegSystem`. It's initialized based on parameters from `AdcConfig`, including the sample rate, number of channels, and desired cutoff frequencies for high-pass, low-pass, and (optional) powerline notch filters.
+    *   *Current Status: The instantiation and use of `SignalProcessor` within `EegSystem` ([`driver/src/eeg_system/mod.rs`](./src/eeg_system/mod.rs:1)) are currently commented out due to a "DSP refactor plan." Therefore, no DSP filtering is actively performed by the `SignalProcessor` in the driver at this time.*
+    *   *Design Intent:* `SignalProcessor` is designed to be initialized directly with parameters such as `sample_rate`, `num_channels`, `dsp_high_pass_cutoff`, `dsp_low_pass_cutoff`, and `powerline_filter_hz` (see [`driver/src/dsp/filters.rs:105`](./src/dsp/filters.rs:105)). The `AdcConfig` struct ([`driver/src/board_drivers/types.rs:39`](./src/board_drivers/types.rs:39)) currently provides `sample_rate` and `num_channels` (implicitly via `config.channels.len()`) but lacks fields for the explicit filter cutoff frequencies. If `SignalProcessor` were to be re-enabled, `AdcConfig` would likely need to be extended to include these missing filter parameters, or they would need to be sourced from elsewhere.
     *   It maintains a set of digital filters (instances of `biquad::DirectForm2Transposed` from the `biquad` crate) for each active EEG channel.
-    *   It provides methods like `process_sample()` and `process_chunk()` which are called by `EegSystem` to apply these filters to the voltage-converted data received from the `AdcDriver` before it's batched into `ProcessedData`.
+    *   It provides methods like `process_sample()` and `process_chunk()` which *would be* called by `EegSystem` to apply these filters to the voltage-converted data.
 
 *   **Configuration Management**:
     *   The primary mechanism for configuration is the [`AdcConfig`](./src/board_drivers/types.rs:39) struct.
     *   An `AdcConfig` instance is passed to `EegSystem::new()` to initialize the system. The configuration can be updated at runtime (if supported by the hardware and driver) via `EegSystem::reconfigure()`.
-    *   `EegSystem` passes relevant parts of this configuration to the instantiated `AdcDriver` (which then configures the actual hardware) and to the `SignalProcessor` (which configures its filters).
+    *   `EegSystem` passes relevant parts of this configuration (like `sample_rate`, `channels`) to the instantiated `AdcDriver` (which then configures the actual hardware). *Currently, it does not pass filter cutoff configurations to `SignalProcessor` because `AdcConfig` lacks these fields and the `SignalProcessor`'s usage is commented out in `EegSystem`.*
     *   For the `Ads1299Driver`, the `initialize_chip` method uses the `AdcConfig` to program the various ADS1299 registers to match the desired settings (sample rate, gain, channel modes, bias, etc.).
 
 *   **Error Handling**:
@@ -148,7 +149,7 @@ The driver is architected with several layers of abstraction to separate concern
 *   **Changing DSP Filtering (e.g., adding a new type of filter, modifying filter parameters, or changing the filter chain)**:
     1.  Modifications would primarily occur in the `SignalProcessor` struct and its associated filter implementations within [`driver/src/dsp/filters.rs`](./src/dsp/filters.rs).
     2.  This might involve adding new filter types (if supported by the `biquad` crate, or by implementing a new `Biquad` or filter structure) or changing how existing filters are configured (e.g., order, Q-factor) or chained.
-    3.  If new configuration parameters are needed for the DSP stage (e.g., a Q-factor for a notch filter, or parameters for a new filter type), add them to [`AdcConfig`](./src/board_drivers/types.rs:39). Ensure that `SignalProcessor::new()` and `SignalProcessor::reset()` correctly initialize and use these new parameters.
+    3.  If new configuration parameters are needed for the DSP stage (e.g., a Q-factor for a notch filter, or parameters for a new filter type), these would typically be added to [`AdcConfig`](./src/board_drivers/types.rs:39). *If re-enabling `SignalProcessor` in `EegSystem`, ensure that `SignalProcessor::new()` ([`driver/src/dsp/filters.rs:105`](./src/dsp/filters.rs:105)) and `SignalProcessor::reset()` ([`driver/src/dsp/filters.rs:203`](./src/dsp/filters.rs:203)) are correctly called with these parameters, and that `EegSystem` is updated to pass them from the (modified) `AdcConfig`.*
     4.  Update tests in [`driver/src/eeg_system/tests.rs`](./src/eeg_system/tests.rs) (like `test_signal_processing`) to verify the new DSP behavior.
 
 *   **Debugging Hardware Communication Issues (specifically with ADS1299)**:
