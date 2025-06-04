@@ -26,7 +26,7 @@ const BrainWavesDisplay: React.FC<BrainWavesDisplayProps> = ({
                 <AppletFftRenderer
                     config={eegConfig} // Pass the EEG config
                     containerWidth={containerWidth}
-                    containerHeight={containerHeight - 30} // Adjust height for title
+                    containerHeight={containerHeight - 50} // Minimal adjustment for title
                 />
             ) : (
                 <p>EEG Config not available or incomplete. Cannot render FFT.</p>

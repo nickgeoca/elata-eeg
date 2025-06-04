@@ -5,7 +5,6 @@ import { useRef, useState, useEffect, useCallback, useLayoutEffect } from 'react
 import { useEegConfig } from './EegConfig';
 // EegConfigDisplay is removed as we are inlining and modifying its logic.
 // EegChannelConfig is also not used in the settings panel.
-import { EegStatusBar } from './EegStatusBar';
 import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
@@ -931,12 +930,6 @@ export default function EegMonitorWebGL() {
                   dataVersion={dataVersion}
                   targetFps={displayFps}
                 />
-                 <EegStatusBar
-                   status={status}
-                   fps={displayFps}
-                   dataReceived={dataReceived}
-                   packetsReceived={debugInfoRef.current.packetsReceived}
-                 />
                 </div>
               </div>
             </>
@@ -949,7 +942,7 @@ export default function EegMonitorWebGL() {
               <BrainWavesDisplay
                 eegConfig={config}
                 containerWidth={containerSize.width}
-                containerHeight={containerSize.height - 40} // Adjust for potential status bar or titles
+                containerHeight={containerSize.height} // Use full container height
               />
             ) : (
               <div className="flex items-center justify-center h-full text-white">
