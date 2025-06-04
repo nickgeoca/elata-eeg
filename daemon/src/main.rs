@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create the ADC configuration
     let initial_config = AdcConfig {
         sample_rate: 500, // Example, should ideally come from a more specific hardware config or AdcConfig defaults
-        channels: vec![0, 1], // Example
+        channels: vec![0, 1, 2], // Example
         gain: 24.0, // Example
         board_driver: daemon_config.driver_type,
         batch_size: daemon_config.batch_size, // This batch_size is for the driver

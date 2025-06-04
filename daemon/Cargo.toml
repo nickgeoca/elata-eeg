@@ -27,6 +27,6 @@ name = "eeg_daemon"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["brain_waves_fft_feature"]
 # applets = ["brain_waves_fft_feature"] # Example if using a master 'applets' feature
 brain_waves_fft_feature = ["dep:elata_dsp_brain_waves_fft"]

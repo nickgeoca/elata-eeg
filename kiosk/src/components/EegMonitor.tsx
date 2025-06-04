@@ -341,7 +341,7 @@ export default function EegMonitorWebGL() {
   // Effect to create WebGL lines when config and CONTAINER SIZE are ready
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const BASE_VISUAL_AMPLITUDE_SCALE = 0.01; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
+  const BASE_VISUAL_AMPLITUDE_SCALE = 1; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
   const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
 
   useEffect(() => {
@@ -537,17 +537,20 @@ export default function EegMonitorWebGL() {
     }
   };
 
-  // Handler for toggling between Signal Graph and FFT Graph - REMOVED as FFT is now applet
-  // const handleToggleSignalFftView = () => { ... };
- 
-  // Handler for showing the Brain Waves Applet (which is now the FFT view)
-  const handleShowAppletView = () => {
-    setActiveView('appletBrainWaves');
-    // If coming from settings, and the previous view was a graph, container size might need reset
-    // but applet view itself doesn't use containerRef for lines.
-    // No specific containerSize reset here, as applet view is different.
+  // Handler for toggling between Signal Graph and FFT Applet
+  const handleToggleSignalFftView = () => {
+    if (activeView === 'signalGraph') {
+      setActiveView('appletBrainWaves');
+    } else if (activeView === 'appletBrainWaves') {
+      setActiveView('signalGraph');
+    }
+    // If currently in settings, this function shouldn't be called, but handle gracefully
+    // by defaulting to signal graph
+    else if (activeView === 'settings') {
+      setActiveView('signalGraph');
+    }
   };
-
+ 
   // Handler for the "Settings" / "Back to [View]" button
   const handleToggleSettingsView = () => {
     if (activeView !== 'settings') {
@@ -671,23 +674,13 @@ export default function EegMonitorWebGL() {
             Recordings
           </a>
           
-          {/* Signal / FFT Graph toggle button - REMOVED */}
-          {/*
+          {/* Signal / FFT Graph toggle button */}
           <button
             onClick={handleToggleSignalFftView}
             className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
-            disabled={activeView === 'appletBrainWaves'}
+            disabled={activeView === 'settings'}
           >
             {activeView === 'signalGraph' ? 'Show FFT' : 'Show Signal'}
-          </button>
-          */}
- 
-          {/* Brain Waves Applet button (Now shows FFT) */}
-          <button
-            onClick={handleShowAppletView}
-            className={`px-4 py-1 rounded-md text-white ${activeView === 'appletBrainWaves' ? 'bg-teal-700' : 'bg-teal-600 hover:bg-teal-700'}`} // Style like old FFT button
-          >
-            Show FFT Applet
           </button>
  
           {/* Settings button */}
