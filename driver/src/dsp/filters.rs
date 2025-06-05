@@ -1,28 +1,38 @@
-use biquad::{Biquad, DirectForm2Transposed, Coefficients, Type, Q_BUTTERWORTH_F32, ToHertz};
+use std::f32::consts::PI;
 
-// Update the FilterCoefficients to use biquad's Coefficients
+// Simple biquad filter coefficients
 #[derive(Clone, Debug)]
 struct FilterCoefficients {
-    coeffs: Coefficients<f32>
+    b0: f32, b1: f32, b2: f32,  // numerator coefficients
+    a1: f32, a2: f32,           // denominator coefficients (a0 is normalized to 1)
 }
 
-// Simplify DigitalFilter to use biquad's DirectForm2Transposed
+// Direct Form II Transposed biquad filter implementation
 #[derive(Debug)]
 struct DigitalFilter {
-    filter: DirectForm2Transposed<f32>
+    coeffs: FilterCoefficients,
+    z1: f32,  // delay line 1
+    z2: f32,  // delay line 2
 }
 
 impl DigitalFilter {
     fn new(coeffs: FilterCoefficients) -> Self {
         Self {
-            filter: DirectForm2Transposed::new(coeffs.coeffs)
+            coeffs,
+            z1: 0.0,
+            z2: 0.0,
         }
     }
 
     fn process(&mut self, x: f32) -> f32 {
         // Clamp input to prevent extreme values
         let x = x.clamp(-8192.0, 8191.0);
-        let y = self.filter.run(x);
+        
+        // Direct Form II Transposed implementation
+        let y = self.coeffs.b0 * x + self.z1;
+        self.z1 = self.coeffs.b1 * x - self.coeffs.a1 * y + self.z2;
+        self.z2 = self.coeffs.b2 * x - self.coeffs.a2 * y;
+        
         // Clamp output to prevent instability
         y.clamp(-8192.0, 8191.0)
     }
@@ -38,18 +48,34 @@ struct HighpassFilter(DigitalFilter);
 #[derive(Debug)]
 struct LowpassFilter(DigitalFilter);
 
-// Update NotchFilter implementation to use BandPass instead of NotchFilter
 impl NotchFilter {
     fn new(sample_rate: f32, notch_freq: f32) -> Self {
         let q_factor = 30.0;  // High Q for narrow notch
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::Notch,  // <-- Changed from BandPass to Notch
-            sample_rate.hz(),
-            notch_freq.hz(),
-            q_factor
-        ).unwrap();
+        let coeffs = Self::notch_coefficients(sample_rate, notch_freq, q_factor);
+        NotchFilter(DigitalFilter::new(coeffs))
+    }
+    
+    fn notch_coefficients(sample_rate: f32, freq: f32, q: f32) -> FilterCoefficients {
+        let omega = 2.0 * PI * freq / sample_rate;
+        let alpha = omega.sin() / (2.0 * q);
+        let cos_omega = omega.cos();
         
-        NotchFilter(DigitalFilter::new(FilterCoefficients { coeffs }))
+        // Notch filter coefficients
+        let b0 = 1.0;
+        let b1 = -2.0 * cos_omega;
+        let b2 = 1.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+        
+        // Normalize by a0
+        FilterCoefficients {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
     }
     
     fn process(&mut self, x: f32) -> f32 {
@@ -57,17 +83,34 @@ impl NotchFilter {
     }
 }
 
-// Similar updates for HighpassFilter
 impl HighpassFilter {
     fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::HighPass,
-            sample_rate.hz(),
-            cutoff_freq.hz(),
-            Q_BUTTERWORTH_F32
-        ).unwrap();
+        let q = 0.7071067811865476; // Butterworth Q factor (1/sqrt(2))
+        let coeffs = Self::highpass_coefficients(sample_rate, cutoff_freq, q);
+        Self(DigitalFilter::new(coeffs))
+    }
+    
+    fn highpass_coefficients(sample_rate: f32, freq: f32, q: f32) -> FilterCoefficients {
+        let omega = 2.0 * PI * freq / sample_rate;
+        let alpha = omega.sin() / (2.0 * q);
+        let cos_omega = omega.cos();
         
-        Self(DigitalFilter::new(FilterCoefficients { coeffs }))
+        // High-pass filter coefficients
+        let b0 = (1.0 + cos_omega) / 2.0;
+        let b1 = -(1.0 + cos_omega);
+        let b2 = (1.0 + cos_omega) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+        
+        // Normalize by a0
+        FilterCoefficients {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
     }
     
     fn process(&mut self, x: f32) -> f32 {
@@ -75,17 +118,34 @@ impl HighpassFilter {
     }
 }
 
-// And LowpassFilter
 impl LowpassFilter {
     fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::LowPass,
-            sample_rate.hz(),
-            cutoff_freq.hz(),
-            Q_BUTTERWORTH_F32
-        ).unwrap();
+        let q = 0.7071067811865476; // Butterworth Q factor (1/sqrt(2))
+        let coeffs = Self::lowpass_coefficients(sample_rate, cutoff_freq, q);
+        Self(DigitalFilter::new(coeffs))
+    }
+    
+    fn lowpass_coefficients(sample_rate: f32, freq: f32, q: f32) -> FilterCoefficients {
+        let omega = 2.0 * PI * freq / sample_rate;
+        let alpha = omega.sin() / (2.0 * q);
+        let cos_omega = omega.cos();
         
-        Self(DigitalFilter::new(FilterCoefficients { coeffs }))
+        // Low-pass filter coefficients
+        let b0 = (1.0 - cos_omega) / 2.0;
+        let b1 = 1.0 - cos_omega;
+        let b2 = (1.0 - cos_omega) / 2.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * cos_omega;
+        let a2 = 1.0 - alpha;
+        
+        // Normalize by a0
+        FilterCoefficients {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+        }
     }
     
     fn process(&mut self, x: f32) -> f32 {

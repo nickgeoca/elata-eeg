@@ -49,6 +49,12 @@ fn with_mpsc_tx<T: Send + 'static>(
     warp::any().map(move || tx.clone())
 }
 
+fn with_connection_manager(
+    connection_manager: Arc<crate::connection_manager::ConnectionManager>,
+) -> impl Filter<Extract = (Arc<crate::connection_manager::ConnectionManager>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || connection_manager.clone())
+}
+
 fn with_atomic_bool(
     atomic: Arc<AtomicBool>,
 ) -> impl Filter<Extract = (Arc<AtomicBool>,), Error = std::convert::Infallible> + Clone {
@@ -130,11 +136,28 @@ pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
 }
 
 /// Handle WebSocket connection for EEG data streaming
-pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatchData>) {
+pub async fn handle_websocket(
+    ws: WebSocket,
+    mut rx: broadcast::Receiver<EegBatchData>,
+    connection_manager: Arc<crate::connection_manager::ConnectionManager>
+) {
+    use crate::connection_manager::ClientType;
+    
     let (mut tx, _) = ws.split();
     
-    println!("WebSocket client connected - sending binary EEG data");
+    // Generate unique client ID
+    let client_id = format!("eeg_raw_{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+    
+    println!("WebSocket client connected (ID: {}) - sending binary EEG data", client_id);
     println!("Binary format: [timestamp (8 bytes)] [channel_samples...] for each channel");
+    
+    // Register client with connection manager
+    if let Err(e) = connection_manager.register_connection(client_id.clone(), ClientType::RawRecording).await {
+        eprintln!("Failed to register client {}: {}", client_id, e);
+    }
     
     let mut packet_count = 0;
     let start_time = std::time::Instant::now();
@@ -167,13 +190,36 @@ pub async fn handle_websocket(ws: WebSocket, mut rx: broadcast::Receiver<EegBatc
             println!("Samples per channel: {}", samples_count);
         }
     }
+    
+    // Unregister client when connection closes
+    if let Err(e) = connection_manager.unregister_connection(&client_id).await {
+        eprintln!("Failed to unregister client {}: {}", client_id, e);
+    }
+    println!("WebSocket client disconnected (ID: {})", client_id);
 }
 
 /// Handle WebSocket connection for FILTERED EEG data streaming
-pub async fn handle_filtered_eeg_data_websocket(ws: WebSocket, mut rx: broadcast::Receiver<FilteredEegData>) {
+pub async fn handle_filtered_eeg_data_websocket(
+    ws: WebSocket,
+    mut rx: broadcast::Receiver<FilteredEegData>,
+    connection_manager: Arc<crate::connection_manager::ConnectionManager>
+) {
+    use crate::connection_manager::ClientType;
+    
     let (mut tx, _) = ws.split();
     
-    println!("Filtered EEG Data WebSocket client connected - sending JSON data");
+    // Generate unique client ID
+    let client_id = format!("eeg_filtered_{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos());
+    
+    println!("Filtered EEG Data WebSocket client connected (ID: {}) - sending JSON data", client_id);
+    
+    // Register client with connection manager
+    if let Err(e) = connection_manager.register_connection(client_id.clone(), ClientType::EegMonitor).await {
+        eprintln!("Failed to register client {}: {}", client_id, e);
+    }
     
     let mut packet_count = 0;
     let start_time = std::time::Instant::now();
@@ -214,7 +260,12 @@ pub async fn handle_filtered_eeg_data_websocket(ws: WebSocket, mut rx: broadcast
             }
         }
     }
-    println!("Filtered EEG Data WebSocket connection handler finished.");
+    
+    // Unregister client when connection closes
+    if let Err(e) = connection_manager.unregister_connection(&client_id).await {
+        eprintln!("Failed to unregister client {}: {}", client_id, e);
+    }
+    println!("Filtered EEG Data WebSocket connection handler finished (ID: {})", client_id);
 }
 
 
@@ -697,6 +748,7 @@ pub fn setup_websocket_routes(
     csv_recorder: Arc<Mutex<CsvRecorder>>,
     is_recording: Arc<AtomicBool>,
     config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
+    connection_manager: Arc<crate::connection_manager::ConnectionManager>, // Connection manager for client tracking
 ) -> (warp::filters::BoxedFilter<(impl warp::Reply,)>, mpsc::Receiver<AdcConfig>) {
     // Channel for clients to send proposed config updates TO main.rs
     let (config_update_to_main_tx, config_update_to_main_rx) = mpsc::channel::<AdcConfig>(32);
@@ -705,8 +757,9 @@ pub fn setup_websocket_routes(
     let eeg_ws_route = warp::path("eeg")
         .and(warp::ws())
         .and(with_broadcast_rx(tx_eeg_batch_data.clone())) // Use the renamed sender
-        .map(|ws: warp::ws::Ws, rx: broadcast::Receiver<EegBatchData>| {
-            ws.on_upgrade(move |socket| handle_websocket(socket, rx))
+        .and(with_connection_manager(connection_manager.clone()))
+        .map(|ws: warp::ws::Ws, rx: broadcast::Receiver<EegBatchData>, conn_mgr: Arc<crate::connection_manager::ConnectionManager>| {
+            ws.on_upgrade(move |socket| handle_websocket(socket, rx, conn_mgr))
         });
 
     // New /ws/eeg/data__basic_voltage_filter endpoint for FilteredEegData
@@ -715,8 +768,9 @@ pub fn setup_websocket_routes(
         .and(warp::path("data__basic_voltage_filter"))
         .and(warp::ws())
         .and(with_broadcast_rx(tx_filtered_eeg_data.clone())) // Use the new sender
-        .map(|ws: warp::ws::Ws, rx_data: broadcast::Receiver<FilteredEegData>| {
-            ws.on_upgrade(move |socket| handle_filtered_eeg_data_websocket(socket, rx_data))
+        .and(with_connection_manager(connection_manager.clone()))
+        .map(|ws: warp::ws::Ws, rx_data: broadcast::Receiver<FilteredEegData>, conn_mgr: Arc<crate::connection_manager::ConnectionManager>| {
+            ws.on_upgrade(move |socket| handle_filtered_eeg_data_websocket(socket, rx_data, conn_mgr))
         });
         
     let config_clone = config.clone();

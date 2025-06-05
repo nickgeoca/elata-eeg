@@ -1,5 +1,5 @@
 pub mod board_drivers;
-// pub mod dsp; // Removed as per DSP refactor plan
+pub mod dsp; // Re-enabled for performance optimization
 pub mod eeg_system;
 
 // Re-export the main types that users need
@@ -48,5 +48,5 @@ impl Default for ProcessedData {
 // Optionally expose lower-level access through a raw module
 pub mod raw {
     pub use crate::board_drivers::*;
-    // pub use crate::dsp::*; // Removed as per DSP refactor plan
+    pub use crate::dsp::*; // Re-enabled for performance optimization
 }

@@ -7,6 +7,10 @@
 
 # TODO Docs
 - security.md... security hardening
+- [EEG Performance Optimization Plan](./eeg_performance_optimization_plan.md) - **CRITICAL** - Plan to reduce CPU usage from ~16% to ~3% by eliminating multiple daemon processes and optimizing DSP pipeline.
+- [Part 2 Implementation Plan](./part2_implementation_plan.md) - **COMPLETE** - Detailed implementation plan for process consolidation and DSP coordinator integration.
+- [Part 2 Implementation Status](./part2_implementation_status.md) - **READY FOR TESTING** - Phase 1 & 2 complete: PID management, DSP coordinator integration, connection manager. Ready for testing and Phase 3.
+
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
 
 - [Kiosk Boot Failure Investigation](./boot_failures.md) - Diagnosing "site can't be reached" error after reboot.

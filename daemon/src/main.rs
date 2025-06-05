@@ -1,8 +1,12 @@
 mod config;
 mod driver_handler;
 mod server;
+mod pid_manager;
+mod connection_manager;
 
 use eeg_driver::{AdcConfig, EegSystem};
+use eeg_driver::dsp::coordinator::DspCoordinator;
+use connection_manager::ConnectionManager;
 use tokio::sync::{broadcast, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,6 +35,19 @@ fn to_daemon_error<E: std::fmt::Display>(e: E) -> Box<dyn std::error::Error + Se
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logger - Reads RUST_LOG environment variable
     env_logger::init();
+
+    // Initialize PID manager to ensure single daemon instance
+    let pid_file_path = "/tmp/eeg_daemon.pid";
+    let pid_manager = pid_manager::PidManager::new(pid_file_path);
+    
+    // Check if another instance is already running
+    if let Err(e) = pid_manager.acquire_lock() {
+        eprintln!("Failed to start daemon: {}", e);
+        eprintln!("If you're sure no other instance is running, try removing the PID file: {}", pid_file_path);
+        std::process::exit(1);
+    }
+    
+    println!("EEG Daemon starting (PID: {})...", std::process::id());
 
     // Load daemon configuration
     let daemon_config = config::load_config();
@@ -86,6 +103,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("EEG system started. Waiting for data...");
 
+    // Initialize DSP coordinator for centralized processing
+    println!("Initializing DSP coordinator...");
+    let dsp_coordinator = Arc::new(Mutex::new(DspCoordinator::new(config.clone()).await));
+    
+    // Initialize connection manager for tracking WebSocket clients
+    let default_channels: Vec<usize> = (0..initial_config.channels.len()).collect();
+    let connection_manager = Arc::new(ConnectionManager::new(dsp_coordinator.clone(), default_channels));
+    
+    println!("DSP coordinator and connection manager initialized");
+
     // Create a broadcast channel for applied config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16); // Channel for broadcasting applied configs
 
@@ -110,6 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         csv_recorder.clone(),
         is_recording.clone(),
         config_applied_tx.clone(), // Pass the sender for applied configs
+        connection_manager.clone(), // Pass connection manager for client tracking
     );
 
     // Initialize DSP modules
@@ -335,5 +363,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("Error stopping EEG system during cleanup: {}", e);
     }
     
+    // Release PID lock
+    if let Err(e) = pid_manager.release_lock() {
+        eprintln!("Warning: Failed to release PID lock during cleanup: {}", e);
+    }
+    
+    println!("EEG Daemon shutdown complete");
     Ok(())
 }
