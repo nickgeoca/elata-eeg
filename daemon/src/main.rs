@@ -140,36 +140,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         connection_manager.clone(), // Pass connection manager for client tracking
     );
 
-    // Initialize DSP modules
-    #[cfg(feature = "brain_waves_fft_feature")]
-    {
-        use elata_dsp_brain_waves_fft::{setup_fft_websocket_endpoint, DspSharedConfig};
-        
-        let dsp_config = DspSharedConfig {};
-        let eeg_data_tx_for_dsp = tx_eeg_batch_data.clone();
-        let adc_config_tx_for_dsp = config_applied_tx.clone(); // This is the broadcast sender for updates
-        let shared_adc_config_for_dsp = config.clone(); // This is the Arc<Mutex<AdcConfig>> for initial state
-        
-        let fft_route = setup_fft_websocket_endpoint(
-            &dsp_config,
-            eeg_data_tx_for_dsp,
-            adc_config_tx_for_dsp,
-            shared_adc_config_for_dsp, // Pass the Arc<Mutex<AdcConfig>>
-        );
-        
-        // Spawn DSP server on port 8081 (separate from main server due to warp type constraints)
-        tokio::spawn(warp::serve(fft_route).run(([0, 0, 0, 0], 8081)));
-        println!("DSP WebSocket server starting on:");
-        println!("- ws://0.0.0.0:8081/applet/brain_waves/data (Brain Waves FFT) - accessible via this machine's IP address");
-    }
-
-    let ws_routes = base_ws_routes;
+    // Initialize DSP modules and combine routes
+    let ws_routes = {
+        #[cfg(feature = "brain_waves_fft_feature")]
+        {
+            use elata_dsp_brain_waves_fft::{setup_fft_websocket_endpoint, DspSharedConfig};
+            
+            let dsp_config = DspSharedConfig {};
+            let eeg_data_tx_for_dsp = tx_eeg_batch_data.clone();
+            let adc_config_tx_for_dsp = config_applied_tx.clone(); // This is the broadcast sender for updates
+            let shared_adc_config_for_dsp = config.clone(); // This is the Arc<Mutex<AdcConfig>> for initial state
+            
+            let fft_route = setup_fft_websocket_endpoint(
+                &dsp_config,
+                eeg_data_tx_for_dsp,
+                adc_config_tx_for_dsp,
+                shared_adc_config_for_dsp, // Pass the Arc<Mutex<AdcConfig>>
+            );
+            
+            // Combine FFT route with main server routes on port 8080
+            base_ws_routes.or(fft_route)
+        }
+        #[cfg(not(feature = "brain_waves_fft_feature"))]
+        {
+            base_ws_routes
+        }
+    };
     
     println!("WebSocket server starting on:");
     println!("- ws://0.0.0.0:8080/eeg (EEG data) - accessible via this machine's IP address");
     println!("- ws://0.0.0.0:8080/config (Configuration) - accessible via this machine's IP address");
     println!("- ws://0.0.0.0:8080/command (Recording control) - accessible via this machine's IP address");
     println!("- ws://0.0.0.0:8080/ws/eeg/data__basic_voltage_filter (Filtered EEG data) - accessible via this machine's IP address");
+    #[cfg(feature = "brain_waves_fft_feature")]
+    println!("- ws://0.0.0.0:8080/applet/brain_waves/data (Brain Waves FFT) - accessible via this machine's IP address");
     
 
     // Spawn WebSocket server

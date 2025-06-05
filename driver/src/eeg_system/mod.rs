@@ -210,18 +210,11 @@ impl EegSystem {
                                             break;
                                         }
                                         
-                                        // Forward status changes to the processed data stream
-                                        let _ = tx.send(ProcessedData {
-                                            timestamp: std::time::SystemTime::now()
-                                                .duration_since(std::time::UNIX_EPOCH)
-                                                .unwrap_or_default()
-                                                .as_micros() as u64,
-                                            raw_samples: Vec::new(),
-                                            voltage_samples: Vec::new(), // Renamed
-                                            power_spectrums: None,
-                                            frequency_bins: None,
-                                            error: Some(format!("Driver status changed: {:?}", status)),
-                                        }).await;
+                                        // Log status changes but don't send them as errors
+                                        println!("Driver status changed: {:?}", status);
+                                        
+                                        // Don't send status changes as ProcessedData errors since they're not errors
+                                        // Status changes are normal operational events, not errors
                                     }
                                     DriverEvent::Error(err_msg) => {
                                         eprintln!("Driver error: {}", err_msg);

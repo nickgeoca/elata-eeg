@@ -76,21 +76,34 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       return;
     }
 
+    let reconnectAttempts = 0;
+    const maxReconnectAttempts = 5;
+    let reconnectTimeout: number | null = null;
+
     const connectWebSocket = () => {
       try {
         // Connect to DSP WebSocket endpoint
         const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-        const ws = new WebSocket(`ws://${wsHost}:8081/applet/brain_waves/data`);
+        const wsUrl = `ws://${wsHost}:8080/applet/brain_waves/data`;
+        console.log('[AppletFftRenderer] Attempting to connect to:', wsUrl);
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
         ws.onopen = () => {
           console.log('[AppletFftRenderer] Connected to DSP WebSocket');
           setWsError(null);
+          reconnectAttempts = 0; // Reset reconnection attempts on successful connection
         };
 
         ws.onmessage = (event) => {
           try {
             const response: BrainWavesAppletResponse = JSON.parse(event.data);
+            
+            console.log('[AppletFftRenderer] Received WebSocket message:', {
+              timestamp: response.timestamp,
+              fft_results_count: response.fft_results?.length || 0,
+              error: response.error
+            });
             
             if (response.error) {
               console.error('[AppletFftRenderer] DSP error:', response.error);
@@ -99,8 +112,19 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
             }
 
             if (response.fft_results && response.fft_results.length > 0) {
+              // Debug: Log FFT data details
+              response.fft_results.forEach((result, i) => {
+                console.log(`[AppletFftRenderer] Channel ${i}: ${result.power.length} power bins, ${result.frequencies.length} freq bins`);
+                if (result.power.length > 0) {
+                  const maxPower = Math.max(...result.power);
+                  console.log(`[AppletFftRenderer] Channel ${i} max power: ${maxPower}`);
+                }
+              });
+              
               setFftData(response.fft_results);
               setWsError(null);
+            } else {
+              console.log('[AppletFftRenderer] No FFT results in message');
             }
           } catch (error) {
             console.error('[AppletFftRenderer] Error parsing WebSocket message:', error);
@@ -113,11 +137,25 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
           setWsError('WebSocket connection error');
         };
 
-        ws.onclose = () => {
-          console.log('[AppletFftRenderer] WebSocket connection closed');
+        ws.onclose = (event) => {
+          console.log('[AppletFftRenderer] WebSocket connection closed', {
+            code: event.code,
+            reason: event.reason,
+            wasClean: event.wasClean,
+            reconnectAttempts
+          });
           wsRef.current = null;
-          // Attempt to reconnect after 2 seconds
-          setTimeout(connectWebSocket, 2000);
+          
+          // Only attempt to reconnect if it wasn't a clean close and we haven't exceeded max attempts
+          if (!event.wasClean && event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
+            reconnectAttempts++;
+            const delay = Math.min(2000 * reconnectAttempts, 10000); // Exponential backoff, max 10s
+            console.log(`[AppletFftRenderer] Attempting to reconnect in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+            reconnectTimeout = window.setTimeout(connectWebSocket, delay);
+          } else if (reconnectAttempts >= maxReconnectAttempts) {
+            console.error('[AppletFftRenderer] Max reconnection attempts reached');
+            setWsError('Connection failed after multiple attempts');
+          }
         };
       } catch (error) {
         console.error('[AppletFftRenderer] Failed to create WebSocket:', error);
@@ -128,6 +166,12 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
     connectWebSocket();
 
     return () => {
+      // Clear any pending reconnection timeout
+      if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+      }
+      
       if (wsRef.current) {
         // Prevent the onclose handler from trying to reconnect
         // when we are intentionally closing due to unmount.
@@ -438,14 +482,16 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
             const fftBinIndex = relevantIndices[j];
             let currentMagnitude = powerData[fftBinIndex] || 0;
 
-            if (!isFinite(currentMagnitude)) {
-              currentMagnitude = 10;
+            // Clamp very small values to prevent log issues
+            if (currentMagnitude <= 0 || !isFinite(currentMagnitude)) {
+              currentMagnitude = Y_AXIS_LOG_MIN_POWER_CLAMP;
             }
+            
             const logMagnitude = Math.log10(currentMagnitude);
             let normalizedMagnitude = (logMagnitude - LOG_Y_MIN_DISPLAY) / (LOG_Y_MAX_DISPLAY - LOG_Y_MIN_DISPLAY) - 0.5;
 
             if (!isFinite(normalizedMagnitude)) {
-                normalizedMagnitude = -0.5; 
+                normalizedMagnitude = -0.5;
             }
 
             if (line.xy && (j * 2 + 1) < line.xy.length) {

@@ -14,6 +14,7 @@ futures-util = "0.3"
 csv = "1.2"
 chrono = "0.4"
 env_logger = "0.10" # Added logger
+log = "0.4" # Added for logging
 elata_dsp_brain_waves_fft = { path = "../plugins/dsp/brain_waves_fft", optional = true }
 basic_voltage_filter = { path = "../plugins/dsp/basic_voltage_filter" }
 nix = { version = "0.27", features = ["signal"] }

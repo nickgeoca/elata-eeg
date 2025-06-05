@@ -293,7 +293,14 @@ pub async fn process_eeg_data(
                 // Check if any pipelines are active before processing
                 let has_active_pipelines = connection_manager.has_active_pipelines().await;
                 
-                if !has_active_pipelines {
+                // CRITICAL FIX: Always process RawData pipeline when FFT feature is enabled
+                // The FFT plugin runs on a separate server (port 8081) and can't register with connection_manager
+                #[cfg(feature = "brain_waves_fft_feature")]
+                let force_raw_data_processing = true;
+                #[cfg(not(feature = "brain_waves_fft_feature"))]
+                let force_raw_data_processing = false;
+                
+                if !has_active_pipelines && !force_raw_data_processing {
                     // IDLE STATE - 0% CPU usage
                     // Only handle CSV recording if needed, skip all other processing
                     if let Ok(mut recorder) = csv_recorder.try_lock() {
@@ -313,7 +320,16 @@ pub async fn process_eeg_data(
                 }
                 
                 // Get active pipelines for targeted processing
-                let active_pipelines = connection_manager.get_active_pipelines().await;
+                let mut active_pipelines = connection_manager.get_active_pipelines().await;
+                
+                // CRITICAL FIX: Always include RawData pipeline when FFT feature is enabled
+                #[cfg(feature = "brain_waves_fft_feature")]
+                {
+                    if !active_pipelines.contains(&PipelineType::RawData) {
+                        active_pipelines.insert(PipelineType::RawData);
+                        log::debug!("FFT Feature: Force-enabled RawData pipeline for FFT processing");
+                    }
+                }
                 
                 // --- CSV Recording ---
                 // Uses data.voltage_samples (which are direct from driver, pre-SignalProcessor)
@@ -416,6 +432,34 @@ pub async fn process_eeg_data(
                             error: None,
                         };
                         let _ = tx_to_filtered_data_web_socket.send(filtered_eeg_data);
+                    }
+
+                    // 3. Process FFT ANALYSIS pipeline (if active) - needs raw data like RawData pipeline
+                    if active_pipelines.contains(&PipelineType::FftAnalysis) {
+                        let batch_size_for_fft = daemon_config_clone.batch_size;
+                        let num_channels_for_fft = data.voltage_samples.len();
+                        let samples_per_channel_fft = data.voltage_samples[0].len();
+
+                        for chunk_start in (0..samples_per_channel_fft).step_by(batch_size_for_fft) {
+                            let chunk_end = (chunk_start + batch_size_for_fft).min(samples_per_channel_fft);
+                            
+                            let us_per_sample = 1_000_000 / adc_config_clone.sample_rate as u64;
+                            let chunk_timestamp_us = data.timestamp + (chunk_start as u64 * us_per_sample);
+
+                            let mut chunk_channels_fft = Vec::with_capacity(num_channels_for_fft);
+                            for channel_samples in &data.voltage_samples {
+                                chunk_channels_fft.push(channel_samples[chunk_start..chunk_end].to_vec());
+                            }
+                            
+                            let eeg_batch_data_fft = EegBatchData {
+                                channels: chunk_channels_fft,
+                                timestamp: chunk_timestamp_us / 1000, // Convert to milliseconds
+                                power_spectrums: data.power_spectrums.clone(),
+                                frequency_bins: data.frequency_bins.clone(),
+                                error: None,
+                            };
+                            let _ = tx_to_web_socket.send(eeg_batch_data_fft);
+                        }
                     }
 
                     // --- Statistics --- (based on incoming data before filtering for consistency)

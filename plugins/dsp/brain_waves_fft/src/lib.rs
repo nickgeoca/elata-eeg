@@ -152,10 +152,16 @@ async fn handle_brain_waves_fft_websocket(
     shared_adc_config_arc: Arc<tokio::sync::Mutex<AdcConfig>>, // For initial state
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
-    println!("Brain Waves FFT WebSocket client connected");
+    // WebSocket client connected - using log crate for proper logging
+    log::info!("Brain Waves FFT WebSocket client connected");
+    
+    // CRITICAL FIX: Force the daemon to process RawData pipeline
+    // The FFT plugin needs EegBatchData which comes from the RawData pipeline
+    // Without this, the daemon's demand-based processing will skip all data processing
+    log::debug!("Brain Waves FFT: Requesting RawData pipeline activation");
 
-    const FFT_WINDOW_DURATION_SECONDS: f32 = 2.0; // Process 1 second of data for FFT
-    const FFT_WINDOW_SLIDE_SECONDS: f32 = 1.0; // Slide window by 0.5 seconds (50% overlap if duration is 1s)
+    const FFT_WINDOW_DURATION_SECONDS: f32 = 2.0; // Process 2 seconds of data for FFT
+    const FFT_WINDOW_SLIDE_SECONDS: f32 = 1.0; // Slide window by 1 second (50% overlap)
 
     let mut channel_buffers: Vec<Vec<f32>> = Vec::new();
     let mut num_channels = 0;
@@ -178,11 +184,11 @@ async fn handle_brain_waves_fft_websocket(
         *fft_window_samples = (*sample_rate_f32 * FFT_WINDOW_DURATION_SECONDS).round() as usize;
         *fft_slide_samples = (*sample_rate_f32 * FFT_WINDOW_SLIDE_SECONDS).round() as usize;
         
-        println!(
+        log::info!(
             "Brain Waves FFT: Initialized for {} channels, sample rate: {} Hz",
             *num_channels, *sample_rate_f32
         );
-        println!(
+        log::debug!(
             "Brain Waves FFT: Window size: {} samples, Slide size: {} samples",
             *fft_window_samples, *fft_slide_samples
         );
@@ -202,7 +208,7 @@ async fn handle_brain_waves_fft_websocket(
     match rx_config.try_recv() {
         Ok(initial_config_broadcast) => {
             if initial_config_broadcast != initial_config_from_arc {
-                println!("Brain Waves FFT: Config mismatch detected during initialization");
+                log::warn!("Brain Waves FFT: Config mismatch detected during initialization");
             }
         }
         Err(_) => {
@@ -212,16 +218,21 @@ async fn handle_brain_waves_fft_websocket(
 
 
     if num_channels == 0 { // This check should ideally not be true if Arc init worked
-        println!("Brain Waves FFT: Warning - num_channels is 0 after Arc init, check config. Waiting for broadcast update.");
+        log::warn!("Brain Waves FFT: Warning - num_channels is 0 after Arc init, check config. Waiting for broadcast update.");
     }
 
     loop {
         tokio::select! {
             // Handle EEG data
             Ok(eeg_batch_data) = rx_eeg.recv() => {
+                // Only log at trace level for detailed processing info
+                log::trace!("Brain Waves FFT: Received EegBatchData with {} channels, {} samples in first channel",
+                    eeg_batch_data.channels.len(),
+                    eeg_batch_data.channels.get(0).map_or(0, |ch| ch.len()));
+                
                 // Check for errors in the EEG data
                 if let Some(err_msg) = &eeg_batch_data.error {
-                    println!("Brain Waves FFT: Received error in EegBatchData: {}", err_msg);
+                    log::error!("Brain Waves FFT: Received error in EegBatchData: {}", err_msg);
                     let response = BrainWavesAppletResponse {
                         timestamp: eeg_batch_data.timestamp,
                         fft_results: Vec::new(),
@@ -229,7 +240,7 @@ async fn handle_brain_waves_fft_websocket(
                     };
                     if let Ok(json_response) = serde_json::to_string(&response) {
                         if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending error.");
+                            log::info!("Brain Waves FFT: WebSocket client disconnected while sending error.");
                             break;
                         }
                     }
@@ -238,13 +249,13 @@ async fn handle_brain_waves_fft_websocket(
 
                 // Check if we have valid configuration
                 if num_channels == 0 {
-                    println!("Brain Waves FFT: No configuration available, skipping data processing");
+                    log::debug!("Brain Waves FFT: No configuration available, skipping data processing");
                     continue;
                 }
 
                 // Check for channel count mismatch
                 if eeg_batch_data.channels.len() != num_channels {
-                    println!(
+                    log::warn!(
                         "Brain Waves FFT: Channel count mismatch. Expected {}, got {}. Skipping this batch.",
                         num_channels, eeg_batch_data.channels.len()
                     );
@@ -253,7 +264,11 @@ async fn handle_brain_waves_fft_websocket(
                 // Add data to channel buffers
                 for (i, data_vec) in eeg_batch_data.channels.iter().enumerate() {
                     if i < num_channels {
+                        let before_len = channel_buffers[i].len();
                         channel_buffers[i].extend_from_slice(data_vec);
+                        let after_len = channel_buffers[i].len();
+                        log::trace!("Brain Waves FFT: Channel {} buffer: {} -> {} samples (+{})",
+                            i, before_len, after_len, data_vec.len());
                     }
                 }
 
@@ -262,15 +277,22 @@ async fn handle_brain_waves_fft_websocket(
                 let mut processing_error: Option<String> = None;
 
                 for i in 0..num_channels {
+                    log::trace!("Brain Waves FFT: Channel {} buffer size: {}, need: {}",
+                        i, channel_buffers[i].len(), fft_window_samples);
+                    
                     if channel_buffers[i].len() >= fft_window_samples {
                         let window_data: Vec<f32> = channel_buffers[i][..fft_window_samples].to_vec();
+                        log::trace!("Brain Waves FFT: Processing FFT for channel {} with {} samples", i, window_data.len());
+                        
                         // Perform FFT
                         match process_eeg_data(&window_data, sample_rate_f32) {
                             Ok((power, frequencies)) => {
+                                log::trace!("Brain Waves FFT: Channel {} FFT success - {} power bins, {} freq bins",
+                                    i, power.len(), frequencies.len());
                                 all_channel_fft_results.push(ChannelFftResult { power, frequencies });
                             }
                             Err(e) => {
-                                println!("Brain Waves FFT: Error processing channel {}: {}", i, e);
+                                log::error!("Brain Waves FFT: Error processing channel {}: {}", i, e);
                                 processing_error = Some(format!("FFT processing error on channel {}: {}", i, e));
                                 // Add an empty result to maintain channel order if one fails
                                 all_channel_fft_results.push(ChannelFftResult { power: Vec::new(), frequencies: Vec::new()});
@@ -280,9 +302,12 @@ async fn handle_brain_waves_fft_websocket(
                         // Slide the window by removing processed samples
                         if fft_slide_samples > 0 && channel_buffers[i].len() >= fft_slide_samples {
                             channel_buffers[i].drain(..fft_slide_samples);
+                            log::trace!("Brain Waves FFT: Channel {} buffer after slide: {}", i, channel_buffers[i].len());
                         }
                     } else {
                         // Not enough data for this channel yet
+                        log::trace!("Brain Waves FFT: Channel {} - not enough data yet ({}/{})",
+                            i, channel_buffers[i].len(), fft_window_samples);
                         all_channel_fft_results.push(ChannelFftResult { power: Vec::new(), frequencies: Vec::new()});
                     }
                 }
@@ -291,16 +316,21 @@ async fn handle_brain_waves_fft_websocket(
                 if !all_channel_fft_results.iter().all(|res| res.power.is_empty()) || processing_error.is_some() {
                     let response = BrainWavesAppletResponse {
                         timestamp: eeg_batch_data.timestamp,
-                        fft_results: all_channel_fft_results,
+                        fft_results: all_channel_fft_results.clone(),
                         error: processing_error,
                     };
 
+                    // Log FFT results summary at trace level
+                    log::trace!("Brain Waves FFT: Sending FFT results for {} channels", all_channel_fft_results.len());
+
                     if let Ok(json_response) = serde_json::to_string(&response) {
                         if ws_tx.send(Message::text(json_response)).await.is_err() {
-                            println!("Brain Waves FFT: WebSocket client disconnected while sending FFT results.");
+                            log::info!("Brain Waves FFT: WebSocket client disconnected while sending FFT results.");
                             break;
                         }
                     }
+                } else {
+                    log::trace!("Brain Waves FFT: No FFT results to send (all channels empty)");
                 }
             },
 
@@ -308,7 +338,7 @@ async fn handle_brain_waves_fft_websocket(
             config_result = rx_config.recv() => {
                 match config_result {
                     Ok(new_config) => {
-                        println!("Brain Waves FFT: Received config update - reinitializing");
+                        log::info!("Brain Waves FFT: Received config update - reinitializing");
                         reinitialize(&mut num_channels, &mut sample_rate_f32, &mut channel_buffers, &mut fft_window_samples, &mut fft_slide_samples, &new_config);
                     }
                     Err(e) => {
@@ -327,25 +357,25 @@ async fn handle_brain_waves_fft_websocket(
                 match msg {
                     Some(Ok(msg)) => {
                         if msg.is_close() {
-                            println!("Brain Waves FFT: WebSocket client requested close");
+                            log::info!("Brain Waves FFT: WebSocket client requested close");
                             break;
                         }
                         // For now, we don't handle any incoming messages from the client
                         // In the future, this could be used for custom FFT configuration
                     }
                     Some(Err(e)) => {
-                        println!("Brain Waves FFT: WebSocket error: {}", e);
+                        log::error!("Brain Waves FFT: WebSocket error: {}", e);
                         break;
                     }
                     None => {
-                        println!("Brain Waves FFT: WebSocket stream ended");
+                        log::info!("Brain Waves FFT: WebSocket stream ended");
                         break;
                     }
                 }
             }
         }
     }
-    println!("Brain Waves FFT: WebSocket client disconnected");
+    log::info!("Brain Waves FFT: WebSocket client disconnected");
 }
 
 #[cfg(test)]
