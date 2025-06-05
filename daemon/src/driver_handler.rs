@@ -10,6 +10,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use basic_voltage_filter::SignalProcessor; // Added for Phase 2
+use crate::connection_manager::PipelineType; // For demand-based processing
 
 use crate::config::DaemonConfig;
 
@@ -260,6 +261,7 @@ pub async fn process_eeg_data(
     tx_to_filtered_data_web_socket: tokio::sync::broadcast::Sender<FilteredEegData>, // For new filtered data endpoint
     csv_recorder: Arc<Mutex<CsvRecorder>>,
     _is_recording_shared_status: Arc<AtomicBool>, // Renamed, as direct is_recording check is on recorder
+    connection_manager: Arc<crate::connection_manager::ConnectionManager>, // For demand-based processing
     cancellation_token: CancellationToken,
 ) {
     let mut count = 0;
@@ -287,6 +289,32 @@ pub async fn process_eeg_data(
     loop {
         tokio::select! {
             Some(data) = rx_data_from_adc.recv() => {
+                // --- DEMAND-BASED PROCESSING CHECK ---
+                // Check if any pipelines are active before processing
+                let has_active_pipelines = connection_manager.has_active_pipelines().await;
+                
+                if !has_active_pipelines {
+                    // IDLE STATE - 0% CPU usage
+                    // Only handle CSV recording if needed, skip all other processing
+                    if let Ok(mut recorder) = csv_recorder.try_lock() {
+                        if recorder.is_recording {
+                            match recorder.write_data(&data).await {
+                                Ok(msg) => {
+                                    if msg != "Data written successfully" && msg != "Not recording" {
+                                        println!("CSV Recording (idle): {}", msg);
+                                    }
+                                },
+                                Err(e) => println!("Warning: Failed to write data to CSV (idle): {}", e),
+                            }
+                        }
+                    }
+                    // Skip all WebSocket processing - no clients connected
+                    continue;
+                }
+                
+                // Get active pipelines for targeted processing
+                let active_pipelines = connection_manager.get_active_pipelines().await;
+                
                 // --- CSV Recording ---
                 // Uses data.voltage_samples (which are direct from driver, pre-SignalProcessor)
                 // and data.raw_samples
@@ -303,90 +331,92 @@ pub async fn process_eeg_data(
                     }
                 }
 
-                // --- Data Processing and Broadcasting ---
+                // --- PIPELINE-AWARE DATA PROCESSING ---
                 if let Some(error_msg) = &data.error {
                     println!("Error from EEG system: {}", error_msg);
                     
-                    // Send error to existing /eeg endpoint (EegBatchData)
-                    let error_batch_unfiltered = EegBatchData {
-                        channels: Vec::new(),
-                        timestamp: data.timestamp / 1000, // ms
-                        power_spectrums: None,
-                        frequency_bins: None,
-                        error: Some(error_msg.clone()),
-                    };
-                    // Suppress warning if no receivers, as it's common if no client is connected
-                    let _ = tx_to_web_socket.send(error_batch_unfiltered);
+                    // Send error only to active pipelines
+                    if active_pipelines.contains(&PipelineType::RawData) {
+                        let error_batch_unfiltered = EegBatchData {
+                            channels: Vec::new(),
+                            timestamp: data.timestamp / 1000, // ms
+                            power_spectrums: None,
+                            frequency_bins: None,
+                            error: Some(error_msg.clone()),
+                        };
+                        let _ = tx_to_web_socket.send(error_batch_unfiltered);
+                    }
 
-                    // Send error to new filtered data endpoint (FilteredEegData)
-                    let error_batch_filtered = FilteredEegData {
-                        timestamp: data.timestamp / 1000, // ms
-                        raw_samples: None,
-                        filtered_voltage_samples: None,
-                        error: Some(error_msg.clone()),
-                    };
-                    let _ = tx_to_filtered_data_web_socket.send(error_batch_filtered);
+                    if active_pipelines.contains(&PipelineType::BasicVoltageFilter) {
+                        let error_batch_filtered = FilteredEegData {
+                            timestamp: data.timestamp / 1000, // ms
+                            raw_samples: None,
+                            filtered_voltage_samples: None,
+                            error: Some(error_msg.clone()),
+                        };
+                        let _ = tx_to_filtered_data_web_socket.send(error_batch_filtered);
+                    }
 
                 } else if !data.voltage_samples.is_empty() && !data.voltage_samples[0].is_empty() {
-                    // --- 1. Process and send UNFILTERED data to existing /eeg endpoint ---
-                    // This uses data.voltage_samples directly from the driver (Phase 1 output)
-                    let batch_size_for_unfiltered_ws = daemon_config_clone.batch_size;
-                    let num_channels_for_unfiltered = data.voltage_samples.len();
-                    let samples_per_channel_unfiltered = data.voltage_samples[0].len();
+                    // --- PIPELINE-SPECIFIC DATA PROCESSING ---
+                    
+                    // 1. Process RAW DATA pipeline (if active)
+                    if active_pipelines.contains(&PipelineType::RawData) {
+                        let batch_size_for_unfiltered_ws = daemon_config_clone.batch_size;
+                        let num_channels_for_unfiltered = data.voltage_samples.len();
+                        let samples_per_channel_unfiltered = data.voltage_samples[0].len();
 
-                    for chunk_start in (0..samples_per_channel_unfiltered).step_by(batch_size_for_unfiltered_ws) {
-                        let chunk_end = (chunk_start + batch_size_for_unfiltered_ws).min(samples_per_channel_unfiltered);
-                        
-                        // Timestamp for this specific chunk (original timestamp is for the start of the whole `data` block)
-                        // Assuming sample_rate is available from adc_config_clone
-                        let us_per_sample = 1_000_000 / adc_config_clone.sample_rate as u64;
-                        let chunk_timestamp_us = data.timestamp + (chunk_start as u64 * us_per_sample);
+                        for chunk_start in (0..samples_per_channel_unfiltered).step_by(batch_size_for_unfiltered_ws) {
+                            let chunk_end = (chunk_start + batch_size_for_unfiltered_ws).min(samples_per_channel_unfiltered);
+                            
+                            let us_per_sample = 1_000_000 / adc_config_clone.sample_rate as u64;
+                            let chunk_timestamp_us = data.timestamp + (chunk_start as u64 * us_per_sample);
 
-                        let mut chunk_channels_unfiltered = Vec::with_capacity(num_channels_for_unfiltered);
-                        for channel_samples in &data.voltage_samples {
-                            chunk_channels_unfiltered.push(channel_samples[chunk_start..chunk_end].to_vec());
+                            let mut chunk_channels_unfiltered = Vec::with_capacity(num_channels_for_unfiltered);
+                            for channel_samples in &data.voltage_samples {
+                                chunk_channels_unfiltered.push(channel_samples[chunk_start..chunk_end].to_vec());
+                            }
+                            
+                            let eeg_batch_data = EegBatchData {
+                                channels: chunk_channels_unfiltered,
+                                timestamp: chunk_timestamp_us / 1000, // Convert to milliseconds
+                                power_spectrums: data.power_spectrums.clone(),
+                                frequency_bins: data.frequency_bins.clone(),
+                                error: None,
+                            };
+                            let _ = tx_to_web_socket.send(eeg_batch_data);
                         }
+                    }
+
+                    // 2. Process BASIC VOLTAGE FILTER pipeline (if active)
+                    if active_pipelines.contains(&PipelineType::BasicVoltageFilter) {
+                        // Create a mutable copy for in-place filtering
+                        let mut samples_to_filter = data.voltage_samples.clone();
                         
-                        let eeg_batch_data = EegBatchData {
-                            channels: chunk_channels_unfiltered,
-                            timestamp: chunk_timestamp_us / 1000, // Convert to milliseconds
-                            power_spectrums: data.power_spectrums.clone(), // Pass through if present
-                            frequency_bins: data.frequency_bins.clone(),   // Pass through if present
+                        for (channel_idx, channel_samples_vec) in samples_to_filter.iter_mut().enumerate() {
+                            // Ensure channel_idx is within bounds for the signal_processor's configuration
+                            if channel_idx < num_channels_usize {
+                                // Create a copy of the input samples for processing
+                                let input_samples = channel_samples_vec.clone();
+                                match signal_processor.process_chunk(channel_idx, &input_samples, channel_samples_vec.as_mut_slice()) {
+                                    Ok(_) => {} // Successfully processed
+                                    Err(e) => {
+                                        println!("Error processing chunk for channel {}: {}", channel_idx, e);
+                                    }
+                                }
+                            } else {
+                                println!("Warning: Channel index {} is out of bounds for signal_processor ({} channels configured). Skipping filtering for this channel.", channel_idx, num_channels_usize);
+                            }
+                        }
+
+                        let filtered_eeg_data = FilteredEegData {
+                            timestamp: data.timestamp / 1000, // ms, for the whole batch from driver
+                            raw_samples: Some(data.raw_samples.clone()), // Include raw samples
+                            filtered_voltage_samples: Some(samples_to_filter), // These are now filtered
                             error: None,
                         };
-                        let _ = tx_to_web_socket.send(eeg_batch_data);
+                        let _ = tx_to_filtered_data_web_socket.send(filtered_eeg_data);
                     }
-
-                    // --- 2. Apply basic_voltage_filter and send FILTERED data to new endpoint ---
-                    // Create a mutable copy for in-place filtering
-                    let mut samples_to_filter = data.voltage_samples.clone();
-                    
-                    for (channel_idx, channel_samples_vec) in samples_to_filter.iter_mut().enumerate() {
-                        // process_chunk expects a mutable slice and processes it in place.
-                        // It also needs the channel index.
-                        // Ensure channel_idx is within bounds for the signal_processor's configuration
-                        if channel_idx < num_channels_usize { // num_channels_usize was derived from adc_config for signal_processor init
-                            // Create a copy of the input samples for processing
-                            let input_samples = channel_samples_vec.clone();
-                            match signal_processor.process_chunk(channel_idx, &input_samples, channel_samples_vec.as_mut_slice()) {
-                                Ok(_) => {} // Successfully processed
-                                Err(e) => {
-                                    println!("Error processing chunk for channel {}: {}", channel_idx, e);
-                                    // Optionally, you could set an error in filtered_eeg_data or skip this channel
-                                }
-                            }
-                        } else {
-                            println!("Warning: Channel index {} is out of bounds for signal_processor ({} channels configured). Skipping filtering for this channel.", channel_idx, num_channels_usize);
-                        }
-                    }
-
-                    let filtered_eeg_data = FilteredEegData {
-                        timestamp: data.timestamp / 1000, // ms, for the whole batch from driver
-                        raw_samples: Some(data.raw_samples.clone()), // Include raw samples
-                        filtered_voltage_samples: Some(samples_to_filter), // These are now filtered
-                        error: None,
-                    };
-                    let _ = tx_to_filtered_data_web_socket.send(filtered_eeg_data);
 
                     // --- Statistics --- (based on incoming data before filtering for consistency)
                     if let Some(first_channel_samples) = data.voltage_samples.get(0) {

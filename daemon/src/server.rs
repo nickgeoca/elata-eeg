@@ -154,8 +154,8 @@ pub async fn handle_websocket(
     println!("WebSocket client connected (ID: {}) - sending binary EEG data", client_id);
     println!("Binary format: [timestamp (8 bytes)] [channel_samples...] for each channel");
     
-    // Register client with connection manager
-    if let Err(e) = connection_manager.register_connection(client_id.clone(), ClientType::RawRecording).await {
+    // Register client with connection manager using new pipeline-aware method
+    if let Err(e) = connection_manager.register_client_pipeline(client_id.clone(), ClientType::RawRecording).await {
         eprintln!("Failed to register client {}: {}", client_id, e);
     }
     
@@ -191,8 +191,8 @@ pub async fn handle_websocket(
         }
     }
     
-    // Unregister client when connection closes
-    if let Err(e) = connection_manager.unregister_connection(&client_id).await {
+    // Unregister client when connection closes using new pipeline-aware method
+    if let Err(e) = connection_manager.unregister_client_pipeline(&client_id).await {
         eprintln!("Failed to unregister client {}: {}", client_id, e);
     }
     println!("WebSocket client disconnected (ID: {})", client_id);
@@ -216,8 +216,8 @@ pub async fn handle_filtered_eeg_data_websocket(
     
     println!("Filtered EEG Data WebSocket client connected (ID: {}) - sending JSON data", client_id);
     
-    // Register client with connection manager
-    if let Err(e) = connection_manager.register_connection(client_id.clone(), ClientType::EegMonitor).await {
+    // Register client with connection manager using new pipeline-aware method
+    if let Err(e) = connection_manager.register_client_pipeline(client_id.clone(), ClientType::EegMonitor).await {
         eprintln!("Failed to register client {}: {}", client_id, e);
     }
     
@@ -261,8 +261,8 @@ pub async fn handle_filtered_eeg_data_websocket(
         }
     }
     
-    // Unregister client when connection closes
-    if let Err(e) = connection_manager.unregister_connection(&client_id).await {
+    // Unregister client when connection closes using new pipeline-aware method
+    if let Err(e) = connection_manager.unregister_client_pipeline(&client_id).await {
         eprintln!("Failed to unregister client {}: {}", client_id, e);
     }
     println!("Filtered EEG Data WebSocket connection handler finished (ID: {})", client_id);

@@ -186,6 +186,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tx_filtered_eeg_data.clone(), // For new filtered data endpoint
         csv_recorder.clone(),
         is_recording.clone(),
+        connection_manager.clone(), // For demand-based processing
         processing_token
     ));
 
@@ -343,6 +344,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             tx_filtered_eeg_data.clone(), // For new filtered data endpoint
                             csv_recorder.clone(),
                             is_recording.clone(),
+                            connection_manager.clone(), // For demand-based processing
                             new_token.clone()
                         ));
                         

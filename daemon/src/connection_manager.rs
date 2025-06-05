@@ -3,11 +3,42 @@
 //! This module manages WebSocket connections and maps them to DSP processing requirements,
 //! enabling demand-based processing that only activates DSP components when needed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use eeg_driver::dsp::coordinator::{ClientId, DspRequirements, DspCoordinator};
+use eeg_driver::{ClientId, DspRequirements, DspCoordinator};
+
+/// Pipeline types for different data processing streams
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PipelineType {
+    /// Raw unfiltered data pipeline - /eeg endpoint
+    RawData,
+    /// Basic voltage filtering pipeline - /ws/eeg/data__basic_voltage_filter
+    BasicVoltageFilter,
+    /// FFT analysis pipeline - /applet/brain_waves/data
+    FftAnalysis,
+}
+
+impl PipelineType {
+    /// Get the estimated CPU cost for this pipeline
+    pub fn cpu_cost(&self) -> f32 {
+        match self {
+            PipelineType::RawData => 0.5,           // Minimal processing
+            PipelineType::BasicVoltageFilter => 2.0, // Basic filtering
+            PipelineType::FftAnalysis => 3.0,       // FFT computation
+        }
+    }
+    
+    /// Get the WebSocket endpoint for this pipeline
+    pub fn endpoint(&self) -> &'static str {
+        match self {
+            PipelineType::RawData => "/eeg",
+            PipelineType::BasicVoltageFilter => "/ws/eeg/data__basic_voltage_filter",
+            PipelineType::FftAnalysis => "/applet/brain_waves/data",
+        }
+    }
+}
 
 /// Types of WebSocket clients with different DSP needs
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -24,6 +55,20 @@ pub enum ClientType {
     RawRecording,
     /// Filtered data client (needs basic filtering)
     FilteredData,
+}
+
+impl ClientType {
+    /// Map client type to pipeline type
+    pub fn to_pipeline_type(&self) -> Option<PipelineType> {
+        match self {
+            ClientType::EegMonitor => Some(PipelineType::BasicVoltageFilter),
+            ClientType::FftAnalysis => Some(PipelineType::FftAnalysis),
+            ClientType::RawRecording => Some(PipelineType::RawData),
+            ClientType::FilteredData => Some(PipelineType::BasicVoltageFilter),
+            ClientType::Config => None,     // No pipeline needed
+            ClientType::Command => None,    // No pipeline needed
+        }
+    }
 }
 
 impl ClientType {
@@ -54,6 +99,10 @@ impl ClientType {
 pub struct ConnectionManager {
     /// Active connections mapped to their client types
     connections: Arc<Mutex<HashMap<ClientId, ClientType>>>,
+    /// Pipeline-specific client tracking for reference counting
+    pipeline_clients: Arc<Mutex<HashMap<PipelineType, HashSet<ClientId>>>>,
+    /// Currently active pipelines
+    active_pipelines: Arc<Mutex<HashSet<PipelineType>>>,
     /// Reference to the DSP coordinator
     dsp_coordinator: Arc<Mutex<DspCoordinator>>,
     /// Default channels for new connections
@@ -65,6 +114,8 @@ impl ConnectionManager {
     pub fn new(dsp_coordinator: Arc<Mutex<DspCoordinator>>, default_channels: Vec<usize>) -> Self {
         Self {
             connections: Arc::new(Mutex::new(HashMap::new())),
+            pipeline_clients: Arc::new(Mutex::new(HashMap::new())),
+            active_pipelines: Arc::new(Mutex::new(HashSet::new())),
             dsp_coordinator,
             default_channels,
         }
@@ -149,6 +200,113 @@ impl ConnectionManager {
     pub async fn get_dsp_state(&self) -> String {
         let coordinator = self.dsp_coordinator.lock().await;
         format!("{:?}", coordinator.get_state())
+    }
+
+    /// Register a client with pipeline-specific tracking
+    pub async fn register_client_pipeline(&self, client_id: ClientId, client_type: ClientType) -> Result<(), String> {
+        println!("ConnectionManager: Registering client {} as {:?}", client_id, client_type);
+        
+        // Add to connections map
+        {
+            let mut connections = self.connections.lock().await;
+            connections.insert(client_id.clone(), client_type.clone());
+        }
+
+        // Check if client needs a pipeline
+        if let Some(pipeline_type) = client_type.to_pipeline_type() {
+            let mut pipeline_clients = self.pipeline_clients.lock().await;
+            let mut active_pipelines = self.active_pipelines.lock().await;
+            
+            // Add client to pipeline group
+            pipeline_clients
+                .entry(pipeline_type.clone())
+                .or_insert_with(HashSet::new)
+                .insert(client_id.clone());
+            
+            // Activate pipeline if first client
+            let was_active = active_pipelines.contains(&pipeline_type);
+            if !was_active {
+                active_pipelines.insert(pipeline_type.clone());
+                println!("ConnectionManager: Activated pipeline {:?}", pipeline_type);
+            }
+        }
+
+        // Register with DSP coordinator if client needs DSP processing
+        let requirements = client_type.to_dsp_requirements(self.default_channels.clone());
+        if requirements.needs_filtering || requirements.needs_fft || requirements.needs_raw {
+            let mut coordinator = self.dsp_coordinator.lock().await;
+            coordinator.register_client(client_id, requirements).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Unregister a client with pipeline-specific tracking
+    pub async fn unregister_client_pipeline(&self, client_id: &ClientId) -> Result<(), String> {
+        println!("ConnectionManager: Unregistering client {}", client_id);
+        
+        // Remove from connections map
+        let client_type = {
+            let mut connections = self.connections.lock().await;
+            connections.remove(client_id)
+        };
+
+        // Handle pipeline cleanup
+        if let Some(client_type) = &client_type {
+            if let Some(pipeline_type) = client_type.to_pipeline_type() {
+                let mut pipeline_clients = self.pipeline_clients.lock().await;
+                let mut active_pipelines = self.active_pipelines.lock().await;
+                
+                // Remove client from pipeline group
+                if let Some(clients) = pipeline_clients.get_mut(&pipeline_type) {
+                    clients.remove(client_id);
+                    
+                    // Deactivate pipeline if no clients remain
+                    if clients.is_empty() {
+                        active_pipelines.remove(&pipeline_type);
+                        pipeline_clients.remove(&pipeline_type);
+                        println!("ConnectionManager: Deactivated pipeline {:?}", pipeline_type);
+                    }
+                }
+            }
+        }
+
+        // Unregister from DSP coordinator if client was using DSP
+        if let Some(client_type) = client_type {
+            let requirements = client_type.to_dsp_requirements(self.default_channels.clone());
+            if requirements.needs_filtering || requirements.needs_fft || requirements.needs_raw {
+                let mut coordinator = self.dsp_coordinator.lock().await;
+                coordinator.unregister_client(client_id).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Get currently active pipelines
+    pub async fn get_active_pipelines(&self) -> HashSet<PipelineType> {
+        let active_pipelines = self.active_pipelines.lock().await;
+        active_pipelines.clone()
+    }
+
+    /// Get total estimated CPU cost of active pipelines
+    pub async fn get_total_cpu_cost(&self) -> f32 {
+        let active_pipelines = self.active_pipelines.lock().await;
+        active_pipelines.iter().map(|p| p.cpu_cost()).sum()
+    }
+
+    /// Check if any pipelines are active (for idle detection)
+    pub async fn has_active_pipelines(&self) -> bool {
+        let active_pipelines = self.active_pipelines.lock().await;
+        !active_pipelines.is_empty()
+    }
+
+    /// Get pipeline client counts for debugging
+    pub async fn get_pipeline_stats(&self) -> HashMap<PipelineType, usize> {
+        let pipeline_clients = self.pipeline_clients.lock().await;
+        pipeline_clients.iter()
+            .map(|(pipeline, clients)| (pipeline.clone(), clients.len()))
+            .collect()
     }
 }
 

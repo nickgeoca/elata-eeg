@@ -5,6 +5,7 @@ pub mod eeg_system;
 // Re-export the main types that users need
 pub use eeg_system::EegSystem;
 pub use board_drivers::types::{AdcConfig, DriverType, DriverStatus};
+pub use dsp::{DspCoordinator, DspRequirements, SystemState, ClientId};
 use serde::{Serialize, Deserialize};
 
 /// Processed EEG data structure
