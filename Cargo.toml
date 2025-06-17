@@ -2,8 +2,6 @@
 members = [
     "crates/device",
     "crates/sensors",
-    "plugins/dsp/basic_voltage_filter",
-    "plugins/dsp/brain_waves_fft",
 ]
 
 [workspace.dependencies]

@@ -1,15 +1,15 @@
 [package]
-name = "eeg_driver"
+name = "eeg_sensor"
 version = "0.1.0"
 edition = "2021"
-default-run = "eeg_driver_bin"
+default-run = "eeg_sensor_bin"
 
 [lib]
-name = "eeg_driver"
+name = "eeg_sensor"
 path = "src/lib.rs"
 
 [[bin]]
-name = "eeg_driver_bin"
+name = "eeg_sensor_bin"
 path = "src/main.rs"
 
 [[bin]]
@@ -26,7 +26,7 @@ clap = { version = "4.5", features = ["derive"] } # for passing the mock data fl
 rppal = { version = "0.22.1", features = ["hal"] }
 aligned-utils = "1.0"
 # biquad = "0.5" # Removed as per DSP refactor plan
-rustfft = "6.1"
+# rustfft = "6.1" # Removed as per DSP refactor plan
 rand_distr = "0.4"
 thiserror = "1.0"
 async-trait = "0.1.68"
