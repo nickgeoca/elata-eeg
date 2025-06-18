@@ -100,6 +100,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create a broadcast channel for config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
 
+    // Create a broadcast channel for EEG data
+    let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(32);
+
     // Broadcast the initial configuration
     if let Err(e) = config_applied_tx.send(initial_config.clone()) {
         println!("Error broadcasting initial config: {}", e);
@@ -110,21 +113,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.clone(),
         is_recording.clone(),
         config_applied_tx.clone(),
+        eeg_data_tx.clone(),
     );
     
     println!("WebSocket server starting on:");
     println!("- ws://0.0.0.0:8080/config (Configuration)");
     println!("- ws://0.0.0.0:8080/command (Recording control)");
+    println!("- ws://0.0.0.0:8080/eeg (EEG data streaming)");
 
     // Spawn WebSocket server
     let mut server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
-    // Spawn task to forward data from EegSystem to the PluginManager
+    // Spawn task to forward data from EegSystem to the PluginManager and WebSocket clients
     let plugin_manager_clone = plugin_manager.clone();
+    let eeg_data_tx_clone = eeg_data_tx.clone();
+    let config_clone = config.clone();
     let mut data_forwarding_handle = tokio::spawn(async move {
         while let Some(adc_data) = data_rx.recv().await {
-            if let Err(e) = plugin_manager_clone.lock().await.send_data(adc_data).await {
+            // Forward to plugin manager
+            if let Err(e) = plugin_manager_clone.lock().await.send_data(adc_data.clone()).await {
                 eprintln!("Error forwarding data to plugin: {}", e);
+            }
+            
+            // Convert AdcData batch to binary format and broadcast to WebSocket clients
+            let current_config = config_clone.lock().await.clone();
+            // For now, let's just send individual samples as they come
+            // We can batch them later if needed
+            let mut buffer = Vec::with_capacity(12); // 4 bytes batch_size + 4 bytes channel + 4 bytes value
+            
+            // Write batch size of 1
+            buffer.extend_from_slice(&1u32.to_le_bytes());
+            
+            // Write channel as u32
+            buffer.extend_from_slice(&(adc_data.channel as u32).to_le_bytes());
+            
+            // Convert ADC value to voltage and write as f32
+            let voltage = (adc_data.value as f32) * (current_config.vref as f32) / (1 << 23) as f32;
+            buffer.extend_from_slice(&voltage.to_le_bytes());
+            
+            if let Err(e) = eeg_data_tx_clone.send(buffer) {
+                // Only log if there are subscribers (ignore if no WebSocket clients)
+                if !matches!(e, broadcast::error::SendError(_)) {
+                    eprintln!("Error broadcasting EEG data: {}", e);
+                }
             }
         }
         println!("Data forwarding task completed");

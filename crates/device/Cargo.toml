@@ -6,8 +6,9 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7" # Added for CancellationToken
+async-trait = "0.1" # Added for async trait support
 eeg_sensor = { path = "../sensors" }
-basic_voltage_filter = { path = "../../plugins/dsp/basic_voltage_filter" }
+basic_voltage_filter = { path = "../../plugins/basic_voltage_filter" }
 warp = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

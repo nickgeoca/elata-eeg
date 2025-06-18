@@ -3,8 +3,8 @@
 import { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 // @ts-ignore: WebglLine might be missing from types or setY might be, but setY exists at runtime
 import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
-import { getChannelColor } from '../../../../kiosk/src/utils/colorUtils';
-import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../../kiosk/src/utils/eegConstants'; // Import constants
+import { getChannelColor } from '../../../kiosk/src/utils/colorUtils';
+import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../kiosk/src/utils/eegConstants'; // Import constants
 
 const DATA_Y_MAX = 10000.0; // Expected maximum for FFT power data (µV²/Hz)
 const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.01; // Clamp input power to this minimum before log10

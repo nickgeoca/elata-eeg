@@ -15,7 +15,8 @@ import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
 import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
-import BrainWavesDisplay from '../../../plugins/ui/brain_waves/ui/BrainWavesDisplay';
+import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWavesDisplay';
+import { CircularGraphWrapper } from './CircularGraphWrapper';
  
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -30,7 +31,7 @@ export default function EegMonitorWebGL() {
   const latestTimestampRef = useRef<number>(performance.now());
   // Removed canvasDimensions state, EegRenderer handles this
 
-  type DataView = 'signalGraph' | 'appletBrainWaves'; // fftGraph removed
+  type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph'; // fftGraph removed
   type ActiveView = DataView | 'settings';
  
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
@@ -40,6 +41,7 @@ export default function EegMonitorWebGL() {
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
   const fftDataRef = useRef<Record<number, number[]>>({}); // Ref to store latest FFT data for all channels
   const [fftDataVersion, setFftDataVersion] = useState(0); // Version counter for fftDataRef updates
+  const [circularGraphData, setCircularGraphData] = useState<number[][]>([]); // State for circular graph data
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
@@ -286,7 +288,27 @@ export default function EegMonitorWebGL() {
   // Handle data updates (memoized with useCallback)
   const handleDataUpdate = useCallback((received: boolean) => {
     setDataReceived(received);
-  }, [setDataReceived]); // setDataReceived is stable
+    if (received) {
+      setDataVersion(v => v + 1);
+      
+      // Update circular graph data if in circular view
+      if (activeView === 'circularGraph' && dataRef.current) {
+        const convertedData: number[][] = [];
+        for (let i = 0; i < dataRef.current.length; i++) {
+          const line = dataRef.current[i];
+          if (line && line.xy) {
+            // Extract Y values from WebGL line data
+            const yValues = [];
+            for (let j = 1; j < line.xy.length; j += 2) {
+              yValues.push(line.xy[j]);
+            }
+            convertedData.push(yValues);
+          }
+        }
+        setCircularGraphData(convertedData);
+      }
+    }
+  }, [setDataReceived, activeView, setDataVersion]); // setDataReceived is stable
 
   // Handle driver errors (memoized with useCallback)
   const handleDriverError = useCallback((error: string) => {
@@ -349,8 +371,8 @@ export default function EegMonitorWebGL() {
     const target = containerRef.current;
     let sizeUpdateTimeoutId: NodeJS.Timeout | null = null;
 
-    // Setup ResizeObserver only for graph views ('signalGraph')
-    if (activeView === 'signalGraph' && target) { // fftGraph condition removed
+    // Setup ResizeObserver only for graph views ('signalGraph', 'circularGraph')
+    if ((activeView === 'signalGraph' || activeView === 'circularGraph') && target) { // fftGraph condition removed
         console.log(`[EegMonitor LineEffect] Setting up ResizeObserver for ${activeView}.`);
         resizeObserver = new ResizeObserver(entries => {
           for (let entry of entries) {
@@ -529,6 +551,7 @@ export default function EegMonitorWebGL() {
   const getViewName = (view: DataView | 'settings'): string => {
     switch (view) {
         case 'signalGraph': return 'Signal Graph';
+        case 'circularGraph': return 'Circular Graph';
         // case 'fftGraph': return 'FFT Graph'; // Removed
         case 'appletBrainWaves': return 'Brain Waves (FFT)'; // Updated name
         case 'settings': return 'Settings';
@@ -536,9 +559,11 @@ export default function EegMonitorWebGL() {
     }
   };
 
-  // Handler for toggling between Signal Graph and FFT Applet
+  // Handler for cycling between Signal Graph, Circular Graph, and FFT Applet
   const handleToggleSignalFftView = () => {
     if (activeView === 'signalGraph') {
+      setActiveView('circularGraph');
+    } else if (activeView === 'circularGraph') {
       setActiveView('appletBrainWaves');
     } else if (activeView === 'appletBrainWaves') {
       setActiveView('signalGraph');
@@ -558,16 +583,16 @@ export default function EegMonitorWebGL() {
     } else {
         setActiveView(lastActiveDataView);
         // If switching from settings to a graph view, ensure container size is reset
-        if (lastActiveDataView === 'signalGraph') { // fftGraph condition removed
+        if (lastActiveDataView === 'signalGraph' || lastActiveDataView === 'circularGraph') { // fftGraph condition removed
             console.log("[EegMonitor handleToggleSettingsView] Switching from settings to graph view. Resetting containerSize.");
             setContainerSize({ width: 0, height: 0 });
         }
     }
   };
   
-  // Effect to handle transition from settings to graph view (signalGraph)
+  // Effect to handle transition from settings to graph view (signalGraph, circularGraph)
   useEffect(() => {
-    if (activeView === 'signalGraph' && containerRef.current) { // fftGraph condition removed
+    if ((activeView === 'signalGraph' || activeView === 'circularGraph') && containerRef.current) { // fftGraph condition removed
       console.log(`[EegMonitor TransitionEffect RUNS for ${activeView}] Scheduling size check.`);
       
       // Use a timeout to ensure the DOM has updated after the view switch
@@ -673,13 +698,14 @@ export default function EegMonitorWebGL() {
             Recordings
           </a>
           
-          {/* Signal / FFT Graph toggle button */}
+          {/* Signal / Circular / FFT Graph toggle button */}
           <button
             onClick={handleToggleSignalFftView}
             className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
             disabled={activeView === 'settings'}
           >
-            {activeView === 'signalGraph' ? 'Show FFT' : 'Show Signal'}
+            {activeView === 'signalGraph' ? 'Show Circular' :
+             activeView === 'circularGraph' ? 'Show FFT' : 'Show Signal'}
           </button>
  
           {/* Settings button */}
@@ -933,6 +959,24 @@ export default function EegMonitorWebGL() {
                 </div>
               </div>
             </>
+            )}
+          </div>
+        ) : activeView === 'circularGraph' ? (
+          // Circular Graph View
+          <div className="relative h-full p-4" ref={containerRef}>
+            {config && containerSize.width > 0 && containerSize.height > 0 ? (
+              <CircularGraphWrapper
+                config={config}
+                containerWidth={containerSize.width}
+                containerHeight={containerSize.height}
+                data={circularGraphData}
+                targetFps={60}
+                displaySeconds={10}
+              />
+            ) : (
+              <div className="flex items-center justify-center h-full text-white">
+                <p>Loading Circular Graph or waiting for configuration/size...</p>
+              </div>
             )}
           </div>
         ) : activeView === 'appletBrainWaves' ? (

@@ -3,9 +3,10 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+use log::{info, warn, error, debug};
 
 use eeg_sensor::{
-    create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
+    create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus,
 };
 
 pub struct EegSystem {
@@ -21,7 +22,8 @@ impl EegSystem {
     pub async fn new(
         config: AdcConfig
     ) -> Result<(Self, mpsc::Receiver<AdcData>), Box<dyn Error>> {
-        let (driver, event_rx) = create_driver(config.clone()).await?;
+        info!("Creating new EegSystem with config");
+        let (driver, event_rx) = create_driver(config).await?;
         let (tx, rx) = mpsc::channel(100);
         let cancel_token = CancellationToken::new();
 
@@ -43,14 +45,18 @@ impl EegSystem {
 
     /// Internal helper to initialize or reinitialize the driver and processing task
     async fn initialize_processing(&mut self, config: AdcConfig) -> Result<(), Box<dyn Error>> {
-        // Add validation before proceeding
+        info!("Initializing EEG processing with config");
+        
+        // Validate configuration
         if config.channels.is_empty() {
+            error!("Cannot initialize with zero channels");
             return Err(Box::new(DriverError::ConfigurationError(
                 "Cannot initialize with zero channels".into()
             )));
         }
 
         if config.sample_rate == 0 {
+            error!("Invalid sample rate: 0");
             return Err(Box::new(DriverError::ConfigurationError(
                 "Sample rate must be greater than 0".into()
             )));
@@ -58,28 +64,12 @@ impl EegSystem {
 
         // Cancel any existing processing task gracefully
         if self.processing_task.is_some() {
+            debug!("Cancelling existing processing task");
             self.cancel_token.cancel();
-            // Create a new token for the next task
             self.cancel_token = CancellationToken::new();
         }
- 
-        // // Reset the signal processor // Removed as per DSP refactor plan
-        // {
-        //     let mut proc_guard = match self.processor.lock().await {
-        //         guard => guard,
-        //         // This would only happen if a thread panicked while holding the lock
-        //         // In a real system, we might want to recreate the processor entirely
-        //     };
-            
-        //     proc_guard.reset(
-        //         config.sample_rate,
-        //         config.channels.len(),
-        //         config.dsp_high_pass_cutoff_hz,
-        //         config.dsp_low_pass_cutoff_hz,
-        //         config.powerline_filter_hz
-        //     );
-        // }
 
+        // Start acquisition
         self.driver.start_acquisition().await?;
 
         // Take ownership of the event receiver
@@ -145,46 +135,34 @@ impl EegSystem {
 
     /// Stop the data acquisition & gracefully cancel the background task
     pub async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
+        debug!("Stopping EEG system");
         self.driver.stop_acquisition().await?;
         
-        // Signal the task to stop gracefully
-        if self.processing_task.is_some() {
+        if let Some(task) = self.processing_task.take() {
+            debug!("Cancelling processing task");
             self.cancel_token.cancel();
             
-            // Wait for a short time for the task to complete
-            if let Some(task) = self.processing_task.take() {
-                match tokio::time::timeout(Duration::from_millis(500), task).await {
-                    Ok(_) => {
-                        // Task completed gracefully
-                    },
-                    Err(_) => {
-                        // Task didn't complete in time, force abort
-                        // This is a fallback mechanism
-                        eprintln!("Warning: Processing task didn't complete in time, forcing abort");
-                    }
-                }
+            match tokio::time::timeout(Duration::from_millis(500), task).await {
+                Ok(_) => debug!("Processing task stopped gracefully"),
+                Err(_) => warn!("Processing task didn't complete in time, forcing abort"),
             }
             
-            // Create a new token for future tasks
             self.cancel_token = CancellationToken::new();
         }
         
         Ok(())
     }
 
-    /// Reconfigure the driver with new settings, resetting the processor
+    /// Reconfigure the driver with new settings
     pub async fn reconfigure(&mut self, config: AdcConfig) -> Result<(), Box<dyn Error>> {
-        // Stop the current driver and processing task
+        info!("Reconfiguring EEG system with new settings");
         self.stop().await?;
         
-        // Create a new driver with the updated configuration
+        // Create new driver with updated configuration
         let (new_driver, new_event_rx) = create_driver(config.clone()).await?;
-        
-        // Replace the driver and event_rx
         self.driver = new_driver;
         self.event_rx = Some(new_event_rx);
         
-        // Initialize processing with the new configuration
         self.initialize_processing(config).await
     }
 
@@ -198,30 +176,24 @@ impl EegSystem {
         self.driver.get_config().await
     }
 
-    /// Optionally allow direct driver access
-    pub fn driver(&mut self) -> &mut Box<dyn AdcDriver> {
-        &mut self.driver
-    }
-
     /// Completely shut down the EEG system and clean up resources
     pub async fn shutdown(&mut self) -> Result<(), Box<dyn Error>> {
-        // Add timeout for safety
         const SHUTDOWN_TIMEOUT_MS: u64 = 1000;
         
         let shutdown_future = async {
-            // Convert the Box<dyn Error> to DriverError
-            if let Err(e) = self.stop().await {
-                return Err(DriverError::Other(e.to_string()));
-            }
-            self.driver.shutdown().await
+            self.stop().await?;
+            self.driver.shutdown().await.map_err(|e| Box::new(e) as Box<dyn Error>)
         };
         
         match tokio::time::timeout(
             Duration::from_millis(SHUTDOWN_TIMEOUT_MS),
             shutdown_future
         ).await {
-            Ok(result) => result.map_err(|e| Box::new(e) as Box<dyn Error>),
-            Err(_) => Err(Box::new(DriverError::Other("Shutdown timed out".into())))
+            Ok(result) => result,
+            Err(_) => {
+                error!("Shutdown timed out");
+                Err(Box::new(DriverError::Other("Shutdown timed out".into())))
+            }
         }
     }
 }

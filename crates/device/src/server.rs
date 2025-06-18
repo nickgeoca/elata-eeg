@@ -523,6 +523,63 @@ pub async fn handle_command_websocket(
     println!("Command WebSocket client disconnected");
 }
 
+/// Handle WebSocket connection for EEG data streaming
+pub async fn handle_eeg_websocket(
+    ws: WebSocket,
+    mut data_rx: broadcast::Receiver<Vec<u8>>, // Receiver for binary EEG data
+) {
+    let (mut ws_tx, mut ws_rx) = ws.split();
+    
+    println!("EEG data WebSocket client connected");
+    
+    // Handle both data forwarding and client messages in a single loop
+    loop {
+        tokio::select! {
+            // Handle incoming WebSocket messages from client
+            result = ws_rx.next() => {
+                match result {
+                    Some(Ok(msg)) => {
+                        if msg.is_close() {
+                            println!("EEG WebSocket: Received close frame from client");
+                            break;
+                        }
+                        // Ignore other message types for now
+                    }
+                    Some(Err(e)) => {
+                        println!("EEG WebSocket: Error receiving message: {}", e);
+                        break;
+                    }
+                    None => {
+                        println!("EEG WebSocket: Client disconnected");
+                        break;
+                    }
+                }
+            }
+            // Handle incoming EEG data
+            data_result = data_rx.recv() => {
+                match data_result {
+                    Ok(data_packet) => {
+                        if let Err(e) = ws_tx.send(Message::binary(data_packet)).await {
+                            println!("Error sending EEG data to client: {}", e);
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        println!("EEG WebSocket: Lagged behind data broadcast by {} messages", n);
+                        // Continue receiving - client will get next available data
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        println!("EEG WebSocket: Data broadcast channel closed");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    
+    println!("EEG WebSocket: Connection handler finished");
+}
+
 // Brain waves FFT WebSocket handler moved to elata_dsp_brain_waves_fft crate
 
 // Set up WebSocket routes and server
@@ -530,6 +587,7 @@ pub fn setup_websocket_routes(
     config: Arc<Mutex<AdcConfig>>, // Shared current config
     is_recording: Arc<AtomicBool>,
     config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
+    eeg_data_tx: broadcast::Sender<Vec<u8>>, // Sender for EEG data
 ) -> (
     impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone,
     mpsc::Receiver<AdcConfig>,
@@ -558,7 +616,15 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_command_websocket(socket, is_rec, conf, tx))
         });
 
-    let routes = config_route.or(command_route);
+    // Route for EEG data streaming
+    let eeg_route = warp::path("eeg")
+        .and(warp::ws())
+        .and(with_broadcast_rx(eeg_data_tx.clone()))
+        .map(|ws: warp::ws::Ws, data_rx| {
+            ws.on_upgrade(move |socket| handle_eeg_websocket(socket, data_rx))
+        });
+
+    let routes = config_route.or(command_route).or(eeg_route);
 
     (routes, config_update_rx)
 }

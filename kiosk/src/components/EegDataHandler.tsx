@@ -87,8 +87,8 @@ export function useEegDataHandler({
     }
  
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-    // Use the filtered data endpoint instead of the raw /eeg endpoint
-    const ws = new WebSocket(`ws://${wsHost}:8080/ws/eeg/data__basic_voltage_filter`);
+    // Connect to basic EEG data endpoint
+    const ws = new WebSocket(`ws://${wsHost}:8080/eeg`);
     wsRef.current = ws;
     
     // Set binary type for WebSocket
@@ -107,95 +107,105 @@ export function useEegDataHandler({
 
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
-        // Handle JSON data from the filtered endpoint
-        if (typeof event.data === 'string') {
-          const filteredData = JSON.parse(event.data);
-          
-          // Handle error messages
-          if (filteredData.error) {
-            console.error("EEG driver error:", filteredData.error);
-            if (typeof onError === 'function') onError(`EEG driver error: ${filteredData.error}`);
-            return;
-          }
-
-          // Handle filtered voltage samples
-          if (filteredData.filtered_voltage_samples && Array.isArray(filteredData.filtered_voltage_samples)) {
-            const configuredChannelCount = currentConfig?.channels?.length || 0;
-            if (configuredChannelCount === 0) return;
-
-            const channelData = filteredData.filtered_voltage_samples;
-            if (channelData.length === 0) {
-              if (!isProduction) console.warn("Received packet with no filtered voltage samples.");
-              return;
-            }
-
-            const samplesPerChannel = channelData[0]?.length || 0;
-            if (samplesPerChannel <= 0) {
-              if (!isProduction) console.warn("Received packet with empty channel data.");
-              return;
-            }
-
-            // Ensure we have enough sample buffers
-            if (sampleBuffersRef.current.length < configuredChannelCount) {
-              sampleBuffersRef.current = Array(configuredChannelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
-            }
-
-            for (let ch = 0; ch < Math.min(configuredChannelCount, channelData.length); ch++) {
-              let currentSampleBuffer = sampleBuffersRef.current[ch];
-
-              if (!currentSampleBuffer || currentSampleBuffer.length !== samplesPerChannel) {
-                currentSampleBuffer = new Float32Array(samplesPerChannel);
-                sampleBuffersRef.current[ch] = currentSampleBuffer;
-              }
-
-              // Copy filtered data to buffer
-              const channelSamples = channelData[ch];
-              for (let i = 0; i < samplesPerChannel; i++) {
-                const rawValue = channelSamples[i];
-                currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
-                
-                // DEBUG: Log some sample values to understand the data range
-                if (ch === 0 && i < 3 && debugInfoRef.current.packetsReceived % 100 === 0) {
-                  console.log(`[EegDataHandler DEBUG FILTERED] Ch${ch} Sample${i}: ${rawValue} (finite: ${isFinite(rawValue)})`);
-                }
-              }
-
-              // Update timestamps
-              if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
-                lastDataChunkTimeRef.current[ch] = performance.now();
-              }
-
-              // Add data to WebGL lines
-              if (linesRef.current && linesRef.current[ch] && samplesPerChannel > 0) {
-                linesRef.current[ch].shiftAdd(currentSampleBuffer);
-              }
-            }
-
-            // Update global timestamp
-            if (latestTimestampRef) {
-              latestTimestampRef.current = performance.now();
-            }
-
-            // Update debug info
-            if (debugInfoRef) {
-              debugInfoRef.current.packetsReceived++;
-              debugInfoRef.current.lastPacketTime = performance.now();
-              debugInfoRef.current.samplesProcessed += samplesPerChannel * Math.min(configuredChannelCount, channelData.length);
-            }
-
-            if (typeof onDataUpdate === 'function') {
-              onDataUpdate(true);
-            }
+        // Handle binary data from EEG endpoint
+        if (!(event.data instanceof ArrayBuffer)) {
+          if (!isProduction) {
+            console.warn("[EegDataHandler] Received non-binary data:", typeof event.data);
           }
           return;
         }
 
-        // Fallback: Handle binary data (in case we need to support both formats)
-        if (!(event.data instanceof ArrayBuffer)) {
+        const buffer = new Uint8Array(event.data);
+        if (buffer.length === 0) {
+          if (!isProduction) console.warn("Received empty data packet");
+          return;
+        }
+
+        const configuredChannelCount = currentConfig?.channels?.length || 0;
+        if (configuredChannelCount === 0) return;
+
+        // Parse binary data format: [batch_size (4 bytes)] + [channel_data...]
+        // Each sample is 4 bytes (f32)
+        const dataView = new DataView(event.data);
+        let offset = 0;
+
+        // Read batch size (4 bytes, little endian)
+        if (buffer.length < 4) {
+          if (!isProduction) console.warn("Data packet too small for batch size");
           return;
         }
         
-        console.warn("[EegDataHandler] Received binary data but expected JSON from filtered endpoint");
+        const batchSize = dataView.getUint32(offset, true); // little endian
+        offset += 4;
+
+        if (batchSize === 0) {
+          if (!isProduction) console.warn("Received packet with batch size 0");
+          return;
+        }
+
+        // Calculate expected data size: batch_size * num_channels * 4 bytes per sample
+        const expectedDataSize = batchSize * configuredChannelCount * 4;
+        const availableDataSize = buffer.length - offset;
+        
+        if (availableDataSize < expectedDataSize) {
+          if (!isProduction) {
+            console.warn(`Data size mismatch: expected ${expectedDataSize}, got ${availableDataSize}`);
+          }
+          return;
+        }
+
+        // Ensure we have enough sample buffers
+        if (sampleBuffersRef.current.length < configuredChannelCount) {
+          sampleBuffersRef.current = Array(configuredChannelCount).fill(null).map((_, i) => sampleBuffersRef.current[i] || null);
+        }
+
+        // Process data for each channel
+        for (let ch = 0; ch < configuredChannelCount; ch++) {
+          let currentSampleBuffer = sampleBuffersRef.current[ch];
+
+          if (!currentSampleBuffer || currentSampleBuffer.length !== batchSize) {
+            currentSampleBuffer = new Float32Array(batchSize);
+            sampleBuffersRef.current[ch] = currentSampleBuffer;
+          }
+
+          // Read samples for this channel
+          for (let i = 0; i < batchSize; i++) {
+            const sampleOffset = offset + (i * configuredChannelCount + ch) * 4;
+            const rawValue = dataView.getFloat32(sampleOffset, true); // little endian
+            currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
+            
+            // DEBUG: Log some sample values
+            if (ch === 0 && i < 3 && debugInfoRef.current.packetsReceived % 100 === 0) {
+              console.log(`[EegDataHandler DEBUG BINARY] Ch${ch} Sample${i}: ${rawValue} (finite: ${isFinite(rawValue)})`);
+            }
+          }
+
+          // Update timestamps
+          if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
+            lastDataChunkTimeRef.current[ch] = performance.now();
+          }
+
+          // Add data to WebGL lines
+          if (linesRef.current && linesRef.current[ch] && batchSize > 0) {
+            linesRef.current[ch].shiftAdd(currentSampleBuffer);
+          }
+        }
+
+        // Update global timestamp
+        if (latestTimestampRef) {
+          latestTimestampRef.current = performance.now();
+        }
+
+        // Update debug info
+        if (debugInfoRef) {
+          debugInfoRef.current.packetsReceived++;
+          debugInfoRef.current.lastPacketTime = performance.now();
+          debugInfoRef.current.samplesProcessed += batchSize * configuredChannelCount;
+        }
+
+        if (typeof onDataUpdate === 'function') {
+          onDataUpdate(true);
+        }
 
         if (dataReceivedTimeoutRef.current) {
           clearTimeout(dataReceivedTimeoutRef.current);

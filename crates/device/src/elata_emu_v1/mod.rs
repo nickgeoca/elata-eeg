@@ -1,7 +1,7 @@
 //! Elata EMU v1 product-specific integration
 //!
 //! This module contains the product-specific code for the Elata EMU v1 device,
-//! including hardware configuration, board integration, and EEG system orchestration.
+//! including EEG system orchestration.
 
 pub mod eeg_system;
 
