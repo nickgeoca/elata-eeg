@@ -3,10 +3,15 @@ name = "adc_daemon"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+brain_waves_fft_feature = []
+
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7" # Added for CancellationToken
 async-trait = "0.1" # Added for async trait support
+anyhow = "1.0" # Added for error handling
+tracing = "0.1" # Added for structured logging
 eeg_sensor = { path = "../sensors" }
 basic_voltage_filter = { path = "../../plugins/basic_voltage_filter" }
 warp = "0.3"
@@ -19,6 +24,7 @@ chrono = "0.4"
 env_logger = "0.10" # Added logger
 log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
+uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
 tempfile = "3.8"

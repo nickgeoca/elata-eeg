@@ -31,6 +31,8 @@ Key accomplishments:
 
 # TODO Docs
 - security.md... security hardening
+- [Event-Driven Refactor Plan](./event_driven_refactor_plan.md) - Comprehensive plan to refactor EEG daemon to event-driven architecture
+- [Event Refactor Progress Tracker](./event_refactor_progress.md) - Session-by-session progress tracking for the event-driven refactor
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
 - [Kiosk Boot Failure Investigation](./boot_failures.md) - Diagnosing "site can't be reached" error after reboot.
 - [Next.js Build Error Session Notes](./next_js_build_error_session_notes.md) - Investigation of React dependency resolution issues with applet files outside kiosk project.
