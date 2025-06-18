@@ -393,21 +393,12 @@ impl ConnectionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eeg_driver::{AdcConfig, DriverType};
+    use eeg_types::{AdcConfig, DriverType};
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
     async fn create_test_coordinator() -> Arc<Mutex<DspCoordinator>> {
-        let config = Arc::new(Mutex::new(AdcConfig {
-            board_driver: DriverType::Mock,
-            sample_rate: 250,
-            channels: vec![0, 1, 2, 3],
-            gain: 1.0,
-            batch_size: 10,
-            Vref: 4.5,
-        }));
-        
-        let coordinator = DspCoordinator::new(config).await;
+        let coordinator = DspCoordinator::new();
         Arc::new(Mutex::new(coordinator))
     }
 

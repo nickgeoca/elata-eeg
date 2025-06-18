@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, Mutex, mpsc};
 use eeg_sensor::AdcConfig;
-use crate::driver_handler::{EegBatchData, FilteredEegData, CsvRecorder};
 use crate::connection_manager::ConnectionManager;
 
 #[derive(Clone, Debug)]
@@ -591,28 +590,10 @@ pub async fn handle_eeg_websocket(
 
 // Set up WebSocket routes and server
 
-pub fn create_eeg_binary_packet(batch: &EegBatchData) -> Vec<u8> {
-    let mut buffer = Vec::new();
-    buffer.extend_from_slice(&batch.timestamp.to_le_bytes());
-    buffer.push(batch.error.is_some() as u8);
-    if let Some(error) = &batch.error {
-        buffer.extend_from_slice(error.as_bytes());
-    } else {
-        for i in 0..batch.channels[0].len() {
-            for channel_data in &batch.channels {
-                buffer.extend_from_slice(&channel_data[i].to_le_bytes());
-            }
-        }
-    }
-    buffer
-}
 
 pub fn setup_websocket_routes(
     _config: Arc<Mutex<AdcConfig>>,
-    _csv_recorder: Arc<Mutex<CsvRecorder>>,
     _config_applied_tx: broadcast::Sender<AdcConfig>,
-    _eeg_batch_tx: broadcast::Sender<EegBatchData>,
-    _filtered_eeg_tx: broadcast::Sender<FilteredEegData>,
     _connection_manager: Arc<ConnectionManager>,
     _is_recording: Arc<AtomicBool>,
 ) -> (

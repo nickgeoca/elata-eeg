@@ -1,236 +1,183 @@
-use biquad::{Biquad, DirectForm2Transposed, Coefficients, Type, Q_BUTTERWORTH_F32, ToHertz};
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
+use async_trait::async_trait;
+use anyhow::Result;
+use tracing::{info, warn, error, debug};
 
-// Update the FilterCoefficients to use biquad's Coefficients
+use eeg_types::{
+    event::{SensorEvent, EegPacket, FilteredEegPacket},
+    plugin::{EegPlugin, PluginConfig, EventFilter},
+    config::DaemonConfig,
+};
+use basic_voltage_filter::SignalProcessor;
+
+/// Configuration for the Basic Voltage Filter Plugin
 #[derive(Clone, Debug)]
-struct FilterCoefficients {
-    coeffs: Coefficients<f32>
+pub struct BasicVoltageFilterConfig {
+    pub daemon_config: Arc<DaemonConfig>,
+    pub sample_rate: u32,
+    pub num_channels: usize,
 }
 
-// Simplify DigitalFilter to use biquad's DirectForm2Transposed
-#[derive(Debug)]
-struct DigitalFilter {
-    filter: DirectForm2Transposed<f32>
-}
-
-impl DigitalFilter {
-    fn new(coeffs: FilterCoefficients) -> Self {
-        Self {
-            filter: biquad::DirectForm2Transposed::<f32>::new(coeffs.coeffs)
+impl PluginConfig for BasicVoltageFilterConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.num_channels == 0 {
+            return Err(anyhow::anyhow!("Number of channels must be greater than 0"));
         }
-    }
-
-    fn process(&mut self, x: f32) -> f32 {
-        // Clamp input to prevent extreme values
-        let x = x.clamp(-8192.0, 8191.0);
-        let y = self.filter.run(x);
-        // Clamp output to prevent instability
-        y.clamp(-8192.0, 8191.0)
-    }
-}
-
-// Add struct definitions for each filter type
-#[derive(Debug)]
-struct NotchFilter(DigitalFilter);
-
-#[derive(Debug)]
-struct HighpassFilter(DigitalFilter);
-
-#[derive(Debug)]
-struct LowpassFilter(DigitalFilter);
-
-// Update NotchFilter implementation to use BandPass instead of NotchFilter
-impl NotchFilter {
-    fn new(sample_rate: f32, notch_freq: f32) -> Self {
-        let q_factor = 30.0;  // High Q for narrow notch
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::Notch,  // <-- Changed from BandPass to Notch
-            sample_rate.hz(),
-            notch_freq.hz(),
-            q_factor
-        ).unwrap();
-        
-        NotchFilter(DigitalFilter::new(FilterCoefficients { coeffs }))
-    }
-    
-    fn process(&mut self, x: f32) -> f32 {
-        self.0.process(x)
-    }
-}
-
-// Similar updates for HighpassFilter
-impl HighpassFilter {
-    fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::HighPass,
-            sample_rate.hz(),
-            cutoff_freq.hz(),
-            Q_BUTTERWORTH_F32
-        ).unwrap();
-        
-        Self(DigitalFilter::new(FilterCoefficients { coeffs }))
-    }
-    
-    fn process(&mut self, x: f32) -> f32 {
-        self.0.process(x)
-    }
-}
-
-// And LowpassFilter
-impl LowpassFilter {
-    fn new(sample_rate: f32, cutoff_freq: f32) -> Self {
-        let coeffs = Coefficients::<f32>::from_params(
-            Type::LowPass,
-            sample_rate.hz(),
-            cutoff_freq.hz(),
-            Q_BUTTERWORTH_F32
-        ).unwrap();
-        
-        Self(DigitalFilter::new(FilterCoefficients { coeffs }))
-    }
-    
-    fn process(&mut self, x: f32) -> f32 {
-        self.0.process(x)
-    }
-}
-
-pub struct SignalProcessor {
-    sample_rate: u32,
-    num_channels: usize,
-    powerline_notch_filters: Option<Vec<NotchFilter>>, // Holds 50Hz OR 60Hz filters, or None
-    highpass_filters: Vec<HighpassFilter>,
-    lowpass_filters: Vec<LowpassFilter>,
-}
-
-impl SignalProcessor {
-    pub fn new(sample_rate: u32, num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32, powerline_filter_hz: Option<u32>) -> Self {
-        println!("[SignalProcessor::new] Initializing with sample_rate: {}, num_channels: {}, HP_cutoff: {}, LP_cutoff: {}, powerline_filter_hz: {:?}",
-                 sample_rate, num_channels, dsp_high_pass_cutoff, dsp_low_pass_cutoff, powerline_filter_hz);
-        // Add validation for sample rate
-        assert!(sample_rate > 0, "Sample rate must be positive");
-        assert!(sample_rate >= 200, "Sample rate should be at least 200Hz for proper filter operation");
-        
-        let sample_rate_f32 = sample_rate as f32;
-        
-        // Create powerline notch filters based on the configuration
-        let powerline_notch_filters = match powerline_filter_hz {
-            Some(freq) if freq == 50 || freq == 60 => {
-                Some((0..num_channels)
-                    .map(|_| NotchFilter::new(sample_rate_f32, freq as f32))
-                    .collect())
-            },
-            _ => {
-                println!("[SignalProcessor::new] Powerline filter is OFF or invalid value: {:?}", powerline_filter_hz);
-                None // No powerline filter
-            }
-        };
-        if powerline_notch_filters.is_some() {
-            println!("[SignalProcessor::new] Powerline notch filters CREATED for {:?} Hz", powerline_filter_hz.unwrap());
-        } else {
-            println!("[SignalProcessor::new] Powerline notch filters are NONE");
+        if self.sample_rate == 0 {
+            return Err(anyhow::anyhow!("Sample rate must be greater than 0"));
         }
-        
-        Self {
-            sample_rate,
-            num_channels,
-            powerline_notch_filters,
-            highpass_filters: (0..num_channels)
-                .map(|_| HighpassFilter::new(sample_rate_f32, dsp_high_pass_cutoff))
-                .collect(),
-            lowpass_filters: (0..num_channels)
-                .map(|_| LowpassFilter::new(sample_rate_f32, dsp_low_pass_cutoff))
-                .collect(),
-        }
-    }
-
-    pub fn process_sample(&mut self, channel: usize, sample: f32) -> f32 {
-        // Add channel bounds check
-        assert!(channel < self.num_channels, "Channel index out of bounds");
-        
-        let mut processed = sample;
-        processed = self.highpass_filters[channel].process(processed);  // Move highpass first
-        
-        // Apply powerline notch filter if configured
-        if let Some(notch_filters) = &mut self.powerline_notch_filters {
-            if channel < notch_filters.len() {
-                processed = notch_filters[channel].process(processed);
-            }
-        }
-        
-        processed = self.lowpass_filters[channel].process(processed);
-        processed
-    }
-    
-    /// Process a chunk of samples for a specific channel
-    ///
-    /// This is more efficient than processing samples individually when working with batches
-    ///
-    /// # Arguments
-    /// * `channel` - The channel index
-    /// * `samples` - The input samples to process
-    /// * `output` - The buffer to store processed samples (must be pre-allocated with same length as samples)
-    ///
-    /// # Returns
-    /// * `Result<(), &'static str>` - Ok if successful, Err with message if failed
-    pub fn process_chunk(&mut self, channel: usize, samples: &[f32], output: &mut [f32]) -> Result<(), &'static str> {
-        // Validate inputs
-        if channel >= self.num_channels {
-            return Err("Channel index out of bounds");
-        }
-        
-        if output.len() < samples.len() {
-            return Err("Output buffer too small");
-        }
-        
-        // Process each sample through the filter chain
-        for (i, &sample) in samples.iter().enumerate() {
-            let mut processed = sample;
-            processed = self.highpass_filters[channel].process(processed);
-            
-            // Apply powerline notch filter if configured
-            if let Some(notch_filters) = &mut self.powerline_notch_filters {
-                if channel < notch_filters.len() {
-                    processed = notch_filters[channel].process(processed);
-                }
-            }
-            
-            processed = self.lowpass_filters[channel].process(processed);
-            output[i] = processed;
-        }
-        
         Ok(())
     }
+    
+    fn config_name(&self) -> &str {
+        "basic_voltage_filter_config"
+    }
+}
 
-    pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32, powerline_filter_hz: Option<u32>) {
-        println!("[SignalProcessor::reset] Resetting with sample_rate: {}, num_channels: {}, HP_cutoff: {}, LP_cutoff: {}, powerline_filter_hz: {:?}",
-                 new_sample_rate, new_num_channels, dsp_high_pass_cutoff, dsp_low_pass_cutoff, powerline_filter_hz);
-        self.sample_rate = new_sample_rate;
-        self.num_channels = new_num_channels;
-        // Recreate all filters
-        let sample_rate = self.sample_rate as f32;
+/// Basic Voltage Filter Plugin - applies DSP filtering to raw EEG data
+pub struct BasicVoltageFilterPlugin {
+    config: BasicVoltageFilterConfig,
+    signal_processor: SignalProcessor,
+}
+
+impl BasicVoltageFilterPlugin {
+    pub fn new(config: BasicVoltageFilterConfig) -> Self {
+        let signal_processor = SignalProcessor::new(
+            config.sample_rate,
+            config.num_channels,
+            config.daemon_config.filter_config.dsp_high_pass_cutoff_hz,
+            config.daemon_config.filter_config.dsp_low_pass_cutoff_hz,
+            config.daemon_config.filter_config.powerline_filter_hz,
+        );
+
+        Self {
+            config,
+            signal_processor,
+        }
+    }
+
+    /// Process EEG packet through the signal processor
+    async fn process_eeg_packet(&mut self, packet: &EegPacket) -> Result<FilteredEegPacket> {
+        // Convert Arc<[f32]> to Vec<Vec<f32>> format expected by SignalProcessor
+        let samples_per_channel = packet.samples.len() / self.config.num_channels;
+        let mut channel_samples = vec![vec![0.0; samples_per_channel]; self.config.num_channels];
         
-        // Create powerline notch filters based on the configuration
-        self.powerline_notch_filters = match powerline_filter_hz {
-            Some(freq) if freq == 50 || freq == 60 => {
-                Some((0..self.num_channels)
-                    .map(|_| NotchFilter::new(sample_rate, freq as f32))
-                    .collect())
-            },
-            _ => {
-                println!("[SignalProcessor::reset] Powerline filter is OFF or invalid value: {:?}", powerline_filter_hz);
-                None // No powerline filter
+        // Reshape flat samples array into per-channel format
+        for (sample_idx, &sample) in packet.samples.iter().enumerate() {
+            let channel_idx = sample_idx / samples_per_channel;
+            let sample_in_channel = sample_idx % samples_per_channel;
+            if channel_idx < self.config.num_channels && sample_in_channel < samples_per_channel {
+                channel_samples[channel_idx][sample_in_channel] = sample;
             }
-        };
-        if self.powerline_notch_filters.is_some() {
-            println!("[SignalProcessor::reset] Powerline notch filters RE-CREATED for {:?} Hz", powerline_filter_hz.unwrap());
-        } else {
-            println!("[SignalProcessor::reset] Powerline notch filters are NOW NONE");
+        }
+
+        // Process each channel through the signal processor
+        for (channel_idx, channel_data) in channel_samples.iter_mut().enumerate() {
+            if channel_idx < self.config.num_channels {
+                // Create a copy of input for processing
+                let input_samples = channel_data.clone();
+                match self.signal_processor.process_chunk(
+                    channel_idx, 
+                    &input_samples, 
+                    channel_data.as_mut_slice()
+                ) {
+                    Ok(_) => {
+                        debug!("[basic_voltage_filter] Successfully processed channel {}", channel_idx);
+                    }
+                    Err(e) => {
+                        error!("[basic_voltage_filter] Error processing channel {}: {}", channel_idx, e);
+                        // Keep original data on error
+                        *channel_data = input_samples;
+                    }
+                }
+            }
+        }
+
+        // Convert back to flat Arc<[f32]> format
+        let mut filtered_samples = Vec::with_capacity(packet.samples.len());
+        for sample_idx in 0..samples_per_channel {
+            for channel_idx in 0..self.config.num_channels {
+                if sample_idx < channel_samples[channel_idx].len() {
+                    filtered_samples.push(channel_samples[channel_idx][sample_idx]);
+                } else {
+                    filtered_samples.push(0.0);
+                }
+            }
+        }
+
+        Ok(FilteredEegPacket {
+            timestamp: packet.timestamp,
+            source_frame_id: packet.frame_id,
+            filtered_samples: filtered_samples.into(),
+            channel_count: self.config.num_channels,
+            filter_type: "basic_voltage".to_string(),
+        })
+    }
+}
+
+#[async_trait]
+impl EegPlugin for BasicVoltageFilterPlugin {
+    fn name(&self) -> &'static str {
+        "basic_voltage_filter"
+    }
+    
+    fn description(&self) -> &'static str {
+        "Applies DSP filtering (high-pass, low-pass, powerline) to raw EEG data"
+    }
+    
+    fn event_filter(&self) -> Vec<EventFilter> {
+        vec![EventFilter::RawEegOnly]
+    }
+
+    async fn run(
+        &self,
+        bus: Arc<dyn std::any::Any + Send + Sync>,
+        mut receiver: tokio::sync::mpsc::Receiver<SensorEvent>,
+        shutdown_token: CancellationToken,
+    ) -> Result<()> {
+        info!("[{}] Starting basic voltage filter plugin", self.name());
+        
+        // Create a mutable copy for processing state
+        let mut filter = BasicVoltageFilterPlugin::new(self.config.clone());
+        
+        loop {
+            tokio::select! {
+                biased; // Prioritize shutdown
+                _ = shutdown_token.cancelled() => {
+                    info!("[{}] Received shutdown signal", self.name());
+                    break;
+                }
+                Some(event) = receiver.recv() => {
+                    match event {
+                        SensorEvent::RawEeg(packet) => {
+                            debug!("[{}] Processing raw EEG packet with frame_id: {}", 
+                                   self.name(), packet.frame_id);
+                            
+                            match filter.process_eeg_packet(&packet).await {
+                                Ok(filtered_packet) => {
+                                    // Publish filtered data back to the event bus
+                                    let filtered_event = SensorEvent::FilteredEeg(Arc::new(filtered_packet));
+                                    // TODO: Cast bus back to EventBus trait and broadcast
+                                    // For now, just log that we would publish
+                                    debug!("[{}] Successfully processed filtered EEG data (would publish to bus)",
+                                           self.name());
+                                }
+                                Err(e) => {
+                                    error!("[{}] Failed to process EEG packet: {}", self.name(), e);
+                                }
+                            }
+                        }
+                        _ => {
+                            // Ignore other event types
+                            debug!("[{}] Ignoring non-RawEeg event", self.name());
+                        }
+                    }
+                }
+            }
         }
         
-        self.highpass_filters = (0..self.num_channels)
-            .map(|_| HighpassFilter::new(sample_rate, dsp_high_pass_cutoff))
-            .collect();
-        self.lowpass_filters = (0..self.num_channels)
-            .map(|_| LowpassFilter::new(sample_rate, dsp_low_pass_cutoff))
-            .collect();
+        info!("[{}] Basic voltage filter plugin stopped", self.name());
+        Ok(())
     }
 }

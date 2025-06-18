@@ -6,9 +6,9 @@
 
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, warn};
+use async_trait::async_trait;
 
-use crate::event::SensorEvent;
-use crate::plugin::{EventFilter, event_matches_filter};
+use eeg_types::{SensorEvent, EventFilter, event_matches_filter};
 
 /// Subscriber information for the event bus
 #[derive(Debug)]
@@ -240,11 +240,18 @@ impl Clone for EventBusMetrics {
     }
 }
 
+#[async_trait]
+impl eeg_types::EventBus for EventBus {
+    async fn broadcast(&self, event: SensorEvent) {
+        self.broadcast(event).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EegPacket, SensorEvent};
-    use crate::plugin::EventFilter;
+    use std::sync::Arc;
+    use eeg_types::{EegPacket, SensorEvent, EventFilter};
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]

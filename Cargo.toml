@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/device",
     "crates/sensors",
+    "crates/eeg_types",
 ]
 
 [workspace.dependencies]

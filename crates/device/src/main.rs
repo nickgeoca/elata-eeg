@@ -1,8 +1,6 @@
 mod config;
-mod driver_handler;
 mod server;
 mod pid_manager;
-mod plugin_manager;
 mod connection_manager;
 mod elata_emu_v1;
 
@@ -11,6 +9,10 @@ mod event;
 mod plugin;
 mod event_bus;
 
+// Import plugin implementations
+use csv_recorder_plugin::{CsvRecorderPlugin, CsvRecorderConfig};
+use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterConfig};
+
 use eeg_sensor::AdcConfig;
 use tokio::sync::{broadcast, Mutex};
 use crate::elata_emu_v1::EegSystem;
@@ -18,20 +20,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
 use tokio_util::sync::CancellationToken;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // Import event-driven types
-use crate::event::{EegPacket, SensorEvent, SystemEvent, SystemEventType};
+use eeg_types::{EegPacket, SensorEvent, EegPlugin};
+use eeg_sensor::AdcData;
 use crate::event_bus::EventBus;
-use crate::plugin::{EegPlugin, EventFilter};
-
-use crate::driver_handler::{
-    CsvRecorder,
-    EegBatchData,
-    FilteredEegData,
-    ProcessedData,
-    process_eeg_data
-};
 
 // Define a custom error type that implements Send + Sync
 #[derive(Debug)]
@@ -157,16 +150,20 @@ async fn supervise_plugin(
     tracing::info!(plugin = plugin_name, "Plugin supervision ended");
 }
 
-/// Data acquisition loop that converts ProcessedData to SensorEvents and broadcasts them
+/// Data acquisition loop that converts raw ADC data to SensorEvents and broadcasts them
 async fn data_acquisition_loop(
-    mut data_rx: tokio::sync::mpsc::Receiver<ProcessedData>,
+    mut adc_rx: tokio::sync::mpsc::Receiver<AdcData>,
     bus: Arc<EventBus>,
+    config: Arc<Mutex<AdcConfig>>,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<()> {
+    use std::collections::HashMap;
+
     let mut frame_counter = 0u64;
-    
+    let mut channel_buffers: HashMap<u8, Vec<(i32, u64)>> = HashMap::new();
+
     tracing::info!("Starting data acquisition loop");
-    
+
     loop {
         tokio::select! {
             biased; // Prioritize shutdown
@@ -174,132 +171,87 @@ async fn data_acquisition_loop(
                 tracing::info!("Data acquisition loop received shutdown signal");
                 break;
             }
-            data = data_rx.recv() => {
-                match data {
-                    Some(processed_data) => {
-                        // Convert ProcessedData to EegPacket
-                        let channel_count = processed_data.voltage_samples.len();
-                        let sample_rate = 500.0; // TODO: Get from config
-                        
-                        // Flatten the voltage samples (channel-interleaved format)
-                        let mut flattened_samples = Vec::new();
-                        if !processed_data.voltage_samples.is_empty() {
-                            let samples_per_channel = processed_data.voltage_samples[0].len();
-                            for sample_idx in 0..samples_per_channel {
-                                for channel_samples in &processed_data.voltage_samples {
-                                    if sample_idx < channel_samples.len() {
-                                        flattened_samples.push(channel_samples[sample_idx]);
-                                    }
+            Some(adc_data) = adc_rx.recv() => {
+                // Get current config
+                let (batch_size, vref, num_channels, sample_rate) = {
+                    let config_guard = config.lock().await;
+                    (
+                        config_guard.batch_size as usize,
+                        config_guard.vref,
+                        config_guard.channels.len(),
+                        config_guard.sample_rate as f32,
+                    )
+                };
+
+                // Accumulate data by channel
+                let buffer = channel_buffers.entry(adc_data.channel).or_insert_with(Vec::new);
+                buffer.push((adc_data.value, adc_data.timestamp));
+
+                // Check if we have enough data for a batch
+                let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
+                if min_buffer_size >= batch_size {
+                    let mut voltage_samples = Vec::new();
+                    let mut latest_timestamp = 0u64;
+
+                    // Process each channel
+                    for channel_idx in 0..num_channels {
+                        let channel = channel_idx as u8;
+                        if let Some(buffer) = channel_buffers.get_mut(&channel) {
+                            let batch: Vec<_> = buffer.drain(0..batch_size).collect();
+
+                            let voltages: Vec<f32> = batch.iter().map(|(raw, _)| {
+                                let vref_f32 = vref as f32;
+                                (*raw as f32) * (vref_f32 / (1 << 24) as f32)
+                            }).collect();
+
+                            if let Some((_, timestamp)) = batch.last() {
+                                latest_timestamp = latest_timestamp.max(*timestamp);
+                            }
+                            voltage_samples.push(voltages);
+                        } else {
+                            voltage_samples.push(vec![0.0; batch_size]);
+                        }
+                    }
+
+                    // Flatten the voltage samples for the EegPacket
+                    let mut flattened_samples = Vec::new();
+                    if !voltage_samples.is_empty() {
+                        let samples_per_channel = voltage_samples[0].len();
+                        for sample_idx in 0..samples_per_channel {
+                            for channel_samples in &voltage_samples {
+                                if sample_idx < channel_samples.len() {
+                                    flattened_samples.push(channel_samples[sample_idx]);
                                 }
                             }
                         }
-                        
-                        let eeg_packet = EegPacket::new(
-                            processed_data.timestamp,
-                            frame_counter,
-                            flattened_samples,
-                            channel_count,
-                            sample_rate,
-                        );
-                        
-                        let event = SensorEvent::RawEeg(Arc::new(eeg_packet));
-                        
-                        // Broadcast the event
-                        bus.broadcast(event).await;
-                        
-                        frame_counter += 1;
-                        
-                        if frame_counter % 100 == 0 {
-                            tracing::debug!("Processed {} frames", frame_counter);
-                        }
                     }
-                    None => {
-                        tracing::warn!("Data receiver channel closed");
-                        break;
+
+                    let eeg_packet = EegPacket::new(
+                        latest_timestamp,
+                        frame_counter,
+                        flattened_samples,
+                        num_channels,
+                        sample_rate.into(),
+                    );
+
+                    let event = SensorEvent::RawEeg(Arc::new(eeg_packet));
+                    bus.broadcast(event).await;
+                    frame_counter += 1;
+
+                    if frame_counter % 100 == 0 {
+                        tracing::debug!("Processed {} frames", frame_counter);
                     }
                 }
             }
+            else => {
+                tracing::warn!("ADC data receiver channel closed");
+                break;
+            }
         }
     }
-    
+
     tracing::info!("Data acquisition loop ended");
     Ok(())
-}
-
-// Helper function to convert AdcData to ProcessedData
-async fn convert_adc_to_processed_data(
-    mut adc_rx: tokio::sync::mpsc::Receiver<eeg_sensor::AdcData>,
-    processed_tx: tokio::sync::mpsc::Sender<crate::driver_handler::ProcessedData>,
-    config: Arc<Mutex<AdcConfig>>,
-) {
-    use std::collections::HashMap;
-    
-    let mut channel_buffers: HashMap<u8, Vec<(i32, u64)>> = HashMap::new();
-    
-    while let Some(adc_data) = adc_rx.recv().await {
-        // Get current config
-        let (batch_size, vref, num_channels) = {
-            let config_guard = config.lock().await;
-            (config_guard.batch_size as usize, config_guard.vref, config_guard.channels.len())
-        };
-        
-        // Accumulate data by channel
-        let buffer = channel_buffers.entry(adc_data.channel).or_insert_with(Vec::new);
-        buffer.push((adc_data.value, adc_data.timestamp));
-        
-        // Check if we have enough data for a batch
-        let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
-        if min_buffer_size >= batch_size {
-            // Create ProcessedData from accumulated AdcData
-            let mut voltage_samples = Vec::new();
-            let mut raw_samples = Vec::new();
-            let mut latest_timestamp = 0u64;
-            
-            // Process each channel
-            for channel_idx in 0..num_channels {
-                let channel = channel_idx as u8;
-                if let Some(buffer) = channel_buffers.get_mut(&channel) {
-                    let batch: Vec<_> = buffer.drain(0..batch_size).collect();
-                    
-                    let voltages: Vec<f32> = batch.iter().map(|(raw, _)| {
-                        // Convert raw ADC value to voltage
-                        // This is a simplified conversion - adjust based on your ADC specs
-                        let vref_f32 = vref as f32;
-                        (*raw as f32) * (vref_f32 / (1 << 24) as f32)
-                    }).collect();
-                    
-                    let raws: Vec<i32> = batch.iter().map(|(raw, _)| *raw).collect();
-                    
-                    // Use the latest timestamp from this batch
-                    if let Some((_, timestamp)) = batch.last() {
-                        latest_timestamp = latest_timestamp.max(*timestamp);
-                    }
-                    
-                    voltage_samples.push(voltages);
-                    raw_samples.push(raws);
-                } else {
-                    // No data for this channel, add empty vectors
-                    voltage_samples.push(vec![0.0; batch_size]);
-                    raw_samples.push(vec![0; batch_size]);
-                }
-            }
-            
-            // Create ProcessedData from the batched data
-            let processed_data = crate::driver_handler::ProcessedData {
-                timestamp: latest_timestamp,
-                voltage_samples,
-                raw_samples,
-                power_spectrums: None,
-                frequency_bins: None,
-                error: None,
-            };
-            
-            // Send the processed data
-            if let Err(_) = processed_tx.send(processed_data).await {
-                break; // Receiver dropped
-            }
-        }
-    }
 }
 
 #[tokio::main]
@@ -358,13 +310,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .map_err(to_daemon_error)?;
 
     tracing::info!("EEG system started. Waiting for data...");
-    
-    // Create a channel for ProcessedData
-    let (processed_tx, data_rx) = tokio::sync::mpsc::channel::<crate::driver_handler::ProcessedData>(100);
-    
-    // Spawn the conversion task
-    let config_for_converter = config.clone();
-    tokio::spawn(convert_adc_to_processed_data(adc_data_rx, processed_tx, config_for_converter));
 
     // === EVENT-DRIVEN ARCHITECTURE SETUP ===
     
@@ -374,34 +319,76 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     tracing::info!("EventBus initialized");
     
-    // Create a channel for the data acquisition loop
-    let (data_acq_tx, data_acq_rx) = tokio::sync::mpsc::channel::<ProcessedData>(100);
-    
-    // Spawn the data acquisition loop that converts ProcessedData to events
+    // Spawn the data acquisition loop
     let data_acq_bus = event_bus.clone();
     let data_acq_shutdown = shutdown_token.clone();
+    let data_acq_config = config.clone();
     let mut data_acquisition_handle = tokio::spawn(async move {
-        if let Err(e) = data_acquisition_loop(data_acq_rx, data_acq_bus, data_acq_shutdown).await {
+        if let Err(e) = data_acquisition_loop(adc_data_rx, data_acq_bus, data_acq_config, data_acq_shutdown).await {
             tracing::error!("Data acquisition loop failed: {}", e);
         }
     });
     
-    // TODO: Initialize plugins here (Phase 3)
-    // For now, we'll keep the existing plugin manager for compatibility
-    let plugin_manager = match plugin_manager::PluginManager::new().await {
-        Ok(pm) => Arc::new(Mutex::new(pm)),
-        Err(e) => {
-            eprintln!("Failed to initialize PluginManager: {}", e);
-            return Err(e);
-        }
+    // === PLUGIN INITIALIZATION (Phase 3) ===
+    
+    // Convert daemon_config to eeg_types::DaemonConfig
+    let eeg_daemon_config = Arc::new(eeg_types::DaemonConfig {
+        max_recording_length_minutes: daemon_config.max_recording_length_minutes,
+        recordings_directory: daemon_config.recordings_directory.clone(),
+        session: daemon_config.session.clone(),
+        batch_size: daemon_config.batch_size,
+        driver_type: match daemon_config.driver_type {
+            eeg_sensor::DriverType::Mock => eeg_types::DriverType::MockEeg,
+            eeg_sensor::DriverType::Ads1299 => eeg_types::DriverType::Ads1299,
+        },
+        filter_config: eeg_types::FilterConfig {
+            dsp_high_pass_cutoff_hz: daemon_config.filter_config.dsp_high_pass_cutoff_hz,
+            dsp_low_pass_cutoff_hz: daemon_config.filter_config.dsp_low_pass_cutoff_hz,
+            powerline_filter_hz: daemon_config.filter_config.powerline_filter_hz.unwrap_or(0) as f32,
+        },
+    });
+
+    // Create plugin configurations
+    let csv_config = CsvRecorderConfig {
+        daemon_config: eeg_daemon_config.clone(),
+        adc_config: initial_config.clone(),
+        is_recording_shared: is_recording.clone(),
     };
+    
+    let filter_config = BasicVoltageFilterConfig {
+        daemon_config: eeg_daemon_config.clone(),
+        sample_rate: initial_config.sample_rate,
+        num_channels: initial_config.channels.len(),
+    };
+    
+    // Create plugin instances
+    let csv_plugin = Arc::new(CsvRecorderPlugin::new(csv_config)) as Arc<dyn EegPlugin>;
+    let filter_plugin = Arc::new(BasicVoltageFilterPlugin::new(filter_config)) as Arc<dyn EegPlugin>;
+    
+    // Supervisor configuration
+    let supervisor_config = SupervisorConfig::default();
+    
+    // Start plugin supervision tasks
+    let csv_supervisor_bus = event_bus.clone();
+    let csv_supervisor_shutdown = shutdown_token.clone();
+    let csv_supervisor_config = supervisor_config.clone();
+    let mut csv_supervisor_handle = tokio::spawn(async move {
+        supervise_plugin(csv_plugin, csv_supervisor_bus, csv_supervisor_shutdown, csv_supervisor_config).await;
+    });
+    
+    let filter_supervisor_bus = event_bus.clone();
+    let filter_supervisor_shutdown = shutdown_token.clone();
+    let filter_supervisor_config = supervisor_config.clone();
+    let mut filter_supervisor_handle = tokio::spawn(async move {
+        supervise_plugin(filter_plugin, filter_supervisor_bus, filter_supervisor_shutdown, filter_supervisor_config).await;
+    });
+    
+    tracing::info!("Event-driven plugins initialized and supervised");
+    
 
     // Create a broadcast channel for config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
 
-    // Create broadcast channels for different data pipelines
-    let (tx_eeg_batch, _) = broadcast::channel::<EegBatchData>(256);
-    let (tx_filtered_eeg, _) = broadcast::channel::<FilteredEegData>(256);
 
     // Create ConnectionManager
     let dsp_coordinator = Arc::new(Mutex::new(connection_manager::DspCoordinator::new()));
@@ -410,21 +397,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         initial_config.channels.iter().map(|&c| c as usize).collect(),
     ));
 
-    // Create CsvRecorder
-    let csv_recorder = Arc::new(Mutex::new(CsvRecorder::new(
-        initial_config.sample_rate,
-        daemon_config.clone(),
-        initial_config.clone(),
-        is_recording.clone(),
-    )));
-
     // Set up WebSocket routes and get config update channel
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         config.clone(),
-        csv_recorder.clone(),
         config_applied_tx.clone(),
-        tx_eeg_batch.clone(),
-        tx_filtered_eeg.clone(),
         connection_manager.clone(),
         is_recording.clone(),
     );
@@ -437,18 +413,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Spawn WebSocket server
     let mut server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
-    // === LEGACY COMPATIBILITY ===
-    // Keep the old processing task for now (will be removed in Phase 4)
-    let cancellation_token = CancellationToken::new();
-    let mut processing_handle = tokio::spawn(process_eeg_data(
-        data_rx,
-        tx_eeg_batch.clone(),
-        tx_filtered_eeg.clone(),
-        csv_recorder.clone(),
-        is_recording.clone(),
-        connection_manager.clone(),
-        cancellation_token.clone(),
-    ));
 
     // === EVENT-DRIVEN MAIN LOOP ===
     let mut current_eeg_system = eeg_system;
@@ -470,8 +434,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 break;
             },
             
-            result = &mut processing_handle => {
-                tracing::warn!("Legacy processing task completed: {:?}", result);
+            
+            result = &mut csv_supervisor_handle => {
+                tracing::warn!("CSV recorder plugin supervisor completed: {:?}", result);
+                break;
+            },
+            
+            result = &mut filter_supervisor_handle => {
+                tracing::warn!("Basic voltage filter plugin supervisor completed: {:?}", result);
                 break;
             },
             
@@ -525,16 +495,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     // Cancel all tasks
     shutdown_token.cancel();
-    cancellation_token.cancel();
     
     // Wait for data acquisition loop to complete
     if let Err(e) = data_acquisition_handle.await {
         tracing::error!("Data acquisition handle join error: {}", e);
-    }
-    
-    // Wait for legacy processing task to complete
-    if let Err(e) = processing_handle.await {
-        tracing::error!("Processing handle join error: {}", e);
     }
     
     // Give a moment for any remaining cleanup
@@ -546,11 +510,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::error!("Error shutting down EEG system: {}", e);
     }
 
-    // Shutdown PluginManager
-    tracing::info!("Shutting down PluginManager...");
-    if let Err(e) = plugin_manager.lock().await.shutdown().await {
-        tracing::error!("Error shutting down PluginManager: {}", e);
-    }
 
     // Release PID lock
     if let Err(e) = pid_manager.release_lock() {

@@ -13,7 +13,10 @@ async-trait = "0.1" # Added for async trait support
 anyhow = "1.0" # Added for error handling
 tracing = "0.1" # Added for structured logging
 eeg_sensor = { path = "../sensors" }
-basic_voltage_filter = { path = "../../plugins/basic_voltage_filter" }
+eeg_types = { path = "../eeg_types" }
+basic_voltage_filter = { path = "../../plugins/basic_voltage_filter_lib" }
+csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
+basic_voltage_filter_plugin = { path = "../../plugins/basic_voltage_filter" }
 warp = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

@@ -1,5 +1,5 @@
 [package]
-name = "basic_voltage_filter_plugin"
+name = "eeg_types"
 version = "0.1.0"
 edition = "2021"
 
@@ -9,7 +9,4 @@ tokio-util = "0.7"
 async-trait = "0.1"
 anyhow = "1.0"
 tracing = "0.1"
-
-# Local dependencies
-eeg_types = { path = "../../crates/eeg_types" }
-basic_voltage_filter = { path = "../basic_voltage_filter_lib" }
+serde = { version = "1.0", features = ["derive"] }
