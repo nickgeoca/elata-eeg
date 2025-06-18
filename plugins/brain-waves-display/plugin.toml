@@ -1,0 +1,12 @@
+[package]
+name = "brain-waves-display"
+version = "0.1.0"
+description = "Real-time brain wave visualization and FFT analysis plugin"
+
+[backend]
+executable = "brain_waves_backend"
+args = ["--data-port", "8081"]
+
+[ui]
+entry_point = "ui/BrainWavesDisplay.tsx"
+assets = ["ui/AppletFftRenderer.tsx"]

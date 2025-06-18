@@ -1,12 +1,12 @@
-pub mod board_drivers;
-pub mod eeg_system;
+pub mod types;
+pub mod ads1299;
+pub mod mock_eeg;
 
 // Re-export the main types that users need
-pub use eeg_system::EegSystem;
-pub use board_drivers::types::{AdcConfig, DriverType, DriverStatus};
-pub use board_drivers::{AdcData, DriverEvent, DriverError};
+pub use types::{AdcConfig, DriverType, DriverStatus, AdcData, DriverEvent, DriverError, AdcDriver, create_driver};
 
 // Optionally expose lower-level access through a raw module
 pub mod raw {
-    pub use crate::board_drivers::*;
+    pub use crate::ads1299::*;
+    pub use crate::mock_eeg::*;
 }

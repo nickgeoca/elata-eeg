@@ -1,9 +1,7 @@
-mod board_drivers;
-
 use tokio;
 use std::error::Error;
 use clap::Parser;
-use eeg_driver::{AdcConfig, EegSystem, DriverType};
+use eeg_sensor::{AdcConfig, DriverType};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -32,41 +30,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
         gain: 1.0,
         board_driver: if args.mock { DriverType::Mock } else { DriverType::Ads1299 },
         batch_size: 4,
-        Vref: 4.5,
-        // Note: DSP filter parameters will be added to AdcConfig in future optimization
+        vref: 4.5,
     };
 
-    // Create the EEG system
-    let (mut eeg_system, mut data_rx) = EegSystem::new(config.clone()).await?;
-    
-    // Create a copy of the channel count before moving config
-    let channel_count = config.channels.len();
-    
-    // Print driver status before starting
-    let status = eeg_system.driver_status().await;
-    println!("Driver status before starting: {:?}", status);
-    
-    // Start the system
-    eeg_system.start(config).await?;
-    
-    // Print driver status after starting
-    let status = eeg_system.driver_status().await;
-    println!("Driver status after starting: {:?}", status);
-    
-    // Print driver config
-    if let Ok(config) = eeg_system.driver_config().await {
-        println!("Driver config: {:?}", config);
-    }
-
-    // Example: Process received data for a while
-    while let Some(processed_data) = data_rx.recv().await {
-        println!("Received data with {} channels", channel_count);
-        println!("Data: {:?}", processed_data); 
-        // Add your data handling logic here
-    }
-
-    // Stop the system when done
-    eeg_system.stop().await?;
+    // Note: EegSystem has been moved to the device crate (elata_emu_v1 module)
+    // This main.rs is now just for testing individual sensor drivers
+    println!("Sensors crate main - use device crate for full EEG system");
+    println!("Config: {:?}", config);
 
     Ok(())
 }

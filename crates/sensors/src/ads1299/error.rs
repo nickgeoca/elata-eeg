@@ -3,14 +3,11 @@
 use std::io;
 
 /// Re-export the DriverError from the parent module for convenience
-pub use crate::board_drivers::types::DriverError;
+pub use crate::types::DriverError;
 
 /// Convert an IO error to a DriverError
 pub fn io_error_to_driver_error(e: io::Error, context: &str) -> DriverError {
-    DriverError::IoError(io::Error::new(
-        e.kind(),
-        format!("{}: {}", context, e)
-    ))
+    DriverError::IoError(format!("{}: {}", context, e))
 }
 
 /// Create a configuration error with the given message

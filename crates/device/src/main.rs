@@ -1,13 +1,15 @@
 mod config;
 mod server;
 mod pid_manager;
+mod plugin_manager;
+mod elata_emu_v1;
 
-use eeg_sensor::{AdcConfig, EegSystem, AdcData};
+use eeg_sensor::{AdcConfig, AdcData};
+use crate::elata_emu_v1::EegSystem;
 use tokio::sync::{broadcast, Mutex};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
-use warp::Filter;
 
 // Define a custom error type that implements Send + Sync
 #[derive(Debug)]
@@ -59,16 +61,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Channel for raw ADC data to be sent to plugins
-    let (tx_adc_data, _) = broadcast::channel::<AdcData>(32);
+    let (_tx_adc_data, _) = broadcast::channel::<AdcData>(32);
 
     // Create the ADC configuration
     let initial_config = AdcConfig {
         sample_rate: 500, // Should come from config.json
         channels: vec![0, 1, 2], // Should come from config.json
         gain: 24.0,
-        board_driver: daemon_config.driver_type,
+        board_driver: daemon_config.driver_type.clone(),
         batch_size: daemon_config.batch_size,
-        Vref: 4.5,
+        vref: 4.5,
     };
     
     // Create shared state
@@ -86,8 +88,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     println!("EEG system started. Waiting for data...");
 
-    // TODO: Initialize PluginManager here
-    // let plugin_manager = Arc::new(Mutex::new(PluginManager::new()));
+    // Initialize PluginManager
+    let plugin_manager = match plugin_manager::PluginManager::new().await {
+        Ok(pm) => Arc::new(Mutex::new(pm)),
+        Err(e) => {
+            eprintln!("Failed to initialize PluginManager: {}", e);
+            return Err(e);
+        }
+    };
 
     // Create a broadcast channel for config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
@@ -99,30 +107,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Set up WebSocket routes and get config update channel
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
-        tx_adc_data.clone(),
         config.clone(),
         is_recording.clone(),
         config_applied_tx.clone(),
     );
     
     println!("WebSocket server starting on:");
-    println!("- ws://0.0.0.0:8080/eeg (Raw EEG data)");
     println!("- ws://0.0.0.0:8080/config (Configuration)");
     println!("- ws://0.0.0.0:8080/command (Recording control)");
 
     // Spawn WebSocket server
-    let server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
+    let mut server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
-    // Spawn task to forward data from EegSystem to plugins
-    let tx_adc_data_clone = tx_adc_data.clone();
-    let data_forwarding_handle = tokio::spawn(async move {
+    // Spawn task to forward data from EegSystem to the PluginManager
+    let plugin_manager_clone = plugin_manager.clone();
+    let mut data_forwarding_handle = tokio::spawn(async move {
         while let Some(adc_data) = data_rx.recv().await {
-            // Forward raw ADC data to plugins via broadcast channel
-            if let Err(e) = tx_adc_data_clone.send(adc_data) {
-                eprintln!("Error broadcasting ADC data: {}", e);
+            if let Err(e) = plugin_manager_clone.lock().await.send_data(adc_data).await {
+                eprintln!("Error forwarding data to plugin: {}", e);
             }
-            // TODO: Also send to PluginManager here
-            // plugin_manager.lock().await.send_data(&adc_data).await;
         }
         println!("Data forwarding task completed");
     });
@@ -178,6 +181,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     println!("Shutting down EEG system...");
     if let Err(e) = current_eeg_system.shutdown().await {
         eprintln!("Error shutting down EEG system: {}", e);
+    }
+
+    // Shutdown PluginManager
+    println!("Shutting down PluginManager...");
+    if let Err(e) = plugin_manager.lock().await.shutdown().await {
+        eprintln!("Error shutting down PluginManager: {}", e);
     }
 
     // Release PID lock

@@ -1,6 +1,6 @@
 //! Helper functions for the ADS1299 driver.
 
-use crate::board_drivers::types::DriverError;
+use crate::types::DriverError;
 use log::debug;
 
 /// Convert 24-bit SPI data to a signed 32-bit integer (sign-extended)
@@ -27,7 +27,7 @@ pub fn current_timestamp_micros() -> Result<u64, DriverError> {
 }
 
 /// Helper function to read data from SPI in continuous mode (RDATAC)
-pub fn read_data_from_spi<T: crate::board_drivers::ads1299::spi::SpiDevice + ?Sized>(spi: &mut T, num_channels: usize) -> Result<Vec<i32>, DriverError> {
+pub fn read_data_from_spi<T: crate::ads1299::spi::SpiDevice + ?Sized>(spi: &mut T, num_channels: usize) -> Result<Vec<i32>, DriverError> {
     debug!("Reading data from ADS1299 via SPI for {} channels in continuous mode", num_channels);
 
     // Validate input parameters
@@ -85,11 +85,8 @@ pub fn read_data_from_spi<T: crate::board_drivers::ads1299::spi::SpiDevice + ?Si
                 } else {
                     log::error!("SPI transfer failed after {} attempts: {}",
                                MAX_RETRIES, last_error.as_ref().unwrap());
-                    return Err(DriverError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("SPI transfer error after {} retries: {}",
-                                MAX_RETRIES, last_error.unwrap())
-                    )));
+                    return Err(DriverError::IoError(format!("SPI transfer error after {} retries: {}",
+                                MAX_RETRIES, last_error.unwrap())));
                 }
             }
         }

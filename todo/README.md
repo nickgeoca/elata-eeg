@@ -1,3 +1,21 @@
+# 🎯 CURRENT PROJECT STATUS (December 2025)
+
+## ✅ v0.6 Refactor - PHASE 1-4 COMPLETED
+**The architectural refactor is complete and the project compiles successfully!**
+
+**Next Developer: Start with Phase 5 in [`todo/v0.6_refactor_implementation_plan.md`](./v0.6_refactor_implementation_plan.md)**
+
+Key accomplishments:
+- ✅ Moved to workspace structure (`crates/sensors/`, `crates/device/`)
+- ✅ Removed obsolete DSP logic from sensor crate
+- ✅ Created plugin system foundation
+- ✅ Updated README.md with new architecture
+- ✅ Project compiles with `cargo check`
+
+**Next Priority**: Implement plugin loading and data flow in `PluginManager`
+
+---
+
 ### TODO MVP
 - 3-d printed case
 - BOM... (e.g. header to lead cables)

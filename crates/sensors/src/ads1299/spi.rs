@@ -77,7 +77,7 @@ impl InputPinDevice for InputPin {
 }
 
 /// Initialize SPI communication with the ADS1299.
-pub fn init_spi() -> Result<Box<dyn SpiDevice>, crate::board_drivers::types::DriverError> {
+pub fn init_spi() -> Result<Box<dyn SpiDevice>, crate::types::DriverError> {
     let spi_speed = 500_000; // 500kHz - confirmed working with Python script
     info!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
 
@@ -96,16 +96,13 @@ pub fn init_spi() -> Result<Box<dyn SpiDevice>, crate::board_drivers::types::Dri
             error!("This could be because the SPI device is not available or the user doesn't have permission to access it.");
             error!("Make sure the SPI interface is enabled and the user has permission to access it.");
 
-            Err(crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI initialization error: {}", e)
-            )))
+            Err(crate::types::DriverError::SpiError(format!("SPI initialization error: {}", e)))
         }
     }
 }
 
 /// Initialize the DRDY pin for detecting when new data is available.
-pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::board_drivers::types::DriverError> {
+pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::types::DriverError> {
     info!("Initializing GPIO for DRDY pin (GPIO25)");
 
     match Gpio::new() {
@@ -123,10 +120,7 @@ pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::board_drivers::
                     error!("This could be because the GPIO pin is already in use or the user doesn't have permission to access it.");
                     error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
 
-                    Err(crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("GPIO pin error: {}", e)
-                    )))
+                    Err(crate::types::DriverError::GpioError(format!("GPIO pin error: {}", e)))
                 }
             }
         },
@@ -135,26 +129,20 @@ pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::board_drivers::
             error!("This could be because the GPIO interface is not available or the user doesn't have permission to access it.");
             error!("Make sure the GPIO interface is enabled and the user has permission to access it.");
 
-            Err(crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("GPIO initialization error: {}", e)
-            )))
+            Err(crate::types::DriverError::GpioError(format!("GPIO initialization error: {}", e)))
         }
     }
 }
 
 // Helper function to send a command to SPI
-pub fn send_command_to_spi<T: SpiDevice + ?Sized>(spi: &mut T, command: u8) -> Result<(), crate::board_drivers::types::DriverError> {
+pub fn send_command_to_spi<T: SpiDevice + ?Sized>(spi: &mut T, command: u8) -> Result<(), crate::types::DriverError> {
     let buffer = [command];
-    spi.write(&buffer).map_err(|e| crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
+    spi.write(&buffer).map_err(|e| crate::types::DriverError::SpiError(format!("SPI write error: {}", e)))?;
     Ok(())
 }
 
 // Helper function to write a value to a register in the ADS1299
-pub fn write_register<T: SpiDevice + ?Sized>(spi: &mut T, register: u8, value: u8) -> Result<(), crate::board_drivers::types::DriverError> {
+pub fn write_register<T: SpiDevice + ?Sized>(spi: &mut T, register: u8, value: u8) -> Result<(), crate::types::DriverError> {
     // Command: WREG (0x40) + register address
     let command = 0x40 | (register & 0x1F);
 
@@ -162,10 +150,7 @@ pub fn write_register<T: SpiDevice + ?Sized>(spi: &mut T, register: u8, value: u
     // Third byte: value to write
     let write_buffer = [command, 0x00, value];
 
-    spi.write(&write_buffer).map_err(|e| crate::board_drivers::types::DriverError::IoError(std::io::Error::new(
-        std::io::ErrorKind::Other,
-        format!("SPI write error: {}", e)
-    )))?;
+    spi.write(&write_buffer).map_err(|e| crate::types::DriverError::SpiError(format!("SPI write error: {}", e)))?;
 
     Ok(())
 }

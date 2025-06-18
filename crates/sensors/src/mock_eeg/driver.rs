@@ -6,7 +6,7 @@ use tokio::time::{sleep, Duration};
 use async_trait::async_trait;
 use log::{info, warn, debug, trace, error};
 use lazy_static::lazy_static;
-use super::super::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
+use crate::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
 use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
 
 // Static hardware lock to simulate real hardware access constraints
@@ -269,11 +269,13 @@ impl MockDriver {
                     let relative_timestamp = sample_number * sample_interval;
                     
                     // Use gen_realistic_eeg_data for more realistic EEG data
-                    let mut sample = gen_realistic_eeg_data(&config, relative_timestamp);
+                    let mut samples = gen_realistic_eeg_data(&config, relative_timestamp);
                     
-                    // Override the timestamp with our calculated one
-                    sample.timestamp = timestamp;
-                    batch.push(sample);
+                    // Override the timestamp with our calculated one for all samples
+                    for sample in &mut samples {
+                        sample.timestamp = timestamp;
+                    }
+                    batch.extend(samples);
                 }
                 
                 // Send the batch of data
@@ -341,7 +343,7 @@ impl MockDriver {
     /// This method returns the current status of the driver.
     pub(crate) async fn get_status(&self) -> DriverStatus {
         let inner = self.inner.lock().await;
-        inner.status
+        inner.status.clone()
     }
 
     /// Shut down the driver.
@@ -389,7 +391,7 @@ impl MockDriver {
         // Get current status
         let status = {
             let inner = self.inner.lock().await;
-            inner.status
+            inner.status.clone()
         };
         
         debug!("Sending status change notification: {:?}", status);

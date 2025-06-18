@@ -8,7 +8,7 @@ use log::{info, warn, debug, error};
 use std::collections::VecDeque;
 use std::thread; // Add this import
 
-use crate::board_drivers::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent};
+use crate::types::{AdcConfig, AdcData, DriverStatus, DriverError, DriverEvent};
 use super::helpers::{ch_raw_to_voltage, current_timestamp_micros, read_data_from_spi};
 use super::registers::{CMD_SDATAC, CMD_RDATAC, CMD_START, CMD_STOP, CMD_WAKEUP};
 use super::spi::{SpiDevice, InputPinDevice, send_command_to_spi};
@@ -404,7 +404,7 @@ fn spawn_interrupt_and_processing_tasks(
                             
                             // Convert raw sample to voltage and add to buffer
                             // Removed redundant channel_idx lookup
-                            let voltage = ch_raw_to_voltage(raw, config.Vref, config.gain);
+                            let voltage = ch_raw_to_voltage(raw, config.vref as f32, config.gain as f32);
                             voltage_sample_buffer[i].push_back(voltage);
                         }
                     }
@@ -414,14 +414,21 @@ fn spawn_interrupt_and_processing_tasks(
                         debug!("Sending batch of {} samples (sample_count: {})",
                             timestamps.len(), sample_count);
 
-                        // Create AdcData with the accumulated samples
-                        let data = AdcData {
-                            timestamp: *timestamps.back().unwrap_or(&0), // Use back for latest timestamp
-                            raw_samples: raw_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-                            voltage_samples: voltage_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-                        };
+                        // Create AdcData for each channel with the latest sample
+                        let mut data_vec = Vec::new();
+                        let timestamp = *timestamps.back().unwrap_or(&0);
+                        
+                        for (channel_idx, channel) in config.channels.iter().enumerate() {
+                            if let Some(latest_raw) = raw_sample_buffer.get(channel_idx).and_then(|v| v.back()) {
+                                data_vec.push(AdcData {
+                                    channel: *channel,
+                                    value: *latest_raw,
+                                    timestamp,
+                                });
+                            }
+                        }
 
-                        if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
+                        if let Err(e) = tx.send(DriverEvent::Data(data_vec)).await {
                             error!("Ads1299Driver event channel closed: {}", e);
                             break;
                         }
@@ -443,7 +450,7 @@ fn spawn_interrupt_and_processing_tasks(
                             }
                             // Update driver status
                             let mut inner = inner_arc.lock().await;
-                            inner.status = DriverStatus::Error;
+                            inner.status = DriverStatus::Error("Acquisition error".to_string());
                             exit_requested = true; // Exit after this message
                         }
                     }
@@ -469,14 +476,21 @@ fn spawn_interrupt_and_processing_tasks(
         if !timestamps.is_empty() {
             debug!("Sending final batch of {} samples before stopping", timestamps.len());
 
-            // Create AdcData with the accumulated samples
-            let data = AdcData {
-                timestamp: *timestamps.back().unwrap_or(&0),
-                raw_samples: raw_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-                voltage_samples: voltage_sample_buffer.iter().map(|v| v.iter().copied().collect()).collect(),
-            };
+            // Create AdcData for each channel with the latest sample
+            let mut data_vec = Vec::new();
+            let timestamp = *timestamps.back().unwrap_or(&0);
+            
+            for (channel_idx, channel) in config.channels.iter().enumerate() {
+                if let Some(latest_raw) = raw_sample_buffer.get(channel_idx).and_then(|v| v.back()) {
+                    data_vec.push(AdcData {
+                        channel: *channel,
+                        value: *latest_raw,
+                        timestamp,
+                    });
+                }
+            }
 
-            if let Err(e) = tx.send(DriverEvent::Data(vec![data])).await {
+            if let Err(e) = tx.send(DriverEvent::Data(data_vec)).await {
                 error!("Ads1299Driver event channel closed: {}", e);
             }
         }

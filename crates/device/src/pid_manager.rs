@@ -4,7 +4,7 @@
 //! to prevent multiple daemon instances from running simultaneously.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Write, BufRead, BufReader};
+use std::io::{Write, BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::os::unix::fs::OpenOptionsExt;

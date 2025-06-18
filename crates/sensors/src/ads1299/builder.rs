@@ -1,6 +1,6 @@
 //! Builder pattern implementation for the ADS1299 driver.
 
-use crate::board_drivers::types::{AdcConfig, DriverError, DriverEvent};
+use crate::types::{AdcConfig, DriverError, DriverEvent};
 use tokio::sync::mpsc;
 
 /// Builder for creating an Ads1299Driver with a fluent interface.

@@ -37,7 +37,7 @@ pub const CMD_SDATAC: u8 = 0x11;
 pub const CMD_RDATA: u8 = 0x12;
 
 /// Convert gain value to register mask.
-pub fn gain_to_reg_mask(gain: f32) -> Result<u8, crate::board_drivers::types::DriverError> {
+pub fn gain_to_reg_mask(gain: f32) -> Result<u8, crate::types::DriverError> {
     match gain as u8 {
         1 => Ok(0 << 4),
         2 => Ok(1 << 4),
@@ -46,14 +46,14 @@ pub fn gain_to_reg_mask(gain: f32) -> Result<u8, crate::board_drivers::types::Dr
         8 => Ok(4 << 4),
         12 => Ok(5 << 4),
         24 => Ok(6 << 4),
-        _ => Err(crate::board_drivers::types::DriverError::ConfigurationError(
+        _ => Err(crate::types::DriverError::ConfigurationError(
             format!("Unsupported gain: {}. Supported gains: 1, 2, 4, 6, 8, 12, 24", gain)
         )),
     }
 }
 
 /// Convert samples per second value to register mask.
-pub fn sps_to_reg_mask(sps: u32) -> Result<u8, crate::board_drivers::types::DriverError> {
+pub fn sps_to_reg_mask(sps: u32) -> Result<u8, crate::types::DriverError> {
     match sps {
         250 => Ok(6 << 0),
         500 => Ok(5 << 0),
@@ -62,7 +62,7 @@ pub fn sps_to_reg_mask(sps: u32) -> Result<u8, crate::board_drivers::types::Driv
         4000 => Ok(2 << 0),
         8000 => Ok(1 << 0),
         16_000 => Ok(0 << 0),
-        _ => Err(crate::board_drivers::types::DriverError::ConfigurationError(
+        _ => Err(crate::types::DriverError::ConfigurationError(
             format!("Unsupported samples per second: {}. Supported sps: 250, 500, 1000, 2000, 4000, 8000, 16000", sps)
         )),
     }

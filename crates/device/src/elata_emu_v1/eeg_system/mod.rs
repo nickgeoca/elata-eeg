@@ -4,7 +4,7 @@ use tokio::task::JoinHandle;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-use crate::board_drivers::{
+use eeg_sensor::{
     create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus, DriverType,
 };
 

@@ -54,7 +54,7 @@ fn convert_sample_to_voltage(sample_value: i32, gain: u8, use_4_5v_ref: bool) ->
 /// Each channel's sine wave frequency is defined by:
 ///     channel 0: 2 Hz, channel 1: 6 Hz, channel 2: 10 Hz, etc.
 /// (i.e., channel i gets 2 + 4*i Hz).
-pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> AdcData {
+pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> Vec<AdcData> {
     let t_secs = relative_micros as f32 / 1_000_000.0;
     trace!("Generating sample at t={} secs", t_secs);
 
@@ -79,17 +79,23 @@ pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> AdcDat
         }).collect()
     }).collect();
 
-    // Use the provided relative_micros as the timestamp
-    // This will be overridden by the caller with the absolute timestamp
+    // Create individual AdcData entries for each channel
     let timestamp = relative_micros;
     
-    AdcData { timestamp, raw_samples, voltage_samples }
+    config.channels.iter().enumerate().map(|(i, &channel)| {
+        let raw_value = raw_samples.get(i).and_then(|v| v.first()).copied().unwrap_or(0);
+        AdcData {
+            channel,
+            value: raw_value,
+            timestamp,
+        }
+    }).collect()
 }
 
 /// Helper function to generate more realistic EEG-like data with multiple frequency bands.
 /// This implementation creates synthetic EEG data with delta, theta, alpha, beta, and gamma
 /// components, as well as simulated line noise at 50Hz and 60Hz.
-pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> AdcData {
+pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<AdcData> {
     use rand::Rng;
     use std::f32::consts::PI;
     
@@ -131,11 +137,17 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> AdcDa
         vec![convert_sample_to_voltage(gen.generate_sample(i), config.gain as u8, true)]
     }).collect();
     
-    // Use the provided relative_micros as the timestamp
-    // This will be overridden by the caller with the absolute timestamp
+    // Create individual AdcData entries for each channel
     let timestamp = relative_micros;
     
-    AdcData { timestamp, raw_samples, voltage_samples }
+    config.channels.iter().enumerate().map(|(i, &channel)| {
+        let raw_value = raw_samples.get(i).and_then(|v| v.first()).copied().unwrap_or(0);
+        AdcData {
+            channel,
+            value: raw_value,
+            timestamp,
+        }
+    }).collect()
 }
 
 /// A generator for realistic EEG-like data with multiple frequency bands.

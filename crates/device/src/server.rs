@@ -5,9 +5,8 @@ use futures_util::{StreamExt, SinkExt};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, Mutex, mpsc};
-use eeg_driver::AdcConfig;
+use eeg_sensor::AdcConfig;
 
-use crate::driver_handler::{EegBatchData, CsvRecorder, FilteredEegData}; // Added FilteredEegData
 
 
 /// Command message for WebSocket control
@@ -49,11 +48,6 @@ fn with_mpsc_tx<T: Send + 'static>(
     warp::any().map(move || tx.clone())
 }
 
-fn with_connection_manager(
-    connection_manager: Arc<crate::connection_manager::ConnectionManager>,
-) -> impl Filter<Extract = (Arc<crate::connection_manager::ConnectionManager>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || connection_manager.clone())
-}
 
 fn with_atomic_bool(
     atomic: Arc<AtomicBool>,
@@ -61,11 +55,6 @@ fn with_atomic_bool(
     warp::any().map(move || atomic.clone())
 }
 
-fn with_shared_recorder(
-    recorder: Arc<Mutex<CsvRecorder>>,
-) -> impl Filter<Extract = (Arc<Mutex<CsvRecorder>>,), Error = std::convert::Infallible> + Clone {
-    warp::any().map(move || recorder.clone())
-}
 
 #[derive(Deserialize, Debug)]
 pub struct ConfigMessage {
@@ -88,185 +77,6 @@ pub struct CommandResponse {
     pub message: String,
 }
 
-// FFT data structures moved to elata_dsp_brain_waves_fft crate
-
-/// Creates a binary EEG packet.
-/// Format: [timestamp_u64_le] [error_flag_u8] [payload]
-/// error_flag_u8: 0 = no error, 1 = error
-/// Payload:
-///   If error_flag = 1: UTF-8 error message
-///   If error_flag = 0: f32_le raw samples for each channel
-pub fn create_eeg_binary_packet(eeg_batch_data: &EegBatchData) -> Vec<u8> {
-    let mut buffer = Vec::new();
-
-    // Write timestamp (8 bytes)
-    buffer.extend_from_slice(&eeg_batch_data.timestamp.to_le_bytes());
-
-    // Handle error packet
-    if let Some(error_msg) = &eeg_batch_data.error {
-        buffer.push(1); // error_flag = 1
-        // No fft_flag needed here as error packets don't contain FFT data.
-        buffer.extend_from_slice(error_msg.as_bytes());
-        return buffer;
-    }
-
-    // No error, proceed with data
-    buffer.push(0); // error_flag = 0
-
-    // FFT data is no longer part of this binary packet.
-    // Applets will receive FFT data via their dedicated JSON WebSocket.
-
-    // Append raw channel data
-    let num_raw_channels = eeg_batch_data.channels.len();
-    if num_raw_channels > 0 {
-        // It's implied that if channels is not empty, channels[0] exists.
-        // If channels can be empty but power_spectrums is not, this needs adjustment.
-        // For now, assuming if there's data, there are raw channels.
-        for channel_data in &eeg_batch_data.channels {
-            for &sample in channel_data {
-                buffer.extend_from_slice(&sample.to_le_bytes());
-            }
-        }
-    }
-    // If num_raw_channels is 0 and no FFT data and no error, the packet will be:
-    // timestamp (8) + error_flag (1, 0) + fft_flag (1, 0) = 10 bytes.
-    // This case should be handled by the client if it's possible.
-
-    buffer
-}
-
-/// Handle WebSocket connection for EEG data streaming
-pub async fn handle_websocket(
-    ws: WebSocket,
-    mut rx: broadcast::Receiver<EegBatchData>,
-    connection_manager: Arc<crate::connection_manager::ConnectionManager>
-) {
-    use crate::connection_manager::ClientType;
-    
-    let (mut tx, _) = ws.split();
-    
-    // Generate unique client ID
-    let client_id = format!("eeg_raw_{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
-    
-    println!("WebSocket client connected (ID: {}) - sending binary EEG data", client_id);
-    println!("Binary format: [timestamp (8 bytes)] [channel_samples...] for each channel");
-    
-    // Register client with connection manager using new pipeline-aware method
-    if let Err(e) = connection_manager.register_client_pipeline(client_id.clone(), ClientType::RawRecording).await {
-        eprintln!("Failed to register client {}: {}", client_id, e);
-    }
-    
-    let mut packet_count = 0;
-    let start_time = std::time::Instant::now();
-    
-    while let Ok(eeg_batch_data) = rx.recv().await {
-        // Create binary packet
-        if eeg_batch_data.channels.is_empty() {
-            println!("Warning: Received EegBatchData with no channels, skipping packet.");
-            continue; // Skip to the next message in the loop
-        }
-        // It's now safe to assume channels[0] exists
-        let binary_data = create_eeg_binary_packet(&eeg_batch_data);
-        let packet_size = binary_data.len();
-        let samples_count = eeg_batch_data.channels[0].len();
-        
-        // Send binary message
-        if let Err(_) = tx.send(Message::binary(binary_data)).await {
-            println!("WebSocket client disconnected");
-            break;
-        }
-        
-        packet_count += 1;
-        
-        // Log stats every 100 packets
-        if packet_count % 100 == 0 {
-            let elapsed = start_time.elapsed().as_secs_f32();
-            let rate = packet_count as f32 / elapsed;
-            println!("Sent {} binary packets at {:.2} Hz", packet_count, rate);
-            println!("Last packet size: {} bytes", packet_size);
-            println!("Samples per channel: {}", samples_count);
-        }
-    }
-    
-    // Unregister client when connection closes using new pipeline-aware method
-    if let Err(e) = connection_manager.unregister_client_pipeline(&client_id).await {
-        eprintln!("Failed to unregister client {}: {}", client_id, e);
-    }
-    println!("WebSocket client disconnected (ID: {})", client_id);
-}
-
-/// Handle WebSocket connection for FILTERED EEG data streaming
-pub async fn handle_filtered_eeg_data_websocket(
-    ws: WebSocket,
-    mut rx: broadcast::Receiver<FilteredEegData>,
-    connection_manager: Arc<crate::connection_manager::ConnectionManager>
-) {
-    use crate::connection_manager::ClientType;
-    
-    let (mut tx, _) = ws.split();
-    
-    // Generate unique client ID
-    let client_id = format!("eeg_filtered_{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos());
-    
-    println!("Filtered EEG Data WebSocket client connected (ID: {}) - sending JSON data", client_id);
-    
-    // Register client with connection manager using new pipeline-aware method
-    if let Err(e) = connection_manager.register_client_pipeline(client_id.clone(), ClientType::EegMonitor).await {
-        eprintln!("Failed to register client {}: {}", client_id, e);
-    }
-    
-    let mut packet_count = 0;
-    let start_time = std::time::Instant::now();
-    
-    while let Ok(filtered_data) = rx.recv().await {
-        match serde_json::to_string(&filtered_data) {
-            Ok(json_data) => {
-                if let Err(_) = tx.send(Message::text(json_data)).await {
-                    println!("Filtered EEG Data WebSocket client disconnected (send error)");
-                    break;
-                }
-            }
-            Err(e) => {
-                println!("Error serializing FilteredEegData to JSON: {}", e);
-                // Optionally send an error message to the client or skip
-                let error_response = CommandResponse {
-                    status: "error".to_string(),
-                    message: format!("Error serializing data: {}", e),
-                };
-                if let Ok(json_error) = serde_json::to_string(&error_response) {
-                    if tx.send(Message::text(json_error)).await.is_err() {
-                        println!("Filtered EEG Data WebSocket client disconnected (send error on error serialization)");
-                        break;
-                    }
-                }
-                continue;
-            }
-        }
-        
-        packet_count += 1;
-        
-        // Log stats every 100 packets
-        if packet_count % 100 == 0 {
-            let elapsed = start_time.elapsed().as_secs_f32();
-            if elapsed > 0.0 {
-                let rate = packet_count as f32 / elapsed;
-                println!("Sent {} filtered JSON packets at {:.2} Hz", packet_count, rate);
-            }
-        }
-    }
-    
-    // Unregister client when connection closes using new pipeline-aware method
-    if let Err(e) = connection_manager.unregister_client_pipeline(&client_id).await {
-        eprintln!("Failed to unregister client {}: {}", client_id, e);
-    }
-    println!("Filtered EEG Data WebSocket connection handler finished (ID: {})", client_id);
-}
 
 
 /// Handle WebSocket connection for configuration data
@@ -298,7 +108,7 @@ pub async fn handle_config_websocket(
             println!("Gain: {}", initial_config.gain);
             println!("Board driver: {:?}", initial_config.board_driver);
             println!("Batch size: {}", initial_config.batch_size);
-            println!("Vref: {}", initial_config.Vref);
+            println!("Vref: {}", initial_config.vref);
         }
     } else {
         println!("Error serializing configuration");
@@ -431,9 +241,9 @@ pub async fn handle_config_websocket(
                                             continue;
                                         }
                                         // Channel validation is now handled by the driver
-                                        let new_channels_usize: Vec<usize> = new_channels.iter().map(|&x| x as usize).collect();
-                                        if updated_config.channels != new_channels_usize {
-                                            updated_config.channels = new_channels_usize;
+                                        let new_channels_u8: Vec<u8> = new_channels.iter().map(|&x| x as u8).collect();
+                                        if updated_config.channels != new_channels_u8 {
+                                            updated_config.channels = new_channels_u8;
                                             config_changed = true;
                                             update_message = format!("channels: {:?}", updated_config.channels);
                                         }
@@ -519,10 +329,9 @@ pub async fn handle_config_websocket(
 /// Handle WebSocket connection for recording control commands
 pub async fn handle_command_websocket(
     ws: WebSocket,
-    recorder: Arc<Mutex<CsvRecorder>>,
     is_recording: Arc<AtomicBool>,
-    config: Arc<Mutex<AdcConfig>>,         // Added
-    config_update_tx: mpsc::Sender<AdcConfig> // Added
+    config: Arc<Mutex<AdcConfig>>,
+    config_update_tx: mpsc::Sender<AdcConfig>
 ) {
     let (mut tx, mut rx) = ws.split();
     
@@ -530,11 +339,10 @@ pub async fn handle_command_websocket(
     
     // Send initial status
     let initial_status = {
-        let recorder_guard = recorder.lock().await;
         CommandResponse {
             status: "ok".to_string(),
             message: if is_recording.load(Ordering::Relaxed) {
-                format!("Currently recording to {}", recorder_guard.file_path.clone().unwrap_or_default())
+                "Currently recording".to_string()
             } else {
                 "Not recording".to_string()
             },
@@ -549,7 +357,6 @@ pub async fn handle_command_websocket(
     }
     
     // Set up periodic status updates (every 5 seconds)
-    let recorder_clone = recorder.clone();
     
     // Use a channel to send messages to the status update task
     let (status_tx, mut status_rx) = tokio::sync::mpsc::channel::<String>(32);
@@ -566,11 +373,10 @@ pub async fn handle_command_websocket(
             interval.tick().await;
             
             let status_update = {
-                let recorder_guard = recorder_clone.lock().await;
                 CommandResponse {
                     status: "ok".to_string(),
                     message: if is_recording_clone.load(Ordering::Relaxed) {
-                        format!("Currently recording to {}", recorder_guard.file_path.clone().unwrap_or_default())
+                        "Currently recording".to_string()
                     } else {
                         "Not recording".to_string()
                     },
@@ -612,48 +418,27 @@ pub async fn handle_command_websocket(
                     Ok(daemon_cmd) => {
                         match daemon_cmd {
                             DaemonCommand::Start => {
-                                if is_recording_local.load(Ordering::Relaxed) {
-                                    CommandResponse {
-                                        status: "error".to_string(),
-                                        message: "Already recording".to_string(),
-                                    }
-                                } else {
-                                    let mut recorder_guard = recorder.lock().await;
-                                    match recorder_guard.start_recording().await {
-                                        Ok(msg) => {
-                                            CommandResponse {
-                                                status: "ok".to_string(),
-                                                message: msg,
-                                            }
-                                        },
-                                        Err(e) => CommandResponse {
-                                            status: "error".to_string(),
-                                            message: format!("Failed to start recording: {}", e),
-                                        },
-                                    }
+                                // NOTE: Recording functionality is currently disabled
+                                // and will be handled by a dedicated plugin in the future.
+                                is_recording_local.store(true, Ordering::Relaxed);
+                                CommandResponse {
+                                    status: "ok".to_string(),
+                                    message: "Recording started (placeholder)".to_string(),
                                 }
                             },
                             DaemonCommand::Stop => {
-                                let mut recorder_guard = recorder.lock().await;
-                                match recorder_guard.stop_recording().await {
-                                    Ok(msg) => {
-                                        CommandResponse {
-                                            status: "ok".to_string(),
-                                            message: msg,
-                                        }
-                                    },
-                                    Err(e) => CommandResponse {
-                                        status: "error".to_string(),
-                                        message: format!("Failed to stop recording: {}", e),
-                                    },
+                                // NOTE: Recording functionality is currently disabled.
+                                is_recording_local.store(false, Ordering::Relaxed);
+                                CommandResponse {
+                                    status: "ok".to_string(),
+                                    message: "Recording stopped (placeholder)".to_string(),
                                 }
                             },
                             DaemonCommand::Status => {
-                                let recorder_guard = recorder.lock().await;
                                 CommandResponse {
                                     status: "ok".to_string(),
                                     message: if is_recording.load(Ordering::SeqCst) {
-                                        format!("Currently recording to {}", recorder_guard.file_path.clone().unwrap_or_default())
+                                        "Currently recording".to_string()
                                     } else {
                                         "Not recording".to_string()
                                     },
@@ -742,75 +527,38 @@ pub async fn handle_command_websocket(
 
 // Set up WebSocket routes and server
 pub fn setup_websocket_routes(
-    tx_eeg_batch_data: broadcast::Sender<EegBatchData>, // Renamed from tx, for existing /eeg endpoint
-    tx_filtered_eeg_data: broadcast::Sender<FilteredEegData>, // New sender for filtered data
     config: Arc<Mutex<AdcConfig>>, // Shared current config
-    csv_recorder: Arc<Mutex<CsvRecorder>>,
     is_recording: Arc<AtomicBool>,
     config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
-    connection_manager: Arc<crate::connection_manager::ConnectionManager>, // Connection manager for client tracking
-) -> (warp::filters::BoxedFilter<(impl warp::Reply,)>, mpsc::Receiver<AdcConfig>) {
-    // Channel for clients to send proposed config updates TO main.rs
-    let (config_update_to_main_tx, config_update_to_main_rx) = mpsc::channel::<AdcConfig>(32);
-    
-    // Existing /eeg endpoint for EegBatchData (typically unfiltered or pre-basic_voltage_filter)
-    let eeg_ws_route = warp::path("eeg")
+) -> (
+    impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone,
+    mpsc::Receiver<AdcConfig>,
+) {
+    // Channel for config updates from WebSocket to main
+    let (config_update_tx, config_update_rx) = mpsc::channel::<AdcConfig>(32);
+
+    // Route for configuration
+    let config_route = warp::path("config")
         .and(warp::ws())
-        .and(with_broadcast_rx(tx_eeg_batch_data.clone())) // Use the renamed sender
-        .and(with_connection_manager(connection_manager.clone()))
-        .map(|ws: warp::ws::Ws, rx: broadcast::Receiver<EegBatchData>, conn_mgr: Arc<crate::connection_manager::ConnectionManager>| {
-            ws.on_upgrade(move |socket| handle_websocket(socket, rx, conn_mgr))
+        .and(with_shared_state(config.clone()))
+        .and(with_mpsc_tx(config_update_tx.clone()))
+        .and(with_broadcast_rx(config_applied_tx.clone()))
+        .and(with_atomic_bool(is_recording.clone()))
+        .map(|ws: warp::ws::Ws, conf, tx, rx_applied, is_rec| {
+            ws.on_upgrade(move |socket| handle_config_websocket(socket, conf, tx, rx_applied, is_rec))
         });
 
-    // New /ws/eeg/data__basic_voltage_filter endpoint for FilteredEegData
-    let filtered_eeg_data_route = warp::path("ws")
-        .and(warp::path("eeg"))
-        .and(warp::path("data__basic_voltage_filter"))
+    // Route for recording control
+    let command_route = warp::path("command")
         .and(warp::ws())
-        .and(with_broadcast_rx(tx_filtered_eeg_data.clone())) // Use the new sender
-        .and(with_connection_manager(connection_manager.clone()))
-        .map(|ws: warp::ws::Ws, rx_data: broadcast::Receiver<FilteredEegData>, conn_mgr: Arc<crate::connection_manager::ConnectionManager>| {
-            ws.on_upgrade(move |socket| handle_filtered_eeg_data_websocket(socket, rx_data, conn_mgr))
+        .and(with_atomic_bool(is_recording.clone()))
+        .and(with_shared_state(config.clone()))
+        .and(with_mpsc_tx(config_update_tx.clone()))
+        .map(|ws: warp::ws::Ws, is_rec, conf, tx| {
+            ws.on_upgrade(move |socket| handle_command_websocket(socket, is_rec, conf, tx))
         });
-        
-    let config_clone = config.clone();
-    let config_update_to_main_tx_clone = config_update_to_main_tx.clone();
-    let is_recording_clone_config = is_recording.clone();
-    let config_applied_tx_clone = config_applied_tx.clone();
 
-    let config_ws_route = warp::path("config")
-        .and(warp::ws())
-        .and(with_shared_state(config_clone)) // Pass current config Arc
-        .and(with_mpsc_tx(config_update_to_main_tx_clone)) // Pass sender for proposed updates
-        .and(with_broadcast_rx(config_applied_tx_clone)) // Pass receiver for applied updates
-        .and(with_atomic_bool(is_recording_clone_config)) // Pass recording status
-        .map(|ws: warp::ws::Ws, cfg_arc: Arc<Mutex<AdcConfig>>, cfg_upd_tx: mpsc::Sender<AdcConfig>, cfg_app_rx: broadcast::Receiver<AdcConfig>, rec_status: Arc<AtomicBool>| {
-            println!("[DEBUG] /config route matched, attempting WebSocket upgrade...");
-            ws.on_upgrade(move |socket| handle_config_websocket(socket, cfg_arc, cfg_upd_tx, cfg_app_rx, rec_status))
-        });
-    
-    let recorder_clone_cmd = csv_recorder.clone();
-    let is_recording_clone_cmd = is_recording.clone();
-    let config_clone_cmd = config.clone();
-    let config_update_tx_clone_cmd = config_update_to_main_tx.clone();
+    let routes = config_route.or(command_route);
 
-    let command_ws_route = warp::path("command")
-        .and(warp::ws())
-        .and(with_shared_recorder(recorder_clone_cmd))
-        .and(with_atomic_bool(is_recording_clone_cmd))
-        .and(with_shared_state(config_clone_cmd)) // Pass cloned config
-        .and(with_mpsc_tx(config_update_tx_clone_cmd)) // Pass cloned sender
-        .map(|ws: warp::ws::Ws, recorder: Arc<Mutex<CsvRecorder>>, is_recording: Arc<AtomicBool>, cfg: Arc<Mutex<AdcConfig>>, cfg_upd_tx: mpsc::Sender<AdcConfig>| {
-            ws.on_upgrade(move |socket| handle_command_websocket(socket, recorder, is_recording, cfg, cfg_upd_tx))
-        });
-    
-    // Combine base routes including the new filtered data route
-    // Return base routes - DSP routes will be combined in main.rs
-    let routes = eeg_ws_route
-        .or(config_ws_route)
-        .or(command_ws_route)
-        .or(filtered_eeg_data_route)
-        .boxed();
-
-    (routes, config_update_to_main_rx)
+    (routes, config_update_rx)
 }

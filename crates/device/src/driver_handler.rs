@@ -1,4 +1,4 @@
-use eeg_driver::{AdcConfig, ProcessedData};
+use eeg_sensor::AdcConfig;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fs::File;
@@ -16,7 +16,28 @@ use crate::config::DaemonConfig;
 
 
 // Re-export EegBatchData from the driver crate to avoid duplication
-pub use eeg_driver::EegBatchData;
+// Define types that were moved from sensor crate as part of refactor
+
+/// Data structure for processed EEG data (moved from sensor crate)
+#[derive(Clone, Debug)]
+pub struct ProcessedData {
+    pub timestamp: u64,
+    pub voltage_samples: Vec<Vec<f32>>,
+    pub raw_samples: Vec<Vec<i32>>,
+    pub power_spectrums: Option<Vec<Vec<f32>>>,
+    pub frequency_bins: Option<Vec<f32>>,
+    pub error: Option<String>,
+}
+
+/// Data structure for WebSocket EEG data (moved from sensor crate)
+#[derive(Clone, Serialize, Debug)]
+pub struct EegBatchData {
+    pub channels: Vec<Vec<f32>>,
+    pub timestamp: u64,
+    pub power_spectrums: Option<Vec<Vec<f32>>>,
+    pub frequency_bins: Option<Vec<f32>>,
+    pub error: Option<String>,
+}
 
 /// Data structure for the new WebSocket endpoint (/ws/eeg/data__basic_voltage_filter)
 /// This will contain data processed by basic_voltage_filter::SignalProcessor
@@ -320,7 +341,7 @@ pub async fn process_eeg_data(
                 }
                 
                 // Get active pipelines for targeted processing
-                let mut active_pipelines = connection_manager.get_active_pipelines().await;
+                let active_pipelines = connection_manager.get_active_pipelines().await;
                 
                 // CRITICAL FIX: Always include RawData pipeline when FFT feature is enabled
                 #[cfg(feature = "brain_waves_fft_feature")]

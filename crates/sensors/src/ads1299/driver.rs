@@ -7,7 +7,7 @@ use tokio::task::JoinHandle;
 use log::{info, warn, debug, error};
 use lazy_static::lazy_static;
 
-use crate::board_drivers::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
+use crate::types::{AdcConfig, DriverStatus, DriverError, DriverEvent, DriverType};
 use super::acquisition::{start_acquisition, stop_acquisition, SpiType, DrdyPinType};
 use super::error::HardwareLockGuard;
 use super::registers::{
@@ -252,7 +252,7 @@ impl Ads1299Driver {
                 {
                     let mut inner = self.inner.lock().await;
                     inner.running = false;
-                    inner.status = DriverStatus::Error;
+                    inner.status = DriverStatus::Error("Start acquisition failed".to_string());
                 }
                 
                 error!("Failed to start acquisition: {:?}", e);
@@ -300,7 +300,7 @@ impl Ads1299Driver {
             // Still update the status to avoid stuck state
             let mut inner = self.inner.lock().await;
             inner.running = false;
-            inner.status = DriverStatus::Error;
+            inner.status = DriverStatus::Error("Stop acquisition failed".to_string());
         }
         
         result
@@ -311,7 +311,7 @@ impl Ads1299Driver {
     /// This method returns the current status of the driver.
     pub(crate) async fn get_status(&self) -> DriverStatus {
         let inner = self.inner.lock().await;
-        inner.status
+        inner.status.clone()
     }
 
     /// Shut down the driver.
@@ -419,10 +419,7 @@ impl Ads1299Driver {
         
         // 2. Send zeros
         if let Some(spi) = self.spi.as_mut() {
-            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("SPI write error: {}", e)
-            )))?;
+            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::SpiError(format!("SPI write error: {}", e)))?;
         }
         
         // 3. Send SDATAC command to stop continuous data acquisition mode
@@ -443,7 +440,7 @@ impl Ads1299Driver {
         // Calculate masks based on config
         let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
         // Use the fully qualified path to call these functions
-        let gain_mask = super::registers::gain_to_reg_mask(config.gain)?;
+        let gain_mask = super::registers::gain_to_reg_mask(config.gain as f32)?;
         let sps_mask = super::registers::sps_to_reg_mask(config.sample_rate)?;
 
         // Write registers
@@ -501,17 +498,11 @@ impl Ads1299Driver {
         
         // First transfer: command and count (number of registers to read minus 1)
         let write_buffer = [command, 0x00];
-        spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI write command error: {}", e)
-        )))?;
+        spi.write(&write_buffer).map_err(|e| DriverError::SpiError(format!("SPI write command error: {}", e)))?;
         
         // Second transfer: read the data (send dummy byte to receive data)
         let mut read_buffer = [0u8];
-        spi.transfer(&mut read_buffer, &[0u8]).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI transfer error: {}", e)
-        )))?;
+        spi.transfer(&mut read_buffer, &[0u8]).map_err(|e| DriverError::SpiError(format!("SPI transfer error: {}", e)))?;
         
         Ok(read_buffer[0])
     }
@@ -527,10 +518,7 @@ impl Ads1299Driver {
         // Third byte: value to write
         let write_buffer = [command, 0x00, value];
         
-        spi.write(&write_buffer).map_err(|e| DriverError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("SPI write error: {}", e)
-        )))?;
+        spi.write(&write_buffer).map_err(|e| DriverError::SpiError(format!("SPI write error: {}", e)))?;
         
         // Update register cache
         let mut inner = self.inner.try_lock().map_err(|_| DriverError::Other("Failed to lock inner state".to_string()))?;
@@ -546,7 +534,7 @@ impl Ads1299Driver {
         // Get current status
         let status = {
             let inner = self.inner.lock().await;
-            inner.status
+            inner.status.clone()
         };
         
         debug!("Sending status change notification: {:?}", status);
