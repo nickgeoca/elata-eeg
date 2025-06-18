@@ -124,33 +124,45 @@ export function useEegDataHandler({
         const configuredChannelCount = currentConfig?.channels?.length || 0;
         if (configuredChannelCount === 0) return;
 
-        // Parse binary data format: [batch_size (4 bytes)] + [channel_data...]
-        // Each sample is 4 bytes (f32)
+        // NEW PARSING LOGIC
         const dataView = new DataView(event.data);
         let offset = 0;
 
-        // Read batch size (4 bytes, little endian)
-        if (buffer.length < 4) {
-          if (!isProduction) console.warn("Data packet too small for batch size");
+        // Packet structure: [timestamp_u64_le] [error_flag_u8] [data_payload]
+        if (buffer.length < 9) { // 8 bytes for timestamp + 1 for error flag
+          if (!isProduction) console.warn("Data packet too small for header");
           return;
         }
-        
-        const batchSize = dataView.getUint32(offset, true); // little endian
-        offset += 4;
+
+        // Read timestamp (8 bytes, little endian) - using BigInt for u64
+        const timestamp = dataView.getBigUint64(offset, true);
+        offset += 8;
+
+        // Read error flag (1 byte)
+        const errorFlag = dataView.getUint8(offset);
+        offset += 1;
+
+        if (errorFlag === 1) {
+          // Handle error message
+          const errorMsg = new TextDecoder().decode(buffer.slice(offset));
+          console.error(`[EegDataHandler] Received error from backend: ${errorMsg}`);
+          if (typeof onError === 'function') onError(errorMsg);
+          return;
+        }
+
+        // Calculate batch size from remaining data
+        const dataBytes = buffer.length - offset;
+        const bytesPerSample = 4; // f32
+        const totalSamples = dataBytes / bytesPerSample;
+        const batchSize = totalSamples / configuredChannelCount;
+
+        if (dataBytes % (bytesPerSample * configuredChannelCount) !== 0) {
+            console.warn(`[EegDataHandler] Incomplete data packet. Data bytes: ${dataBytes}, Channels: ${configuredChannelCount}`);
+            return;
+        }
 
         if (batchSize === 0) {
-          if (!isProduction) console.warn("Received packet with batch size 0");
-          return;
-        }
-
-        // Calculate expected data size: batch_size * num_channels * 4 bytes per sample
-        const expectedDataSize = batchSize * configuredChannelCount * 4;
-        const availableDataSize = buffer.length - offset;
-        
-        if (availableDataSize < expectedDataSize) {
-          if (!isProduction) {
-            console.warn(`Data size mismatch: expected ${expectedDataSize}, got ${availableDataSize}`);
-          }
+          if (!isProduction) console.warn("Received packet with no sample data");
           return;
         }
 

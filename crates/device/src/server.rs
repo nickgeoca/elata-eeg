@@ -583,11 +583,32 @@ pub async fn handle_eeg_websocket(
 // Brain waves FFT WebSocket handler moved to elata_dsp_brain_waves_fft crate
 
 // Set up WebSocket routes and server
+use crate::connection_manager::{ConnectionManager, ClientType};
+use crate::driver_handler::{EegBatchData, FilteredEegData, CsvRecorder};
+
+pub fn create_eeg_binary_packet(batch: &EegBatchData) -> Vec<u8> {
+    let mut buffer = Vec::new();
+    buffer.extend_from_slice(&batch.timestamp.to_le_bytes());
+    buffer.push(batch.error.is_some() as u8);
+    if let Some(error) = &batch.error {
+        buffer.extend_from_slice(error.as_bytes());
+    } else {
+        for i in 0..batch.channels[0].len() {
+            for channel_data in &batch.channels {
+                buffer.extend_from_slice(&channel_data[i].to_le_bytes());
+            }
+        }
+    }
+    buffer
+}
+
 pub fn setup_websocket_routes(
-    config: Arc<Mutex<AdcConfig>>, // Shared current config
-    is_recording: Arc<AtomicBool>,
-    config_applied_tx: broadcast::Sender<AdcConfig>, // Sender for applied configs (from main.rs)
-    eeg_data_tx: broadcast::Sender<Vec<u8>>, // Sender for EEG data
+    config: Arc<Mutex<AdcConfig>>,
+    csv_recorder: Arc<Mutex<CsvRecorder>>,
+    config_applied_tx: broadcast::Sender<AdcConfig>,
+    eeg_batch_rx: broadcast::Receiver<EegBatchData>,
+    filtered_eeg_rx: broadcast::Receiver<FilteredEegData>,
+    connection_manager: Arc<ConnectionManager>,
 ) -> (
     impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone,
     mpsc::Receiver<AdcConfig>,
@@ -609,7 +630,7 @@ pub fn setup_websocket_routes(
     // Route for recording control
     let command_route = warp::path("command")
         .and(warp::ws())
-        .and(with_atomic_bool(is_recording.clone()))
+        .and(with_shared_state(csv_recorder.clone()))
         .and(with_shared_state(config.clone()))
         .and(with_mpsc_tx(config_update_tx.clone()))
         .map(|ws: warp::ws::Ws, is_rec, conf, tx| {
@@ -619,9 +640,18 @@ pub fn setup_websocket_routes(
     // Route for EEG data streaming
     let eeg_route = warp::path("eeg")
         .and(warp::ws())
-        .and(with_broadcast_rx(eeg_data_tx.clone()))
-        .map(|ws: warp::ws::Ws, data_rx| {
-            ws.on_upgrade(move |socket| handle_eeg_websocket(socket, data_rx))
+        .and(with_broadcast_rx(eeg_batch_rx))
+        .and(with_shared_state(connection_manager.clone()))
+        .map(|ws: warp::ws::Ws, data_rx, conn_manager: Arc<ConnectionManager>| {
+            ws.on_upgrade(move |socket| {
+                let client_id = uuid::Uuid::new_v4().to_string();
+                let conn_manager_clone = conn_manager.clone();
+                async move {
+                    conn_manager_clone.register_client_pipeline(client_id.clone(), ClientType::EegMonitor).await.ok();
+                    handle_eeg_websocket(socket, data_rx).await;
+                    conn_manager_clone.unregister_client_pipeline(&client_id).await.ok();
+                }
+            })
         });
 
     let routes = config_route.or(command_route).or(eeg_route);
