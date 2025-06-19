@@ -114,7 +114,8 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
 
     setStatus('Connecting...');
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-    const ws = new WebSocket(`ws://${wsHost}:8080/config`);
+    const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${wsProtocol}://${wsHost}:8080/config`);
     wsRef.current = ws;
 
     ws.onopen = () => {

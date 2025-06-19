@@ -77,7 +77,8 @@ export default function EegMonitorWebGL() {
     if (activeView === 'settings') {
       console.log('Attempting to connect to /config WebSocket for EegMonitor');
       const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-      const newConfigWs = new WebSocket(`ws://${wsHost}:8080/config`);
+      const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const newConfigWs = new WebSocket(`${wsProtocol}://${wsHost}:8080/config`);
       setConfigWebSocket(newConfigWs);
       setIsConfigWsOpen(false); // Initially false until onopen
       setConfigUpdateStatus('Connecting to config service...');

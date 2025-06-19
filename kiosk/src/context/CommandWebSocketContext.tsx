@@ -30,7 +30,8 @@ export const CommandWebSocketProvider = ({
 
   useEffect(() => {
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-    const newWs = new WebSocket(`ws://${wsHost}:8080/command`);
+    const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const newWs = new WebSocket(`${wsProtocol}://${wsHost}:8080/command`);
  
     newWs.onopen = () => {
       console.log('Command WebSocket connected');

@@ -40,12 +40,13 @@ We will build the system around the following core principles:
     *   Implement `subscribe` which adds a new sender to the list.
     *   Implement `broadcast` which gets a read lock on the subscribers and iterates using `try_send`. It will log errors and remove closed channels.
 
-### Step 2: Refactor `main.rs` to Orchestrate Plugins
+### Step 2: Refactor `main.rs` to Orchestrate Plugins and Connections
 1.  **Modify `crates/device/src/main.rs`:**
     *   Instantiate the `EventBus` and the `CancellationToken`.
+    *   **Instantiate and run the `ConnectionManager` as a supervised task.**
     *   Instantiate plugins using their respective configuration structs.
     *   For each plugin, subscribe to the bus and spawn it in a supervised task, passing the bus, its receiver, and a clone of the shutdown token.
-    *   Implement the supervisor loop that monitors plugin tasks and handles restarts according to the configured policy.
+    *   Implement the supervisor loop that monitors all tasks (plugins and managers) and handles restarts according to the configured policy.
     *   The main data acquisition loop will fetch data, wrap it in an `Arc`'d `SensorEvent`, and call `event_bus.broadcast()`.
     *   Trigger shutdown by calling `cancel()` on the token on Ctrl-C.
 
@@ -82,7 +83,36 @@ A multi-layered testing strategy will be implemented to ensure correctness and r
     *   Create a synthetic data producer that can generate events at high frequency (e.g., 512 Hz x 8 channels).
     *   Use this to validate the back-pressure mechanism, measure latency, and check for memory leaks under sustained load.
 
-## 6. Conceptual Code Example
+## 6. Network Architecture: The Connection Manager
+
+While plugins handle data processing, a dedicated, centralized `ConnectionManager` will handle all network-facing communication with UI clients (e.g., WebSockets). This preserves a clean separation of concerns and aligns with the system's goals of efficiency and modularity.
+
+**Data Flow:**
+1.  A plugin (e.g., `FftPlugin`) processes data from the `EventBus`.
+2.  It publishes its result (e.g., `SensorEvent::FftData(Arc<FftPacket>)`) back onto the `EventBus`.
+3.  The `ConnectionManager`, a long-running task subscribed to the `EventBus`, receives this event.
+4.  It identifies which connected WebSocket clients are interested in this event type.
+5.  It forwards the data to the relevant clients.
+
+### 6.1. Core Advantages
+
+This centralized model provides several key benefits:
+*   **DRY & Low Boilerplate:** It centralizes the complex logic of managing WebSocket connections (upgrades, client maps, heartbeats, graceful shutdowns). Plugins remain simple and focused on data processing.
+*   **Sharp Separation of Concerns:** Plugins are pure data processors. The `ConnectionManager` is a pure network service. This makes the system easier to reason about, test, and extend.
+*   **Negligible Latency Overhead:** The "central point" is the in-process `EventBus`. The latency of an extra channel hop within the same process (measured in microseconds) is insignificant compared to the network RTT of a WebSocket frame.
+*   **Centralized Operations:** It provides one place to observe and manage all client connections, TLS, CORS, authentication, and metrics.
+*   **Minimal Plugin API:** The interface for a plugin remains tiny and simple: `publish(event)`.
+
+### 6.2. Future-Proofing and Design Considerations
+
+As the system scales, the following points should be addressed:
+*   **Per-Client Back-Pressure:** To prevent a single slow client from stalling its data path, each client connection within the manager should have its own bounded `mpsc` channel. If the channel is full, data for that client is dropped, and a metric is incremented, isolating the issue.
+*   **Selective Event Routing:** For efficiency, the manager should use a `HashMap` or similar structure to map event topics to the set of clients subscribed to them (e.g., `topic -> HashSet<ClientId>`). This avoids iterating over all clients for every event.
+*   **Security Hooks:** The centralized nature of the manager makes it the ideal place to implement per-route authentication and authorization hooks as new, sensitive routes are added.
+*   **Throughput Scaling:** If the system ever needs to handle exceptionally high throughput (e.g., many high-frequency streams to many clients), the single-task manager could become a bottleneck. The design should allow for a future transition to a sharded model (e.g., a pool of worker tasks, perhaps one per core).
+*   **Protocol Flexibility:** While the default pattern is a central manager, the architecture should not preclude a future plugin from "opting out" and managing a bespoke protocol (e.g., gRPC, raw UDP) if a compelling use case arises. This would be a deliberate exception to the standard pattern.
+
+## 7. Conceptual Code Example
 
 ```rust
 // This is the conceptual code for the final, robust event-driven architecture.

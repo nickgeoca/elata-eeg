@@ -71,6 +71,15 @@ pub enum SensorEvent {
     System(Arc<SystemEvent>),
 }
 
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    // Sensor-level events
+    RawEeg(Arc<EegPacket>),
+    FilteredEeg(Arc<FilteredEegPacket>),
+    System(Arc<SystemEvent>),
+    // Add other app-level events here if needed
+}
+
 impl SensorEvent {
     /// Get the timestamp of any event type
     pub fn timestamp(&self) -> u64 {
@@ -121,6 +130,17 @@ impl EegPacket {
         
         self.samples.get(start..end)
     }
+
+    pub fn to_binary(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        // Simplified binary format: [timestamp_u64_le][error_flag_u8][data_payload]
+        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
+        buffer.push(0); // No error
+        for &sample in self.samples.iter() {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+        buffer
+    }
 }
 
 impl FilteredEegPacket {
@@ -152,6 +172,17 @@ impl FilteredEegPacket {
         let end = start + samples_per_channel;
         
         self.filtered_samples.get(start..end)
+    }
+
+    pub fn to_binary(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        // Simplified binary format: [timestamp_u64_le][error_flag_u8][data_payload]
+        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
+        buffer.push(0); // No error
+        for &sample in self.filtered_samples.iter() {
+            buffer.extend_from_slice(&sample.to_le_bytes());
+        }
+        buffer
     }
 }
 

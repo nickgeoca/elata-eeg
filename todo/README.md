@@ -31,6 +31,7 @@ Key accomplishments:
 
 # TODO Docs
 - security.md... security hardening
+- [Fix Kiosk Configuration Bug Plan](./fix_kiosk_config_bug_plan.md) - Investigation and fix for WebSocket configuration data not reaching kiosk frontend
 - [Event-Driven Refactor Plan](./event_driven_refactor_plan.md) - Comprehensive plan to refactor EEG daemon to event-driven architecture
 - [Event Refactor Progress Tracker](./event_refactor_progress.md) - Session-by-session progress tracking for the event-driven refactor
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
@@ -51,3 +52,4 @@ Lowest Priority
 - What's a good way to do study/session naming in the file? How do we key subject/their-data to the file recorded?
 - multiple eegs, makes it hard to do over WiFi
 - increment session in fname during the day. so expirimeent number can be keyed to notes. or add keyboard.
+- [ ] [Fix Kiosk WebSocket Disconnection Issue](./fix_kiosk_config_bug_plan.md)

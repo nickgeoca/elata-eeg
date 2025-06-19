@@ -22,7 +22,8 @@ use std::fmt;
 use tokio_util::sync::CancellationToken;
 
 // Import event-driven types
-use eeg_types::{EegPacket, SensorEvent, EegPlugin};
+use eeg_types::{EegPacket, SensorEvent, EegPlugin, AppEvent};
+use eeg_types::EventFilter;
 use eeg_sensor::AdcData;
 use crate::event_bus::EventBus;
 
@@ -390,18 +391,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
 
 
-    // Create ConnectionManager
-    let dsp_coordinator = Arc::new(Mutex::new(connection_manager::DspCoordinator::new()));
-    let connection_manager = Arc::new(connection_manager::ConnectionManager::new(
-        dsp_coordinator.clone(),
-        initial_config.channels.iter().map(|&c| c as usize).collect(),
-    ));
+    // Create a broadcast channel for raw EEG data to be sent to websockets
+    let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
+
+    // Task to forward FilteredEeg events to the WebSocket data channel
+    let mut eeg_data_subscriber = event_bus.subscribe(
+        "eeg_data_forwarder".to_string(),
+        128,
+        vec![EventFilter::FilteredEegOnly],
+    ).await;
+    let eeg_data_tx_clone = eeg_data_tx.clone();
+    let eeg_forwarder_shutdown = shutdown_token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = eeg_forwarder_shutdown.cancelled() => break,
+                event_result = eeg_data_subscriber.recv() => {
+                    match event_result {
+                        Some(SensorEvent::FilteredEeg(packet)) => {
+                            // Assuming FilteredEegPacket has a method to serialize to bytes
+                            let bytes = packet.to_binary();
+                            if eeg_data_tx_clone.send(bytes).is_err() {
+                                tracing::warn!("No active WebSocket clients to receive EEG data.");
+                            }
+                        }
+                        Some(_) => {
+                            // Other event types we don't care about
+                        }
+                        None => {
+                            // Channel closed, break the loop
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!("EEG data forwarder task shut down.");
+    });
 
     // Set up WebSocket routes and get config update channel
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         config.clone(),
         config_applied_tx.clone(),
-        connection_manager.clone(),
+        eeg_data_tx,
         is_recording.clone(),
     );
     

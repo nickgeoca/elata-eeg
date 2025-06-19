@@ -87,8 +87,9 @@ export function useEegDataHandler({
     }
  
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
+    const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
     // Connect to basic EEG data endpoint
-    const ws = new WebSocket(`ws://${wsHost}:8080/eeg`);
+    const ws = new WebSocket(`${wsProtocol}://${wsHost}:8080/eeg`);
     wsRef.current = ws;
     
     // Set binary type for WebSocket
