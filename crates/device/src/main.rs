@@ -15,9 +15,10 @@ use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterCo
 use crate::plugins::{BrainWavesPlugin, BrainWavesConfig};
 
 use eeg_sensor::AdcConfig;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, mpsc};
 use crate::elata_emu_v1::EegSystem;
 use std::sync::Arc;
+use crate::connection_manager::ConnectionManager;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
 use tokio_util::sync::CancellationToken;
@@ -73,20 +74,17 @@ async fn supervise_plugin(
     tracing::info!(plugin = plugin_name, "Starting plugin supervision");
     
     loop {
-        // Check if shutdown was requested before starting/restarting
         if shutdown_token.is_cancelled() {
             tracing::info!(plugin = plugin_name, "Shutdown requested, stopping supervision");
             break;
         }
         
-        // Subscribe to the event bus for this plugin instance
         let receiver = bus.subscribe(
             format!("{}-{}", plugin_name, attempts),
             128, // Buffer size
             plugin.event_filter(),
         ).await;
         
-        // Initialize the plugin
         if let Err(e) = plugin.initialize().await {
             tracing::error!(plugin = plugin_name, error = %e, "Plugin initialization failed");
             attempts += 1;
@@ -103,10 +101,8 @@ async fn supervise_plugin(
             continue;
         }
         
-        // Run the plugin
         let run_result = plugin.run(bus.clone(), receiver, shutdown_token.clone()).await;
         
-        // Cleanup the plugin
         if let Err(e) = plugin.cleanup().await {
             tracing::warn!(plugin = plugin_name, error = %e, "Plugin cleanup failed");
         }
@@ -114,7 +110,7 @@ async fn supervise_plugin(
         match run_result {
             Ok(()) => {
                 tracing::info!(plugin = plugin_name, "Plugin completed successfully");
-                break; // Normal completion
+                break;
             }
             Err(e) => {
                 attempts += 1;
@@ -134,7 +130,6 @@ async fn supervise_plugin(
                     break;
                 }
                 
-                // Exponential backoff
                 let backoff_duration = tokio::time::Duration::from_millis(
                     config.base_backoff_ms * (2_u64.pow(attempts as u32 - 1))
                 );
@@ -167,13 +162,12 @@ async fn data_acquisition_loop(
 
     loop {
         tokio::select! {
-            biased; // Prioritize shutdown
+            biased;
             _ = shutdown_token.cancelled() => {
                 tracing::info!("Data acquisition loop received shutdown signal");
                 break;
             }
             Some(adc_data) = adc_rx.recv() => {
-                // Get current config
                 let (batch_size, vref, num_channels, sample_rate) = {
                     let config_guard = config.lock().await;
                     (
@@ -184,17 +178,14 @@ async fn data_acquisition_loop(
                     )
                 };
 
-                // Accumulate data by channel
                 let buffer = channel_buffers.entry(adc_data.channel).or_insert_with(Vec::new);
                 buffer.push((adc_data.value, adc_data.timestamp));
 
-                // Check if we have enough data for a batch
                 let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
                 if min_buffer_size >= batch_size {
                     let mut voltage_samples = Vec::new();
                     let mut latest_timestamp = 0u64;
 
-                    // Process each channel
                     for channel_idx in 0..num_channels {
                         let channel = channel_idx as u8;
                         if let Some(buffer) = channel_buffers.get_mut(&channel) {
@@ -214,7 +205,6 @@ async fn data_acquisition_loop(
                         }
                     }
 
-                    // Flatten the voltage samples for the EegPacket
                     let mut flattened_samples = Vec::new();
                     if !voltage_samples.is_empty() {
                         let samples_per_channel = voltage_samples[0].len();
@@ -257,14 +247,11 @@ async fn data_acquisition_loop(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Initialize logger - Reads RUST_LOG environment variable
     env_logger::init();
 
-    // Initialize PID manager to ensure single daemon instance
     let pid_file_path = "/tmp/eeg_daemon.pid";
     let pid_manager = pid_manager::PidManager::new(pid_file_path);
     
-    // Check if another instance is already running
     if let Err(e) = pid_manager.acquire_lock() {
         eprintln!("Failed to start daemon: {}", e);
         eprintln!("If you're sure no other instance is running, try removing the PID file: {}", pid_file_path);
@@ -273,37 +260,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     tracing::info!("EEG Daemon starting (PID: {})...", std::process::id());
 
-    // Load daemon configuration
     let daemon_config = config::load_config();
-    tracing::info!("Daemon configuration:");
-    tracing::info!("  Max recording length: {} minutes", daemon_config.max_recording_length_minutes);
-    tracing::info!("  Recordings directory: {}", daemon_config.recordings_directory);
-    tracing::info!("  Batch size: {}", daemon_config.batch_size);
-    tracing::info!("  Driver type: {:?}", daemon_config.driver_type);
-    
-    // Debug: Print current working directory
-    match std::env::current_dir() {
-        Ok(path) => println!("Current working directory: {:?}", path),
-        Err(e) => println!("Failed to get current working directory: {}", e),
-    }
+    tracing::info!("Daemon configuration loaded.");
 
-    // Create the ADC configuration
     let initial_config = AdcConfig {
-        sample_rate: 500, // Should come from config.json
-        channels: vec![0, 1, 2], // Should come from config.json
+        sample_rate: 500,
+        channels: vec![0, 1, 2],
         gain: 24.0,
         board_driver: daemon_config.driver_type.clone(),
         batch_size: daemon_config.batch_size,
         vref: 4.5,
     };
     
-    // Create shared state
     let config = Arc::new(Mutex::new(initial_config.clone()));
     let is_recording = Arc::new(AtomicBool::new(false));
 
     println!("Starting EEG system...");
     
-    // Create and start the EEG system
     let (mut eeg_system, adc_data_rx) = EegSystem::new(initial_config.clone()).await
         .map_err(to_daemon_error)?;
     
@@ -314,13 +287,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // === EVENT-DRIVEN ARCHITECTURE SETUP ===
     
-    // Create the EventBus and CancellationToken
     let event_bus = Arc::new(EventBus::new());
     let shutdown_token = CancellationToken::new();
     
     tracing::info!("EventBus initialized");
     
-    // Spawn the data acquisition loop
     let data_acq_bus = event_bus.clone();
     let data_acq_shutdown = shutdown_token.clone();
     let data_acq_config = config.clone();
@@ -330,9 +301,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
     
-    // === PLUGIN INITIALIZATION (Phase 3) ===
+    // === PLUGIN INITIALIZATION ===
     
-    // Convert daemon_config to eeg_types::DaemonConfig
     let eeg_daemon_config = Arc::new(eeg_types::DaemonConfig {
         max_recording_length_minutes: daemon_config.max_recording_length_minutes,
         recordings_directory: daemon_config.recordings_directory.clone(),
@@ -349,7 +319,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         },
     });
 
-    // Create plugin configurations
     let csv_config = CsvRecorderConfig {
         daemon_config: eeg_daemon_config.clone(),
         adc_config: initial_config.clone(),
@@ -369,15 +338,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         window_function: "hanning".to_string(),
     };
     
-    // Create plugin instances
     let csv_plugin = Arc::new(CsvRecorderPlugin::new(csv_config)) as Arc<dyn EegPlugin>;
     let filter_plugin = Arc::new(BasicVoltageFilterPlugin::new(filter_config)) as Arc<dyn EegPlugin>;
     let brain_waves_plugin = Arc::new(BrainWavesPlugin::new(brain_waves_config)) as Arc<dyn EegPlugin>;
     
-    // Supervisor configuration
     let supervisor_config = SupervisorConfig::default();
     
-    // Start plugin supervision tasks
     let csv_supervisor_bus = event_bus.clone();
     let csv_supervisor_shutdown = shutdown_token.clone();
     let csv_supervisor_config = supervisor_config.clone();
@@ -401,16 +367,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     tracing::info!("Event-driven plugins initialized and supervised");
     
-
     // Create a broadcast channel for config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
 
-
     // Create a broadcast channel for raw EEG data to be sent to websockets
     let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
-
-    // Create a broadcast channel for FFT brain waves data to be sent to websockets
-    let (fft_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
 
     // Task to forward FilteredEeg events to the WebSocket data channel
     let mut eeg_data_subscriber = event_bus.subscribe(
@@ -427,19 +388,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 event_result = eeg_data_subscriber.recv() => {
                     match event_result {
                         Some(SensorEvent::FilteredEeg(packet)) => {
-                            // Assuming FilteredEegPacket has a method to serialize to bytes
                             let bytes = packet.to_binary();
                             if eeg_data_tx_clone.send(bytes).is_err() {
                                 tracing::warn!("No active WebSocket clients to receive EEG data.");
                             }
                         }
-                        Some(_) => {
-                            // Other event types we don't care about
-                        }
-                        None => {
-                            // Channel closed, break the loop
-                            break;
-                        }
+                        Some(_) => {}
+                        None => break,
                     }
                 }
             }
@@ -447,67 +402,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("EEG data forwarder task shut down.");
     });
 
-    // Task to forward FFT events to the WebSocket brain waves data channel
-    let mut fft_data_subscriber = event_bus.subscribe(
-        "fft_data_forwarder".to_string(),
-        128,
+    // === CONNECTION MANAGER SETUP ===
+    let (connection_tx, connection_rx) = mpsc::channel(32);
+
+    let cm_event_subscriber = event_bus.subscribe(
+        "connection_manager".to_string(),
+        256,
         vec![EventFilter::FftOnly],
     ).await;
-    let fft_data_tx_clone = fft_data_tx.clone();
-    let fft_forwarder_shutdown = shutdown_token.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = fft_forwarder_shutdown.cancelled() => break,
-                event_result = fft_data_subscriber.recv() => {
-                    match event_result {
-                        Some(SensorEvent::Fft(packet)) => {
-                            // Convert FFT packet to binary format for WebSocket transmission
-                            let bytes = packet.to_binary();
-                            if fft_data_tx_clone.send(bytes).is_err() {
-                                tracing::warn!("No active WebSocket clients to receive FFT data.");
-                            }
-                        }
-                        Some(_) => {
-                            // Other event types we don't care about
-                        }
-                        None => {
-                            // Channel closed, break the loop
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        tracing::info!("FFT data forwarder task shut down.");
+
+    let mut connection_manager = ConnectionManager::new(connection_rx, cm_event_subscriber);
+    let cm_shutdown = shutdown_token.clone();
+    let mut connection_manager_handle = tokio::spawn(async move {
+        connection_manager.run(cm_shutdown).await;
     });
 
-    // Set up WebSocket routes and get config update channel
+    // Set up WebSocket routes
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         config.clone(),
         config_applied_tx.clone(),
         eeg_data_tx,
-        fft_data_tx,
+        connection_tx,
         is_recording.clone(),
     );
     
-    println!("WebSocket server starting on:");
-    println!("- ws://0.0.0.0:8080/config (Configuration)");
-    println!("- ws://0.0.0.0:8080/command (Recording control)");
-    println!("- ws://0.0.0.0:8080/eeg (EEG data streaming)");
+    println!("WebSocket server starting on ws://0.0.0.0:8080");
 
-    // Spawn WebSocket server
     let mut server_handle = tokio::spawn(warp::serve(ws_routes).run(([0, 0, 0, 0], 8080)));
 
-
-    // === EVENT-DRIVEN MAIN LOOP ===
+    // === MAIN SUPERVISOR LOOP ===
     let mut current_eeg_system = eeg_system;
     
     tracing::info!("EEG Daemon fully initialized and running");
     
     loop {
         tokio::select! {
-            biased; // Prioritize shutdown signal
+            biased;
             
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("Ctrl-C received, initiating shutdown");
@@ -519,7 +449,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tracing::warn!("Data acquisition loop completed: {:?}", result);
                 break;
             },
-            
             
             result = &mut csv_supervisor_handle => {
                 tracing::warn!("CSV recorder plugin supervisor completed: {:?}", result);
@@ -540,30 +469,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tracing::warn!("Server task completed: {:?}", result);
                 break;
             },
+
+            result = &mut connection_manager_handle => {
+                tracing::warn!("ConnectionManager task completed: {:?}", result);
+                break;
+            },
+
             config_update = config_update_rx.recv() => {
                 if let Some(new_config) = config_update {
                     tracing::info!("Received config update. Channels: {:?}, Sample rate: {}",
                                  new_config.channels, new_config.sample_rate);
                     
-                    // Check if recording is in progress
-                    let recording_in_progress = is_recording.load(Ordering::Relaxed);
-                    
-                    if recording_in_progress {
+                    if is_recording.load(Ordering::Relaxed) {
                         tracing::warn!("Cannot update configuration during recording");
                     } else {
-                        // Update the shared config
                         {
                             let mut config_guard = config.lock().await;
                             *config_guard = new_config.clone();
                         }
                         
-                        // Reconfigure the EEG system
                         if let Err(e) = current_eeg_system.reconfigure(new_config.clone()).await {
                             tracing::error!("Error reconfiguring EEG system: {}", e);
                         } else {
                             tracing::info!("EEG system reconfigured successfully");
                             
-                            // Broadcast the applied configuration
                             if let Err(e) = config_applied_tx.send(new_config) {
                                 tracing::error!("Error broadcasting applied config: {}", e);
                             }
@@ -575,34 +504,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Cleanup
-    println!("Shutting down EEG system...");
-    if let Err(e) = current_eeg_system.shutdown().await {
-        eprintln!("Error shutting down EEG system: {}", e);
-    }
-
-    // === EVENT-DRIVEN SHUTDOWN CLEANUP ===
-    
     tracing::info!("Initiating graceful shutdown...");
-    
-    // Cancel all tasks
     shutdown_token.cancel();
     
-    // Wait for data acquisition loop to complete
     if let Err(e) = data_acquisition_handle.await {
         tracing::error!("Data acquisition handle join error: {}", e);
     }
     
-    // Give a moment for any remaining cleanup
     tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
     
-    // Shutdown EEG system
     tracing::info!("Shutting down EEG system...");
     if let Err(e) = current_eeg_system.shutdown().await {
         tracing::error!("Error shutting down EEG system: {}", e);
     }
 
-
-    // Release PID lock
     if let Err(e) = pid_manager.release_lock() {
         tracing::warn!("Failed to release PID lock: {}", e);
     }
