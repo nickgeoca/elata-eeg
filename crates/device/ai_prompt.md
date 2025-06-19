@@ -81,7 +81,7 @@ The Daemon is structured into several key Rust modules:
 
 *   **[`daemon/src/main.rs`](./src/main.rs)**:
     *   The main application entry point.
-    *   Initializes logging and loads daemon configuration from `daemon_config.json` via the [`config`](./src/config.rs) module.
+    *   Initializes logging and loads daemon configuration from `config.json` via the [`config`](./src/config.rs) module.
     *   Sets up the initial `AdcConfig` for the `EegSystem`.
     *   Creates and manages shared state:
         *   `Arc<Mutex<AdcConfig>>`: The current active ADC configuration.
@@ -97,7 +97,7 @@ The Daemon is structured into several key Rust modules:
 
 *   **[`daemon/src/config.rs`](./src/config.rs)**:
     *   Defines the `DaemonConfig` struct, which includes settings like recording directory, DSP filter parameters, default hardware driver type, etc.
-    *   Provides [`load_config()`](./src/config.rs) function to read these settings from a `daemon_config.json` file (expected in the working directory where the daemon is run, typically the project root or `daemon/` if run directly from there).
+    *   Provides [`load_config()`](./src/config.rs) function to read these settings from a `config.json` file (expected in the working directory where the daemon is run, typically the project root or `daemon/` if run directly from there).
 
 *   **[`daemon/src/driver_handler.rs`](./src/driver_handler.rs)**:
     *   Defines `EegBatchData` struct ([`driver_handler::EegBatchData`](./src/driver_handler.rs:18)), which is a version of `ProcessedData` tailored for WebSocket clients (primarily containing voltage values and timestamps).
@@ -217,7 +217,7 @@ The Daemon exposes three WebSocket endpoints on `0.0.0.0:8080`:
     *   [`config.rs`](./src/config.rs): Daemon configuration loading.
     *   [`lib.rs`](./src/lib.rs): Library root (can be used for integration tests or if daemon logic is used as a library).
 *   **[`daemon/Cargo.toml`](./Cargo.toml)**: Rust project manifest, defines dependencies (e.g., `tokio`, `warp`, `serde`, `eeg_driver`).
-*   **`recordings/`** (Typically at project root, path configured in `daemon_config.json`): Default output directory where CSV recording files are saved. The daemon expects this path to be relative to its current working directory when started.
+*   **`recordings/`** (Typically at project root, path configured in `config.json`): Default output directory where CSV recording files are saved. The daemon expects this path to be relative to its current working directory when started.
 
 ## 9. How to Approach Common Tasks
 
@@ -245,5 +245,5 @@ The Daemon exposes three WebSocket endpoints on `0.0.0.0:8080`:
 
 *   **Changing Daemon-Specific Configuration Options**:
     1.  Add new fields to the `DaemonConfig` struct in [`daemon/src/config.rs`](./src/config.rs).
-    2.  Update the `daemon_config.json` file structure and provide default/example values.
+    2.  Update the `config.json` file structure and provide default/example values.
     3.  Utilize the new configuration values where needed within the daemon's logic (e.g., in `main.rs`, `driver_handler.rs`).

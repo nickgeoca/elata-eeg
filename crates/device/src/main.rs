@@ -24,7 +24,7 @@ use std::fmt;
 use tokio_util::sync::CancellationToken;
 
 // Import event-driven types
-use eeg_types::{EegPacket, SensorEvent, EegPlugin, AppEvent, EventFilter};
+use eeg_types::{EegPacket, SensorEvent, EegPlugin, EventFilter, DriverType};
 use eeg_sensor::AdcData;
 use crate::event_bus::EventBus;
 
@@ -308,10 +308,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         recordings_directory: daemon_config.recordings_directory.clone(),
         session: daemon_config.session.clone(),
         batch_size: daemon_config.batch_size,
-        driver_type: match daemon_config.driver_type {
-            eeg_sensor::DriverType::Mock => eeg_types::DriverType::MockEeg,
-            eeg_sensor::DriverType::Ads1299 => eeg_types::DriverType::Ads1299,
-        },
+        driver_type: daemon_config.driver_type.clone(),
         filter_config: eeg_types::FilterConfig {
             dsp_high_pass_cutoff_hz: daemon_config.filter_config.dsp_high_pass_cutoff_hz,
             dsp_low_pass_cutoff_hz: daemon_config.filter_config.dsp_low_pass_cutoff_hz,

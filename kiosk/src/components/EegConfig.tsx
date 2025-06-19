@@ -20,13 +20,13 @@ export interface EegConfig {
 interface EegConfigContextType {
   config: EegConfig | null;
   status: string;
-  // refreshConfig is no longer needed as config updates will be pushed by the server
+  refreshConfig: () => void;
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
   config: null,
   status: 'Initializing...',
-  // refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
+  refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
 });
 
 // Hook to use the EEG configuration
@@ -227,54 +227,17 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [connectWebSocket]); // useEffect depends on the stable connectWebSocket callback
 
-  // refreshConfig is removed as updates are now pushed by the server.
-  // The existing connectWebSocket handles initial connection and reconnections on error/close.
+  const refreshConfig = useCallback(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ command: 'get_config' }));
+    }
+  }, []);
 
   return (
-    <EegConfigContext.Provider value={{ config, status }}>
+    <EegConfigContext.Provider value={{ config, status, refreshConfig }}>
       {children}
     </EegConfigContext.Provider>
   );
 }
 
-// Display component
-export default function EegConfigDisplay() {
-  const { config, status } = useEegConfig();
-
-  return (
-    <div className="p-4 bg-gray-900 text-white rounded-lg mb-4">
-      <h2 className="text-xl font-bold mb-2">EEG Configuration</h2>
-      <div className="mb-2">Status: {status}</div>
-      
-      {config ? (
-        <div className="grid grid-cols-2 gap-2">
-          <div className="col-span-2 font-semibold text-blue-400">System Parameters</div>
-          
-          <div>Sample Rate:</div>
-          <div>{config.sample_rate} Hz</div>
-          
-          <div>Channels:</div>
-          <div>{config.channels.join(', ')}</div>
-          
-          <div>Gain:</div>
-          <div>{config.gain}</div>
-          
-          <div>Board Driver:</div>
-          <div>{config.board_driver}</div>
-          
-          <div>Batch Size:</div>
-          <div>{config.batch_size} samples</div>
-          
-          <div>Powerline Filter:</div>
-          <div>{config.powerline_filter_hz === null ? 'Off' :
-                config.powerline_filter_hz ? `${config.powerline_filter_hz} Hz` : 'Not set'}</div>
-          
-          <div>Effective FPS:</div>
-          <div>{config.fps?.toFixed(2)} frames/sec</div>
-        </div>
-      ) : (
-        <div className="text-gray-400">Waiting for configuration data...</div>
-      )}
-    </div>
-  );
-}
+// Display component removed

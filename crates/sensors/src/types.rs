@@ -21,14 +21,7 @@ pub struct AdcConfig {
     pub vref: f64,
 }
 
-/// Types of supported sensor drivers
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum DriverType {
-    /// ADS1299 EEG chip driver
-    Ads1299,
-    /// Mock driver for testing
-    Mock,
-}
+pub use eeg_types::DriverType;
 
 /// Status of a sensor driver
 #[derive(Debug, Clone, PartialEq)]
@@ -140,7 +133,7 @@ pub async fn create_driver(config: AdcConfig) -> Result<(Box<dyn AdcDriver>, mps
             let (driver, rx) = crate::ads1299::driver::Ads1299Driver::new(config, 1000)?;
             Ok((Box::new(driver), rx))
         }
-        DriverType::Mock => {
+        DriverType::MockEeg => {
             let (driver, rx) = crate::mock_eeg::driver::MockDriver::new(config, 1000)?;
             Ok((Box::new(driver), rx))
         }

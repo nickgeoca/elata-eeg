@@ -3,7 +3,7 @@
   "recordings_directory": "./recordings/",
   "session": "",
   "batch_size": 16,
-  "driver_type": "Ads1299",
+  "driver_type": "ads1299",
   "filter_config": {
     "dsp_high_pass_cutoff_hz": 0.5,
     "dsp_low_pass_cutoff_hz": 50.0,

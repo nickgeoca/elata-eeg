@@ -17,7 +17,7 @@ import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
 import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWavesDisplay';
 import { CircularGraphWrapper } from './CircularGraphWrapper';
- 
+
 export default function EegMonitorWebGL() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -51,7 +51,7 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get configuration from context
-  const { config, status: configStatus } = useEegConfig(); // refreshConfig removed
+  const { config, status: configStatus, refreshConfig } = useEegConfig();
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -568,11 +568,13 @@ export default function EegMonitorWebGL() {
       setActiveView('appletBrainWaves');
     } else if (activeView === 'appletBrainWaves') {
       setActiveView('signalGraph');
+      refreshConfig();
     }
     // If currently in settings, this function shouldn't be called, but handle gracefully
     // by defaulting to signal graph
     else if (activeView === 'settings') {
       setActiveView('signalGraph');
+      refreshConfig();
     }
   };
  

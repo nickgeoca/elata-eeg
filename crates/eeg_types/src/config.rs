@@ -31,9 +31,12 @@ pub struct FilterConfig {
     pub powerline_filter_hz: f32,
 }
 
-/// Driver type enumeration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Types of supported sensor drivers
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum DriverType {
-    MockEeg,
+    /// ADS1299 EEG chip driver
     Ads1299,
+    /// Mock driver for testing
+    MockEeg,
 }

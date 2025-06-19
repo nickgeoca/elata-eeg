@@ -154,7 +154,7 @@ pub async fn handle_config_websocket(
                         continue;
                     }
 
-                    let mut config_guard = config.lock().await;
+                    let config_guard = config.lock().await;
                     let mut updated_config = config_guard.clone();
                     let mut config_changed = false;
 

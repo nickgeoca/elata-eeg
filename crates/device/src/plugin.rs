@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
 use eeg_types::SensorEvent;
-use eeg_types::event::{EventFilter, event_matches_filter};
+use eeg_types::event::EventFilter;
 use crate::event_bus::EventBus;
 
 /// Configuration trait that all plugin configurations must implement

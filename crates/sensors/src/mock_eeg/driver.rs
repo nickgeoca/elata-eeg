@@ -80,7 +80,7 @@ impl MockDriver {
         *hardware_in_use = true;
         
         // Validate config
-        if config.board_driver != DriverType::Mock {
+        if config.board_driver != DriverType::MockEeg {
             // Release the lock if we're returning an error
             *hardware_in_use = false;
             return Err(DriverError::ConfigurationError(

@@ -6,10 +6,10 @@ import { CommandWebSocketProvider } from '@/context/CommandWebSocketContext';
 
 export default function Home() {
   return (
-    <div className="min-h-screen bg-gray-900 text-white">
+    <div className="flex flex-col min-h-screen bg-gray-900 text-white">
       <EegConfigProvider>
         <CommandWebSocketProvider>
-          <div>
+          <div className="flex-grow">
             {/* EEG Monitor is now the main and only view */}
             <EegMonitor />
           </div>

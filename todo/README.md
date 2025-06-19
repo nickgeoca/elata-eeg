@@ -1,5 +1,10 @@
 # 🎯 CURRENT PROJECT STATUS (December 2025)
 
+## 🚨 URGENT: EEG Data WebSocket Issue
+**The kiosk is showing "no data" - EEG data WebSocket not receiving data**
+
+**PRIORITY TASK**: [`Fix EEG Data WebSocket Issue`](./fix_eeg_data_websocket_issue.md) - Config WebSocket works, but EEG data stream is broken
+
 ## ✅ v0.6 Refactor - PHASE 1-4 COMPLETED
 **The architectural refactor is complete and the project compiles successfully!**
 
@@ -31,12 +36,14 @@ Key accomplishments:
 
 # TODO Docs
 - security.md... security hardening
+- [Fix EEG Data WebSocket Issue](./fix_eeg_data_websocket_issue.md) - **URGENT**: Investigation and fix for EEG data WebSocket not receiving data (kiosk shows "no data")
 - [Fix Kiosk Configuration Bug Plan](./fix_kiosk_config_bug_plan.md) - Investigation and fix for WebSocket configuration data not reaching kiosk frontend
 - [Event-Driven Refactor Plan](./event_driven_refactor_plan.md) - Comprehensive plan to refactor EEG daemon to event-driven architecture
 - [Event Refactor Progress Tracker](./event_refactor_progress.md) - Session-by-session progress tracking for the event-driven refactor
 - [Real-Time Filter Investigation (ADS1299 & DSP)](./realtime_filter_investigation.md) - Analysis of current filter behavior and plan for dynamic UI control.
 - [Kiosk Boot Failure Investigation](./boot_failures.md) - Diagnosing "site can't be reached" error after reboot.
 - [Next.js Build Error Session Notes](./next_js_build_error_session_notes.md) - Investigation of React dependency resolution issues with applet files outside kiosk project.
+- [Fix Unreliable Configuration Loading](./fix_config_loading_plan.md) - Plan to standardize configuration loading and resolve dependency issues.
 
 Lowest Priority
 - rename the board? Animal name (elk, emu, eel, ezo)?

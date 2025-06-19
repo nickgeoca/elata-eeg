@@ -9,14 +9,13 @@ use async_trait::async_trait;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, debug};
 use rustfft::{FftPlanner, num_complex::Complex};
 
 use eeg_types::{
     SensorEvent, EegPacket, FftPacket, BrainWaves, FftConfig, EventFilter,
     plugin::{EegPlugin, PluginConfig}
 };
-use crate::event_bus::EventBus;
 
 /// Configuration for the Brain Waves FFT plugin
 #[derive(Debug, Clone)]
