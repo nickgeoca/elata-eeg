@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-use crate::event::SensorEvent;
+use crate::event::{SensorEvent, EventFilter, event_matches_filter};
 
 /// Configuration trait that all plugin configurations must implement
 pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {
@@ -79,18 +79,6 @@ pub trait EventBus: Send + Sync {
     async fn broadcast(&self, event: SensorEvent);
 }
 
-/// Event filter types for plugins to specify what events they want to receive
-#[derive(Debug, Clone, PartialEq)]
-pub enum EventFilter {
-    /// Receive all events
-    All,
-    /// Only raw EEG events
-    RawEegOnly,
-    /// Only filtered EEG events
-    FilteredEegOnly,
-    /// Only system events
-    SystemOnly,
-}
 
 /// Plugin-specific metrics
 #[derive(Debug, Clone)]
@@ -164,20 +152,11 @@ impl SupervisorConfig {
     }
 }
 
-/// Helper function to check if an event matches a filter
-pub fn event_matches_filter(event: &SensorEvent, filter: &EventFilter) -> bool {
-    match filter {
-        EventFilter::All => true,
-        EventFilter::RawEegOnly => matches!(event, SensorEvent::RawEeg(_)),
-        EventFilter::FilteredEegOnly => matches!(event, SensorEvent::FilteredEeg(_)),
-        EventFilter::SystemOnly => matches!(event, SensorEvent::System(_)),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EegPacket, SensorEvent};
+    use crate::event::{EegPacket, SensorEvent, EventFilter, event_matches_filter};
 
     #[test]
     fn test_supervisor_config_backoff() {
@@ -196,6 +175,7 @@ mod tests {
         assert!(event_matches_filter(&raw_event, &EventFilter::All));
         assert!(event_matches_filter(&raw_event, &EventFilter::RawEegOnly));
         assert!(!event_matches_filter(&raw_event, &EventFilter::FilteredEegOnly));
+        assert!(!event_matches_filter(&raw_event, &EventFilter::FftOnly));
         assert!(!event_matches_filter(&raw_event, &EventFilter::SystemOnly));
     }
 }

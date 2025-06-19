@@ -36,6 +36,71 @@ pub struct FilteredEegPacket {
     pub filter_type: String,
 }
 
+/// FFT analysis result packet containing brain wave frequency data
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FftPacket {
+    /// Timestamp when the FFT analysis was completed
+    pub timestamp: u64,
+    /// Reference to the original frame that was analyzed
+    pub source_frame_id: u64,
+    /// Brain wave frequency bands for each channel
+    #[serde(with = "serde_arc_slice")]
+    pub brain_waves: Arc<[BrainWaves]>,
+    /// FFT configuration used for this analysis
+    pub fft_config: FftConfig,
+}
+
+/// Brain wave frequency bands for a single channel
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BrainWaves {
+    /// Channel index
+    pub channel: usize,
+    /// Delta band power (0.5-4 Hz)
+    pub delta: f32,
+    /// Theta band power (4-8 Hz)
+    pub theta: f32,
+    /// Alpha band power (8-13 Hz)
+    pub alpha: f32,
+    /// Beta band power (13-30 Hz)
+    pub beta: f32,
+    /// Gamma band power (30-100 Hz)
+    pub gamma: f32,
+}
+
+/// FFT analysis configuration
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FftConfig {
+    /// FFT window size (must be power of 2)
+    pub fft_size: usize,
+    /// Sample rate used for analysis
+    pub sample_rate: f32,
+    /// Window function applied
+    pub window_function: String,
+}
+
+// Helper module for serializing Arc<[T]>
+mod serde_arc_slice {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::sync::Arc;
+
+    pub fn serialize<S, T>(arc_slice: &Arc<[T]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize,
+    {
+        arc_slice.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Arc<[T]>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de>,
+    {
+        let vec = Vec::<T>::deserialize(deserializer)?;
+        Ok(vec.into())
+    }
+}
+
 /// System status and control events
 #[derive(Debug, Clone)]
 pub struct SystemEvent {
@@ -67,6 +132,8 @@ pub enum SensorEvent {
     RawEeg(Arc<EegPacket>),
     /// Filtered EEG data from processing plugins
     FilteredEeg(Arc<FilteredEegPacket>),
+    /// FFT analysis results with brain wave data
+    Fft(Arc<FftPacket>),
     /// System status and control events
     System(Arc<SystemEvent>),
 }
@@ -76,8 +143,35 @@ pub enum AppEvent {
     // Sensor-level events
     RawEeg(Arc<EegPacket>),
     FilteredEeg(Arc<FilteredEegPacket>),
+    Fft(Arc<FftPacket>),
     System(Arc<SystemEvent>),
     // Add other app-level events here if needed
+}
+
+/// Event filter types for plugins to specify what events they want to receive
+#[derive(Debug, Clone, PartialEq)]
+pub enum EventFilter {
+    /// Receive all events
+    All,
+    /// Only raw EEG events
+    RawEegOnly,
+    /// Only filtered EEG events
+    FilteredEegOnly,
+    /// Only FFT analysis events
+    FftOnly,
+    /// Only system events
+    SystemOnly,
+}
+
+/// Helper function to check if an event matches a filter
+pub fn event_matches_filter(event: &SensorEvent, filter: &EventFilter) -> bool {
+    match filter {
+        EventFilter::All => true,
+        EventFilter::RawEegOnly => matches!(event, SensorEvent::RawEeg(_)),
+        EventFilter::FilteredEegOnly => matches!(event, SensorEvent::FilteredEeg(_)),
+        EventFilter::FftOnly => matches!(event, SensorEvent::Fft(_)),
+        EventFilter::SystemOnly => matches!(event, SensorEvent::System(_)),
+    }
 }
 
 impl SensorEvent {
@@ -86,6 +180,7 @@ impl SensorEvent {
         match self {
             SensorEvent::RawEeg(packet) => packet.timestamp,
             SensorEvent::FilteredEeg(packet) => packet.timestamp,
+            SensorEvent::Fft(packet) => packet.timestamp,
             SensorEvent::System(event) => event.timestamp,
         }
     }
@@ -95,6 +190,7 @@ impl SensorEvent {
         match self {
             SensorEvent::RawEeg(_) => "RawEeg",
             SensorEvent::FilteredEeg(_) => "FilteredEeg",
+            SensorEvent::Fft(_) => "Fft",
             SensorEvent::System(_) => "System",
         }
     }
@@ -183,6 +279,95 @@ impl FilteredEegPacket {
             buffer.extend_from_slice(&sample.to_le_bytes());
         }
         buffer
+    }
+}
+
+impl FftPacket {
+    /// Create a new FFT packet
+    pub fn new(
+        timestamp: u64,
+        source_frame_id: u64,
+        brain_waves: Vec<BrainWaves>,
+        fft_config: FftConfig,
+    ) -> Self {
+        Self {
+            timestamp,
+            source_frame_id,
+            brain_waves: brain_waves.into(),
+            fft_config,
+        }
+    }
+
+    /// Get brain waves for a specific channel
+    pub fn channel_brain_waves(&self, channel: usize) -> Option<&BrainWaves> {
+        self.brain_waves.iter().find(|bw| bw.channel == channel)
+    }
+
+
+    /// Convert to binary format for efficient transmission
+    pub fn to_binary(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        // Binary format: [timestamp_u64_le][source_frame_id_u64_le][num_channels_u32_le][brain_wave_data]
+        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
+        buffer.extend_from_slice(&self.source_frame_id.to_le_bytes());
+        buffer.extend_from_slice(&(self.brain_waves.len() as u32).to_le_bytes());
+        
+        for brain_wave in self.brain_waves.iter() {
+            buffer.extend_from_slice(&(brain_wave.channel as u32).to_le_bytes());
+            buffer.extend_from_slice(&brain_wave.delta.to_le_bytes());
+            buffer.extend_from_slice(&brain_wave.theta.to_le_bytes());
+            buffer.extend_from_slice(&brain_wave.alpha.to_le_bytes());
+            buffer.extend_from_slice(&brain_wave.beta.to_le_bytes());
+            buffer.extend_from_slice(&brain_wave.gamma.to_le_bytes());
+        }
+        
+        buffer
+    }
+}
+
+impl BrainWaves {
+    /// Create new brain waves data for a channel
+    pub fn new(channel: usize, delta: f32, theta: f32, alpha: f32, beta: f32, gamma: f32) -> Self {
+        Self {
+            channel,
+            delta,
+            theta,
+            alpha,
+            beta,
+            gamma,
+        }
+    }
+
+    /// Get the dominant frequency band
+    pub fn dominant_band(&self) -> (&'static str, f32) {
+        let bands = [
+            ("delta", self.delta),
+            ("theta", self.theta),
+            ("alpha", self.alpha),
+            ("beta", self.beta),
+            ("gamma", self.gamma),
+        ];
+        
+        bands.iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(name, value)| (*name, *value))
+            .unwrap_or(("unknown", 0.0))
+    }
+}
+
+impl FftConfig {
+    /// Create a new FFT configuration
+    pub fn new(fft_size: usize, sample_rate: f32, window_function: String) -> Self {
+        Self {
+            fft_size,
+            sample_rate,
+            window_function,
+        }
+    }
+
+    /// Get frequency resolution for this configuration
+    pub fn frequency_resolution(&self) -> f32 {
+        self.sample_rate / self.fft_size as f32
     }
 }
 

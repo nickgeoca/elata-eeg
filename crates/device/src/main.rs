@@ -5,13 +5,14 @@ mod connection_manager;
 mod elata_emu_v1;
 
 // New event-driven modules
-mod event;
 mod plugin;
 mod event_bus;
+mod plugins;
 
 // Import plugin implementations
 use csv_recorder_plugin::{CsvRecorderPlugin, CsvRecorderConfig};
 use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterConfig};
+use crate::plugins::{BrainWavesPlugin, BrainWavesConfig};
 
 use eeg_sensor::AdcConfig;
 use tokio::sync::{broadcast, Mutex};
@@ -22,8 +23,7 @@ use std::fmt;
 use tokio_util::sync::CancellationToken;
 
 // Import event-driven types
-use eeg_types::{EegPacket, SensorEvent, EegPlugin, AppEvent};
-use eeg_types::EventFilter;
+use eeg_types::{EegPacket, SensorEvent, EegPlugin, AppEvent, EventFilter};
 use eeg_sensor::AdcData;
 use crate::event_bus::EventBus;
 
@@ -362,9 +362,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         num_channels: initial_config.channels.len(),
     };
     
+    let brain_waves_config = BrainWavesConfig {
+        fft_size: 512,
+        sample_rate: initial_config.sample_rate as f32,
+        num_channels: initial_config.channels.len(),
+        window_function: "hanning".to_string(),
+    };
+    
     // Create plugin instances
     let csv_plugin = Arc::new(CsvRecorderPlugin::new(csv_config)) as Arc<dyn EegPlugin>;
     let filter_plugin = Arc::new(BasicVoltageFilterPlugin::new(filter_config)) as Arc<dyn EegPlugin>;
+    let brain_waves_plugin = Arc::new(BrainWavesPlugin::new(brain_waves_config)) as Arc<dyn EegPlugin>;
     
     // Supervisor configuration
     let supervisor_config = SupervisorConfig::default();
@@ -384,6 +392,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         supervise_plugin(filter_plugin, filter_supervisor_bus, filter_supervisor_shutdown, filter_supervisor_config).await;
     });
     
+    let brain_waves_supervisor_bus = event_bus.clone();
+    let brain_waves_supervisor_shutdown = shutdown_token.clone();
+    let brain_waves_supervisor_config = supervisor_config.clone();
+    let mut brain_waves_supervisor_handle = tokio::spawn(async move {
+        supervise_plugin(brain_waves_plugin, brain_waves_supervisor_bus, brain_waves_supervisor_shutdown, brain_waves_supervisor_config).await;
+    });
+    
     tracing::info!("Event-driven plugins initialized and supervised");
     
 
@@ -393,6 +408,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Create a broadcast channel for raw EEG data to be sent to websockets
     let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
+
+    // Create a broadcast channel for FFT brain waves data to be sent to websockets
+    let (fft_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
 
     // Task to forward FilteredEeg events to the WebSocket data channel
     let mut eeg_data_subscriber = event_bus.subscribe(
@@ -429,11 +447,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         tracing::info!("EEG data forwarder task shut down.");
     });
 
+    // Task to forward FFT events to the WebSocket brain waves data channel
+    let mut fft_data_subscriber = event_bus.subscribe(
+        "fft_data_forwarder".to_string(),
+        128,
+        vec![EventFilter::FftOnly],
+    ).await;
+    let fft_data_tx_clone = fft_data_tx.clone();
+    let fft_forwarder_shutdown = shutdown_token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = fft_forwarder_shutdown.cancelled() => break,
+                event_result = fft_data_subscriber.recv() => {
+                    match event_result {
+                        Some(SensorEvent::Fft(packet)) => {
+                            // Convert FFT packet to binary format for WebSocket transmission
+                            let bytes = packet.to_binary();
+                            if fft_data_tx_clone.send(bytes).is_err() {
+                                tracing::warn!("No active WebSocket clients to receive FFT data.");
+                            }
+                        }
+                        Some(_) => {
+                            // Other event types we don't care about
+                        }
+                        None => {
+                            // Channel closed, break the loop
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        tracing::info!("FFT data forwarder task shut down.");
+    });
+
     // Set up WebSocket routes and get config update channel
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         config.clone(),
         config_applied_tx.clone(),
         eeg_data_tx,
+        fft_data_tx,
         is_recording.clone(),
     );
     
@@ -474,6 +528,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             
             result = &mut filter_supervisor_handle => {
                 tracing::warn!("Basic voltage filter plugin supervisor completed: {:?}", result);
+                break;
+            },
+            
+            result = &mut brain_waves_supervisor_handle => {
+                tracing::warn!("Brain waves FFT plugin supervisor completed: {:?}", result);
                 break;
             },
             

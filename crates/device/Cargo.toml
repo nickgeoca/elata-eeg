@@ -28,6 +28,7 @@ env_logger = "0.10" # Added logger
 log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
+rustfft = "6.0" # Added for FFT analysis in brain waves plugin
 
 [dev-dependencies]
 tempfile = "3.8"

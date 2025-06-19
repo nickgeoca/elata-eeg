@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-use crate::event::SensorEvent;
+use eeg_types::SensorEvent;
+use eeg_types::event::{EventFilter, event_matches_filter};
 use crate::event_bus::EventBus;
 
 /// Configuration trait that all plugin configurations must implement
@@ -73,18 +74,6 @@ pub trait EegPlugin: Send + Sync {
     }
 }
 
-/// Event filter types for plugins to specify what events they want to receive
-#[derive(Debug, Clone, PartialEq)]
-pub enum EventFilter {
-    /// Receive all events
-    All,
-    /// Only raw EEG events
-    RawEegOnly,
-    /// Only filtered EEG events
-    FilteredEegOnly,
-    /// Only system events
-    SystemOnly,
-}
 
 /// Plugin-specific metrics
 #[derive(Debug, Clone)]
@@ -158,20 +147,11 @@ impl SupervisorConfig {
     }
 }
 
-/// Helper function to check if an event matches a filter
-pub fn event_matches_filter(event: &SensorEvent, filter: &EventFilter) -> bool {
-    match filter {
-        EventFilter::All => true,
-        EventFilter::RawEegOnly => matches!(event, SensorEvent::RawEeg(_)),
-        EventFilter::FilteredEegOnly => matches!(event, SensorEvent::FilteredEeg(_)),
-        EventFilter::SystemOnly => matches!(event, SensorEvent::System(_)),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{EegPacket, SensorEvent};
+    use eeg_types::{EegPacket, SensorEvent};
 
     #[test]
     fn test_supervisor_config_backoff() {

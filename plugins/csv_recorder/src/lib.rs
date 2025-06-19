@@ -13,7 +13,8 @@ use tracing::{info, warn, error, debug};
 
 use eeg_types::{
     event::{SensorEvent, EegPacket},
-    plugin::{EegPlugin, PluginConfig, EventFilter},
+    plugin::{EegPlugin, PluginConfig},
+    event::EventFilter,
     config::DaemonConfig,
 };
 use eeg_sensor::AdcConfig;

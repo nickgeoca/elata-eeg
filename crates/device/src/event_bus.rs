@@ -251,7 +251,8 @@ impl eeg_types::EventBus for EventBus {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use eeg_types::{EegPacket, SensorEvent, EventFilter};
+    use eeg_types::{EegPacket, SensorEvent};
+    use super::EventFilter;
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]

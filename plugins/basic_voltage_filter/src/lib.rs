@@ -6,7 +6,8 @@ use tracing::{info, warn, error, debug};
 
 use eeg_types::{
     event::{SensorEvent, EegPacket, FilteredEegPacket},
-    plugin::{EegPlugin, PluginConfig, EventFilter},
+    plugin::{EegPlugin, PluginConfig},
+    event::EventFilter,
     config::DaemonConfig,
 };
 use basic_voltage_filter::SignalProcessor;

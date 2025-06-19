@@ -408,7 +408,207 @@ pub async fn handle_eeg_websocket(
     println!("EEG WebSocket: Connection handler finished");
 }
 
-// Brain waves FFT WebSocket handler moved to elata_dsp_brain_waves_fft crate
+/// Handle WebSocket connection for brain waves FFT data streaming
+pub async fn handle_brain_waves_websocket(
+    ws: WebSocket,
+    data_rx: broadcast::Receiver<Vec<u8>>, // Receiver for binary FFT data
+) {
+    println!("Brain waves WebSocket client connected");
+    let mut ws_receiver = connection_manager::split_and_spawn_sender(ws, data_rx);
+
+    // Handle incoming messages from the client
+    while let Some(result) = ws_receiver.next().await {
+        match result {
+            Ok(msg) => {
+                if msg.is_close() {
+                    println!("Brain waves WebSocket: Received close frame from client");
+                    break;
+                }
+                // Ignore other message types for now
+            }
+            Err(e) => {
+                println!("Brain waves WebSocket: Error receiving message: {}", e);
+                break;
+            }
+        }
+    }
+
+    println!("Brain waves WebSocket: Connection handler finished");
+}
+
+/// Handle WebSocket connection for brain waves applet (JSON format expected by kiosk)
+pub async fn handle_applet_brain_waves_websocket(
+    ws: WebSocket,
+    mut data_rx: broadcast::Receiver<Vec<u8>>, // Receiver for binary FFT data
+) {
+    use serde_json::json;
+    
+    println!("Brain waves applet WebSocket client connected");
+    let (mut ws_tx, mut ws_rx) = ws.split();
+
+    // Spawn a task to handle sending FFT data to the client in JSON format
+    let send_task = tokio::spawn(async move {
+        loop {
+            match data_rx.recv().await {
+                Ok(binary_data) => {
+                    // Parse the binary FFT data and convert to JSON format expected by kiosk
+                    match parse_fft_binary_data(&binary_data) {
+                        Ok(fft_results) => {
+                            let response = json!({
+                                "timestamp": chrono::Utc::now().timestamp_millis(),
+                                "fft_results": fft_results
+                            });
+                            
+                            let json_str = response.to_string();
+                            if ws_tx.send(Message::text(json_str)).await.is_err() {
+                                println!("Brain waves applet WebSocket: Error sending JSON data, client likely disconnected");
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            println!("Brain waves applet WebSocket: Error parsing FFT data: {}", e);
+                            let error_response = json!({
+                                "timestamp": chrono::Utc::now().timestamp_millis(),
+                                "error": format!("Failed to parse FFT data: {}", e)
+                            });
+                            let json_str = error_response.to_string();
+                            if ws_tx.send(Message::text(json_str)).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    println!("Brain waves applet WebSocket: Lagged by {} messages", n);
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    println!("Brain waves applet WebSocket: Broadcast channel closed");
+                    break;
+                }
+            }
+        }
+    });
+
+    // Handle incoming messages from the client (mostly just close frames)
+    let receive_task = tokio::spawn(async move {
+        while let Some(result) = ws_rx.next().await {
+            match result {
+                Ok(msg) => {
+                    if msg.is_close() {
+                        println!("Brain waves applet WebSocket: Received close frame from client");
+                        break;
+                    }
+                    // Ignore other message types for now
+                }
+                Err(e) => {
+                    println!("Brain waves applet WebSocket: Error receiving message: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Wait for either task to complete
+    tokio::select! {
+        _ = send_task => {},
+        _ = receive_task => {},
+    }
+
+    println!("Brain waves applet WebSocket: Connection handler finished");
+}
+
+/// Parse binary FFT data into the JSON format expected by the kiosk
+fn parse_fft_binary_data(binary_data: &[u8]) -> Result<Vec<serde_json::Value>, String> {
+    use serde_json::json;
+    
+    if binary_data.len() < 16 {
+        return Err("Binary data too short".to_string());
+    }
+    
+    let mut offset = 0;
+    
+    // Read timestamp (8 bytes)
+    let _timestamp = u64::from_le_bytes(
+        binary_data[offset..offset + 8].try_into()
+            .map_err(|_| "Failed to read timestamp")?
+    );
+    offset += 8;
+    
+    // Read source_frame_id (8 bytes)
+    let _source_frame_id = u64::from_le_bytes(
+        binary_data[offset..offset + 8].try_into()
+            .map_err(|_| "Failed to read source_frame_id")?
+    );
+    offset += 8;
+    
+    // Read number of channels (4 bytes)
+    let num_channels = u32::from_le_bytes(
+        binary_data[offset..offset + 4].try_into()
+            .map_err(|_| "Failed to read num_channels")?
+    ) as usize;
+    offset += 4;
+    
+    let mut fft_results = Vec::new();
+    
+    // Read brain wave data for each channel
+    for _channel_idx in 0..num_channels {
+        if offset + 24 > binary_data.len() {
+            return Err("Not enough data for channel brain waves".to_string());
+        }
+        
+        // Read channel index (4 bytes)
+        let _channel = u32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read channel index")?
+        );
+        offset += 4;
+        
+        // Read brain wave band powers (5 * 4 bytes each)
+        let delta = f32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read delta")?
+        );
+        offset += 4;
+        
+        let theta = f32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read theta")?
+        );
+        offset += 4;
+        
+        let alpha = f32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read alpha")?
+        );
+        offset += 4;
+        
+        let beta = f32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read beta")?
+        );
+        offset += 4;
+        
+        let gamma = f32::from_le_bytes(
+            binary_data[offset..offset + 4].try_into()
+                .map_err(|_| "Failed to read gamma")?
+        );
+        offset += 4;
+        
+        // Convert brain wave bands to frequency bins and power values
+        // This is a simplified conversion - in a real implementation you might want
+        // to generate more detailed frequency bins
+        let frequencies = vec![2.0, 6.0, 10.5, 21.5, 65.0]; // Representative frequencies for each band
+        let power = vec![delta, theta, alpha, beta, gamma];
+        
+        fft_results.push(json!({
+            "power": power,
+            "frequencies": frequencies
+        }));
+    }
+    
+    Ok(fft_results)
+}
 
 // Set up WebSocket routes and server
 
@@ -417,6 +617,7 @@ pub fn setup_websocket_routes(
     config: Arc<Mutex<AdcConfig>>,
     config_applied_tx: broadcast::Sender<AdcConfig>,
     eeg_data_tx: broadcast::Sender<Vec<u8>>,
+    fft_data_tx: broadcast::Sender<Vec<u8>>,
     is_recording: Arc<AtomicBool>,
 ) -> (
     impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone,
@@ -455,7 +656,22 @@ pub fn setup_websocket_routes(
             ws.on_upgrade(move |socket| handle_eeg_websocket(socket, rx))
         });
 
-    let routes = config_route.or(command_route).or(eeg_route);
+    let brain_waves_route = warp::path("brain_waves")
+        .and(warp::ws())
+        .and(with_broadcast_rx(fft_data_tx.clone()))
+        .map(|ws: warp::ws::Ws, rx| {
+            ws.on_upgrade(move |socket| handle_brain_waves_websocket(socket, rx))
+        });
+
+    // Add the applet route that the kiosk expects
+    let applet_brain_waves_route = warp::path!("applet" / "brain_waves" / "data")
+        .and(warp::ws())
+        .and(with_broadcast_rx(fft_data_tx.clone()))
+        .map(|ws: warp::ws::Ws, rx| {
+            ws.on_upgrade(move |socket| handle_applet_brain_waves_websocket(socket, rx))
+        });
+
+    let routes = config_route.or(command_route).or(eeg_route).or(brain_waves_route).or(applet_brain_waves_route);
 
     (routes, config_update_rx)
 }
