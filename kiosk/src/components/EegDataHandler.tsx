@@ -50,6 +50,18 @@ export function useEegDataHandler({
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
+  
+  // Enhanced debugging state
+  const [debugInfo, setDebugInfo] = useState({
+    connectionAttempts: 0,
+    lastConnectionTime: 0,
+    messagesReceived: 0,
+    lastMessageTime: 0,
+    lastMessageType: 'none',
+    lastError: '',
+    binaryPacketsReceived: 0,
+    textPacketsReceived: 0,
+  });
   // No queues or animation frame needed for immediate display
   const sampleBuffersRef = useRef<Float32Array[]>([]); // For raw data display
   // const fftBuffersRef = useRef<number[][]>([]); // Removed: FFT calculation is now backend-driven
@@ -98,9 +110,15 @@ export function useEegDataHandler({
     ws.onopen = () => {
       setStatus('Connected');
       reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
-      if (!isProduction) {
-        console.log('WebSocket connection established');
-      }
+      const now = performance.now();
+      setDebugInfo(prev => ({
+        ...prev,
+        connectionAttempts: prev.connectionAttempts + 1,
+        lastConnectionTime: now,
+      }));
+      console.log(`[EegDataHandler DEBUG] WebSocket connection established at ${new Date().toISOString()}`);
+      console.log(`[EegDataHandler DEBUG] Connection URL: ${wsProtocol}://${wsHost}:8080/eeg`);
+      console.log(`[EegDataHandler DEBUG] Binary type set to: ${ws.binaryType}`);
     };
     
     // --- WebSocket Message Handler ---
@@ -108,22 +126,48 @@ export function useEegDataHandler({
 
     const handleWebSocketMessage = (event: MessageEvent) => {
       try {
+        const now = performance.now();
+        setDebugInfo(prev => ({
+          ...prev,
+          messagesReceived: prev.messagesReceived + 1,
+          lastMessageTime: now,
+          lastMessageType: event.data instanceof ArrayBuffer ? 'binary' : typeof event.data,
+        }));
+
+        console.log(`[EegDataHandler DEBUG] Message received at ${new Date().toISOString()}`);
+        console.log(`[EegDataHandler DEBUG] Message type: ${event.data instanceof ArrayBuffer ? 'ArrayBuffer' : typeof event.data}`);
+        console.log(`[EegDataHandler DEBUG] Message size: ${event.data instanceof ArrayBuffer ? event.data.byteLength : 'N/A'} bytes`);
+
         // Handle binary data from EEG endpoint
         if (!(event.data instanceof ArrayBuffer)) {
-          if (!isProduction) {
-            console.warn("[EegDataHandler] Received non-binary data:", typeof event.data);
-          }
+          console.warn("[EegDataHandler DEBUG] Received non-binary data:", typeof event.data, event.data);
+          setDebugInfo(prev => ({
+            ...prev,
+            textPacketsReceived: prev.textPacketsReceived + 1,
+          }));
           return;
         }
 
+        setDebugInfo(prev => ({
+          ...prev,
+          binaryPacketsReceived: prev.binaryPacketsReceived + 1,
+        }));
+
         const buffer = new Uint8Array(event.data);
+        console.log(`[EegDataHandler DEBUG] Binary buffer length: ${buffer.length} bytes`);
+        
         if (buffer.length === 0) {
-          if (!isProduction) console.warn("Received empty data packet");
+          console.warn("[EegDataHandler DEBUG] Received empty data packet");
           return;
         }
 
         const configuredChannelCount = currentConfig?.channels?.length || 0;
-        if (configuredChannelCount === 0) return;
+        console.log(`[EegDataHandler DEBUG] Configured channel count: ${configuredChannelCount}`);
+        
+        if (configuredChannelCount === 0) {
+          console.warn("[EegDataHandler DEBUG] No channels configured, skipping packet");
+          return;
+        }
 
         // NEW PARSING LOGIC
         const dataView = new DataView(event.data);
@@ -131,17 +175,19 @@ export function useEegDataHandler({
 
         // Packet structure: [timestamp_u64_le] [error_flag_u8] [data_payload]
         if (buffer.length < 9) { // 8 bytes for timestamp + 1 for error flag
-          if (!isProduction) console.warn("Data packet too small for header");
+          console.warn(`[EegDataHandler DEBUG] Data packet too small for header: ${buffer.length} bytes (need at least 9)`);
           return;
         }
 
         // Read timestamp (8 bytes, little endian) - using BigInt for u64
         const timestamp = dataView.getBigUint64(offset, true);
         offset += 8;
+        console.log(`[EegDataHandler DEBUG] Packet timestamp: ${timestamp}`);
 
         // Read error flag (1 byte)
         const errorFlag = dataView.getUint8(offset);
         offset += 1;
+        console.log(`[EegDataHandler DEBUG] Error flag: ${errorFlag}`);
 
         if (errorFlag === 1) {
           // Handle error message
@@ -157,13 +203,22 @@ export function useEegDataHandler({
         const totalSamples = dataBytes / bytesPerSample;
         const batchSize = totalSamples / configuredChannelCount;
 
+        console.log(`[EegDataHandler DEBUG] Data bytes after header: ${dataBytes}`);
+        console.log(`[EegDataHandler DEBUG] Total samples: ${totalSamples}`);
+        console.log(`[EegDataHandler DEBUG] Calculated batch size: ${batchSize}`);
+
         if (dataBytes % (bytesPerSample * configuredChannelCount) !== 0) {
-            console.warn(`[EegDataHandler] Incomplete data packet. Data bytes: ${dataBytes}, Channels: ${configuredChannelCount}`);
+            console.warn(`[EegDataHandler DEBUG] Incomplete data packet. Data bytes: ${dataBytes}, Channels: ${configuredChannelCount}, Remainder: ${dataBytes % (bytesPerSample * configuredChannelCount)}`);
             return;
         }
 
         if (batchSize === 0) {
-          if (!isProduction) console.warn("Received packet with no sample data");
+          console.warn("[EegDataHandler DEBUG] Received packet with no sample data");
+          return;
+        }
+
+        if (!Number.isInteger(batchSize)) {
+          console.warn(`[EegDataHandler DEBUG] Non-integer batch size: ${batchSize}`);
           return;
         }
 
@@ -187,11 +242,13 @@ export function useEegDataHandler({
             const rawValue = dataView.getFloat32(sampleOffset, true); // little endian
             currentSampleBuffer[i] = isFinite(rawValue) ? rawValue : 0;
             
-            // DEBUG: Log some sample values
-            if (ch === 0 && i < 3 && debugInfoRef.current.packetsReceived % 100 === 0) {
-              console.log(`[EegDataHandler DEBUG BINARY] Ch${ch} Sample${i}: ${rawValue} (finite: ${isFinite(rawValue)})`);
+            // DEBUG: Log some sample values for first few packets
+            if (ch === 0 && i < 3 && debugInfoRef.current.packetsReceived < 5) {
+              console.log(`[EegDataHandler DEBUG] Ch${ch} Sample${i}: ${rawValue} (finite: ${isFinite(rawValue)}, offset: ${sampleOffset})`);
             }
           }
+
+          console.log(`[EegDataHandler DEBUG] Channel ${ch}: processed ${batchSize} samples, first few: [${currentSampleBuffer.slice(0, 3).join(', ')}]`);
 
           // Update timestamps
           if (lastDataChunkTimeRef.current && lastDataChunkTimeRef.current[ch] !== undefined) {
@@ -201,6 +258,9 @@ export function useEegDataHandler({
           // Add data to WebGL lines
           if (linesRef.current && linesRef.current[ch] && batchSize > 0) {
             linesRef.current[ch].shiftAdd(currentSampleBuffer);
+            console.log(`[EegDataHandler DEBUG] Added ${batchSize} samples to WebGL line ${ch}`);
+          } else {
+            console.warn(`[EegDataHandler DEBUG] Could not add data to WebGL line ${ch}: linesRef.current=${!!linesRef.current}, line exists=${!!(linesRef.current && linesRef.current[ch])}, batchSize=${batchSize}`);
           }
         }
 
@@ -216,6 +276,8 @@ export function useEegDataHandler({
           debugInfoRef.current.samplesProcessed += batchSize * configuredChannelCount;
         }
 
+        console.log(`[EegDataHandler DEBUG] Successfully processed packet ${debugInfoRef.current.packetsReceived}, calling onDataUpdate(true)`);
+
         if (typeof onDataUpdate === 'function') {
           onDataUpdate(true);
         }
@@ -230,7 +292,12 @@ export function useEegDataHandler({
         }, 1000);
 
       } catch (error) {
-        console.error("Error parsing EEG binary data:", error);
+        console.error("[EegDataHandler DEBUG] Error parsing EEG binary data:", error);
+        console.error("[EegDataHandler DEBUG] Error stack:", error instanceof Error ? error.stack : 'No stack trace');
+        setDebugInfo(prev => ({
+          ...prev,
+          lastError: error instanceof Error ? error.message : String(error),
+        }));
         if (typeof onError === 'function') onError(`Error parsing EEG data: ${error}`);
       }
     }; // End of handleWebSocketMessage
@@ -350,6 +417,9 @@ export function useEegDataHandler({
   // onFftData is added to dependencies of connectWebSocket, so not strictly needed here if connectWebSocket handles it.
   // However, including config directly ensures re-initialization of FFT buffers if channel count changes.
   }, [config, connectWebSocket, isProduction, linesRef, latestTimestampRef, debugInfoRef]);
-  // Return status (FPS is now implicitly handled by sample rate)
-  return { status };
+  // Return status and debug info
+  return {
+    status,
+    debugInfo: !isProduction ? debugInfo : undefined
+  };
 }

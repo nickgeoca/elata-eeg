@@ -339,8 +339,8 @@ export default function EegMonitorWebGL() {
     }
   }, [config?.channels?.length]); // Depend on the number of channels
 
-  // Get data handler status and FPS
-  const { status } = useEegDataHandler({
+  // Get data handler status and debug info
+  const { status, debugInfo } = useEegDataHandler({
     config,
     onDataUpdate: handleDataUpdate,
     onError: handleDriverError,
@@ -685,6 +685,18 @@ export default function EegMonitorWebGL() {
             <span className={`inline-block w-3 h-3 rounded-full mx-2 ${dataReceived ? 'bg-green-500' : 'bg-gray-500'}`}></span>
             <span>{dataReceived ? 'receiving data' : 'no data'}</span>
           </div>
+          {debugInfo && (
+            <div className="ml-4 text-xs text-gray-300">
+              <span>WS: {status} | </span>
+              <span>Conn: {debugInfo.connectionAttempts} | </span>
+              <span>Msgs: {debugInfo.messagesReceived} | </span>
+              <span>Bin: {debugInfo.binaryPacketsReceived} | </span>
+              <span>Text: {debugInfo.textPacketsReceived}</span>
+              {debugInfo.lastError && (
+                <span className="text-red-400"> | Err: {debugInfo.lastError}</span>
+              )}
+            </div>
+          )}
         </div>
         <div className="flex items-baseline space-x-2">
           {/* Use the EegRecordingControls component */}

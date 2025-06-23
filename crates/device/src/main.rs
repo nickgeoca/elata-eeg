@@ -370,11 +370,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create a broadcast channel for raw EEG data to be sent to websockets
     let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
 
-    // Task to forward FilteredEeg events to the WebSocket data channel
+    // Task to forward both RawEeg and FilteredEeg events to the WebSocket data channel
+    // Priority: FilteredEeg first, then RawEeg as fallback
     let mut eeg_data_subscriber = event_bus.subscribe(
         "eeg_data_forwarder".to_string(),
         128,
-        vec![EventFilter::FilteredEegOnly],
+        vec![EventFilter::FilteredEegOnly, EventFilter::RawEegOnly],
     ).await;
     let eeg_data_tx_clone = eeg_data_tx.clone();
     let eeg_forwarder_shutdown = shutdown_token.clone();
@@ -385,9 +386,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 event_result = eeg_data_subscriber.recv() => {
                     match event_result {
                         Some(SensorEvent::FilteredEeg(packet)) => {
+                            tracing::debug!("Forwarding FilteredEeg packet to WebSocket clients");
                             let bytes = packet.to_binary();
                             if eeg_data_tx_clone.send(bytes).is_err() {
-                                tracing::warn!("No active WebSocket clients to receive EEG data.");
+                                tracing::warn!("No active WebSocket clients to receive FilteredEeg data.");
+                            }
+                        }
+                        Some(SensorEvent::RawEeg(packet)) => {
+                            tracing::debug!("Forwarding RawEeg packet to WebSocket clients");
+                            let bytes = packet.to_binary();
+                            if eeg_data_tx_clone.send(bytes).is_err() {
+                                tracing::warn!("No active WebSocket clients to receive RawEeg data.");
                             }
                         }
                         Some(_) => {}

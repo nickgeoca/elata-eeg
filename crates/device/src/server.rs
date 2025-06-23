@@ -360,10 +360,14 @@ pub async fn handle_eeg_websocket(
     let (mut ws_sender, mut ws_receiver) = ws.split();
 
     tokio::spawn(async move {
+        let mut packet_count = 0;
         loop {
             match data_rx.recv().await {
                 Ok(data_packet) => {
+                    packet_count += 1;
+                    println!("EEG WebSocket: Sending packet #{} ({} bytes)", packet_count, data_packet.len());
                     if ws_sender.send(Message::binary(data_packet)).await.is_err() {
+                        println!("EEG WebSocket: Failed to send packet, client disconnected");
                         break;
                     }
                 }
@@ -371,10 +375,12 @@ pub async fn handle_eeg_websocket(
                     println!("EEG data WebSocket lagged by {} messages", n);
                 }
                 Err(broadcast::error::RecvError::Closed) => {
+                    println!("EEG data WebSocket: Broadcast channel closed");
                     break;
                 }
             }
         }
+        println!("EEG WebSocket: Data sender task ended");
     });
 
     while let Some(result) = ws_receiver.next().await {

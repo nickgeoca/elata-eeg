@@ -35,6 +35,7 @@ export const useEegConfig = () => useContext(EegConfigContext);
 // Provider component
 export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<EegConfig | null>(null);
+  const configRef = useRef<EegConfig | null>(null); // Add a ref for the latest config
   const [status, setStatus] = useState('Initializing...'); // Start as Initializing
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -141,12 +142,12 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Assume it's a full config object (variable 'data' holds the parsed new server data)
-        console.log('Config WebSocket (EegConfigProvider): Current config:', config);
+        console.log('Config WebSocket (EegConfigProvider): Current config (from ref):', configRef.current);
         console.log('Config WebSocket (EegConfigProvider): New config data:', data);
-        console.log('Config WebSocket (EegConfigProvider): Current powerline_filter_hz:', config?.powerline_filter_hz);
+        console.log('Config WebSocket (EegConfigProvider): Current powerline_filter_hz (from ref):', configRef.current?.powerline_filter_hz);
         console.log('Config WebSocket (EegConfigProvider): New powerline_filter_hz:', data.powerline_filter_hz);
         
-        const configsEqual = areConfigsEqual(config, data);
+        const configsEqual = areConfigsEqual(configRef.current, data); // Use configRef.current
         console.log('Config WebSocket (EegConfigProvider): areConfigsEqual result:', configsEqual);
         
         if (configsEqual) {
@@ -154,10 +155,11 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
           
           // If config is already set and status is 'Connected', no need to update status again.
           // If config was null, and this is the first valid data, status should be updated.
-          if (!config) {
+          if (!configRef.current) { // Use configRef.current
             const FPS = 60.0; // Keep client-side FPS calculation for now
             const configWithFps = { ...data, fps: FPS };
             setConfig(configWithFps); // Set initial config
+            // configRef.current will be updated by the useEffect below
             setStatus('Connected');
             console.log('Config WebSocket (EegConfigProvider): Set initial EEG configuration:', configWithFps);
           }
@@ -205,7 +207,12 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       // The onclose event will usually fire after an error, triggering reconnect logic there.
     };
 
-  }, [isProduction]); // Removed 'config' from dependencies
+  }, [isProduction]);
+
+  // Effect to keep configRef.current updated with the latest config state
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   useEffect(() => {
     connectWebSocket(); // Initial connection attempt
