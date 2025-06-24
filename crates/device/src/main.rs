@@ -183,42 +183,36 @@ async fn data_acquisition_loop(
 
                 let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
                 if min_buffer_size >= batch_size {
-                    let mut voltage_samples = Vec::new();
-                    let mut sample_timestamps = Vec::new();
+                    let mut flattened_samples = Vec::with_capacity(batch_size * num_channels);
+                    let mut sample_timestamps = Vec::with_capacity(batch_size * num_channels);
 
-                    for channel_idx in 0..num_channels {
-                        let channel = channel_idx as u8;
-                        if let Some(buffer) = channel_buffers.get_mut(&channel) {
-                            let batch: Vec<_> = buffer.drain(0..batch_size).collect();
-
-                            let voltages: Vec<f32> = batch.iter().map(|(raw, _)| {
-                                let vref_f32 = vref as f32;
-                                (*raw as f32) * (vref_f32 / (1 << 24) as f32)
-                            }).collect();
-
-                            // Collect timestamps from the batch
-                            for &(_, timestamp) in &batch {
-                                sample_timestamps.push(timestamp);
-                            }
-                            voltage_samples.push(voltages);
+                    // Create a structure to hold all the batches
+                    let mut channel_batches: Vec<Vec<(i32, u64)>> = Vec::with_capacity(num_channels);
+                    for i in 0..num_channels {
+                        if let Some(buffer) = channel_buffers.get_mut(&(i as u8)) {
+                            channel_batches.push(buffer.drain(0..batch_size).collect());
                         } else {
-                            voltage_samples.push(vec![0.0; batch_size]);
+                            // If a channel is missing data, push an empty vec to maintain index mapping
+                            channel_batches.push(Vec::new());
                         }
                     }
 
-                    // Sort timestamps to ensure they are monotonic, just in case.
-                    sample_timestamps.sort_unstable();
-                    // Remove duplicates that might arise from buffering logic
-                    sample_timestamps.dedup();
-
-                    let mut flattened_samples = Vec::new();
-                    if !voltage_samples.is_empty() {
-                        let samples_per_channel = voltage_samples[0].len();
-                        for sample_idx in 0..samples_per_channel {
-                            for channel_samples in &voltage_samples {
-                                if sample_idx < channel_samples.len() {
-                                    flattened_samples.push(channel_samples[sample_idx]);
-                                }
+                    // Interleave the data
+                    for sample_idx in 0..batch_size {
+                        for channel_idx in 0..num_channels {
+                            if let Some((raw_val, timestamp)) = channel_batches[channel_idx].get(sample_idx) {
+                                let vref_f32 = vref as f32;
+                                let voltage = (*raw_val as f32) * (vref_f32 / (1 << 24) as f32);
+                                flattened_samples.push(voltage);
+                                sample_timestamps.push(*timestamp);
+                            } else {
+                                // Handle missing data for a channel gracefully
+                                flattened_samples.push(0.0);
+                                // Attempt to use a timestamp from another channel for this sample index, or 0
+                                let fallback_ts = channel_batches.iter()
+                                    .find_map(|b| b.get(sample_idx).map(|(_, ts)| *ts))
+                                    .unwrap_or(0);
+                                sample_timestamps.push(fallback_ts);
                             }
                         }
                     }

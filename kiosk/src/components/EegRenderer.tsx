@@ -213,7 +213,7 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   // Depend on plot initialization state, lines readiness state, and the actual dataRef content
   // Check isInitializedRef.current inside, depend on linesReady and dataVersion
-  }, [linesReady, dataVersion]);
+  }, [linesReady]);
 
 
   // Resize Effect: Now depends on containerWidth and containerHeight props

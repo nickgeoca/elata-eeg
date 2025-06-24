@@ -48,6 +48,7 @@ export function useEegDataHandler({
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
   const isProduction = process.env.NODE_ENV === 'production';
+  const logCounterRef = useRef(0); // Ref for throttling logs
 
   // --- Refs for props to ensure stability ---
   const configRef = useRef(config);
@@ -250,6 +251,13 @@ export function useEegDataHandler({
 
           if (allChannelSamples.length > 0) {
             onSamplesRef.current?.(allChannelSamples);
+
+            // Log a sample of the data every 100 packets
+            logCounterRef.current++;
+            if (logCounterRef.current % 100 === 0) {
+              const sampleToShow = allChannelSamples[0]?.values.slice(0, 5);
+              console.log(`[EegDataHandler] Ch 0 Data Sample (packet #${debugInfoRef.current.packetsReceived}):`, sampleToShow);
+            }
           }
 
           if (latestTimestampRef) {

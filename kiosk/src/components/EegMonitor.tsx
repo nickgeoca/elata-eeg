@@ -44,9 +44,6 @@ export default function EegMonitorWebGL() {
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
   const [circularGraphData, setCircularGraphData] = useState<number[][]>([]); // State for circular graph data
   
-  // Sample queue for smooth display - stores individual samples to be added at display rate
-  const sampleQueueRef = useRef<any[][]>([]); // Queue of individual samples [channel][sample]
-  const displayIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
@@ -297,7 +294,7 @@ export default function EegMonitorWebGL() {
   // Effect to create/update WebGL lines when config or container size changes
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const REFERENCE_UV_RANGE = 200.0; // The peak-to-peak microvolt range we want to fit in the channel's vertical space by default
+  const REFERENCE_UV_RANGE = 100.0; // The peak-to-peak microvolt range we want to fit in the channel's vertical space by default
   const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
 
   useEffect(() => {
@@ -342,99 +339,64 @@ export default function EegMonitorWebGL() {
     }
   }, [config?.channels?.length, config?.sample_rate, containerSize.width, uiVoltageScaleFactor]);
 
-  // Ref to track the last processed sample index to avoid reprocessing
-  const lastProcessedIndexRef = useRef<number>(0);
+  // Ref to track the length of rawSamples from the last run to process only new data
+  const lastProcessedLengthRef = useRef<number>(0);
 
-  // Effect for processing new data - queue samples for smooth display
+  // Effect for processing new data and updating the graph
   useEffect(() => {
-    if (activeViewRef.current === 'signalGraph' && rawSamples.length > 0) {
-      const lines = dataRef.current;
-      if (lines.length > 0) {
-        // Only process new samples since the last processed index
-        const newSamples = rawSamples.slice(lastProcessedIndexRef.current);
-        
-        if (newSamples.length > 0) {
-          // Instead of adding all samples at once, queue them for smooth display
-          newSamples.forEach((samplesBatch) => {
-            if (samplesBatch && samplesBatch.length > 0) {
-              // The batch is now an array of EegSample objects
-              const batchSize = samplesBatch.length;
-              
-              // Queue the EegSample objects directly
-              for (let sampleIndex = 0; sampleIndex < batchSize; sampleIndex++) {
-                const sample = samplesBatch[sampleIndex];
-                if (sample) {
-                  // This assumes newSamples is structured as [channel][sample]
-                  // which needs verification based on context provider.
-                  // For now, let's assume the structure is correct and we queue the sample.
-                  // The queue will hold EegSample objects.
-                  sampleQueueRef.current.push(sample as any);
-                }
-              }
-            }
-          });
-          
-          // Update the last processed index
-          lastProcessedIndexRef.current = rawSamples.length;
-          console.log(`[EegMonitor] Queued ${newSamples.length} batches, queue size: ${sampleQueueRef.current.length}`);
+    if (activeViewRef.current !== 'signalGraph' || !linesReady || rawSamples.length === 0) {
+      return;
+    }
+
+    const lines = dataRef.current;
+    const numChannels = lines.length;
+    if (numChannels === 0) return;
+
+    const currentSamplesLength = rawSamples.length;
+    let previousSamplesLength = lastProcessedLengthRef.current;
+
+    // If the buffer has been cleared/shrunk, reset our position
+    if (currentSamplesLength < previousSamplesLength) {
+      previousSamplesLength = 0;
+    }
+
+    // Get only the new chunks that haven't been processed yet
+    const newSampleChunks = rawSamples.slice(previousSamplesLength);
+
+    if (newSampleChunks.length > 0) {
+      let dataWasAdded = false;
+      // The rawSamples array is a sequence of chunks, e.g., [ch0, ch1, ch2, ch0, ch1, ch2, ...]
+      // We need to determine the correct channel for each new chunk.
+      newSampleChunks.forEach((channelBatch, index) => {
+        // The actual index in the original rawSamples array
+        const originalIndex = previousSamplesLength + index;
+        // The channel index is the original index modulo the number of channels
+        const chIndex = originalIndex % numChannels;
+
+        if (lines[chIndex] && channelBatch && channelBatch.length > 0) {
+          // Extract just the voltage values into a Float32Array
+          const values = new Float32Array(channelBatch.map(s => s.value));
+          lines[chIndex].shiftAdd(values);
+          dataWasAdded = true;
         }
+      });
+
+      if (dataWasAdded) {
+        // Trigger a re-render in EegRenderer
+        setDataVersion(v => v + 1);
       }
     }
-  }, [rawSamples]); // Re-run when new rawSamples arrive
 
-  // Effect for smooth sample display at controlled rate
+    // Update the ref to the new length for the next run
+    lastProcessedLengthRef.current = currentSamplesLength;
+
+  }, [rawSamples, linesReady, activeView]); // Re-run when new rawSamples arrive or lines are ready
+
+  // Reset processed index when WebGL lines are recreated or view changes
   useEffect(() => {
-    if (activeViewRef.current === 'signalGraph' && linesReady) {
-      const displayInterval = 1000 / DISPLAY_FPS; // ~16.67ms for 60 FPS
-      
-      const processSampleQueue = () => {
-        const lines = dataRef.current;
-        if (lines.length > 0 && sampleQueueRef.current.length > 0) {
-          // Add samples at controlled rate for smooth scrolling
-          const samplesToAdd = Math.min(SAMPLES_PER_DISPLAY_FRAME, sampleQueueRef.current.length);
-          
-          for (let i = 0; i < samplesToAdd; i++) {
-            const sample = sampleQueueRef.current.shift();
-            if (sample) {
-              // sample is now an EegSample object
-              const value = (sample as any).value;
-              const channelSample = new Float32Array([value]);
-              // This part needs to be adapted based on how channels are handled in the queue
-              // Assuming the queue stores samples for all channels for a single time point
-              if (Array.isArray(sample)) {
-                sample.forEach((channelSampleData, chIndex) => {
-                  if (lines[chIndex] && channelSampleData) {
-                    const value = (channelSampleData as any).value;
-                    lines[chIndex].shiftAdd(new Float32Array([value]));
-                  }
-                });
-              }
-            }
-          }
-          
-          if (samplesToAdd > 0) {
-            setDataVersion(v => v + 1);
-          }
-        }
-      };
-
-      displayIntervalRef.current = setInterval(processSampleQueue, displayInterval);
-
-      return () => {
-        if (displayIntervalRef.current) {
-          clearInterval(displayIntervalRef.current);
-          displayIntervalRef.current = null;
-        }
-      };
-    }
-  }, [linesReady, activeView]); // Re-run when lines are ready or view changes
-
-  // Reset processed index and sample queue when WebGL lines are recreated
-  useEffect(() => {
-    lastProcessedIndexRef.current = 0;
-    sampleQueueRef.current = []; // Clear the sample queue
-    console.log('[EegMonitor] Reset processed index and cleared sample queue due to lines recreation');
-  }, [linesReady]);
+    lastProcessedLengthRef.current = 0;
+    console.log('[EegMonitor] Reset processed data index');
+  }, [linesReady, activeView]);
   
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
@@ -534,15 +496,6 @@ export default function EegMonitorWebGL() {
     }
   }, [activeView, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
 
-  // Cleanup effect for display interval
-  useEffect(() => {
-    return () => {
-      if (displayIntervalRef.current) {
-        clearInterval(displayIntervalRef.current);
-        displayIntervalRef.current = null;
-      }
-    };
-  }, []);
 
   return (
     <div className="h-screen w-screen bg-gray-900 flex flex-col">

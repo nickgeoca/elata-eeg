@@ -72,11 +72,22 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       const newSamples = [...prevSamples, ...newSampleChunks];
       sampleTimestamps.current.push(now);
       
-      // Implement circular buffer - remove old samples if we exceed the limit
+      // Implement a robust circular buffer
       if (newSamples.length > MAX_SAMPLE_CHUNKS) {
-        const removeCount = newSamples.length - MAX_SAMPLE_CHUNKS;
-        sampleTimestamps.current.splice(0, removeCount);
-        return newSamples.slice(removeCount);
+        const numChannels = config?.channels?.length || 1;
+        const excessChunks = newSamples.length - MAX_SAMPLE_CHUNKS;
+
+        // We need to remove enough chunks to get back under the limit.
+        // This must be a multiple of the number of channels to maintain data alignment.
+        // We use Math.ceil to ensure we remove enough full channel blocks.
+        const setsToRemove = Math.ceil(excessChunks / numChannels);
+        const removeCount = setsToRemove * numChannels;
+
+        if (removeCount > 0) {
+          const finalRemoveCount = Math.min(removeCount, newSamples.length);
+          sampleTimestamps.current.splice(0, finalRemoveCount);
+          return newSamples.slice(finalRemoveCount);
+        }
       }
       
       return newSamples;
@@ -87,7 +98,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       cleanupOldData();
       lastCleanupTime.current = now;
     }
-  }, []);
+  }, [config]);
 
   const handleFftData = useCallback((channelIndex: number, fftOutput: number[]) => {
     setFftData(prevFftData => ({
