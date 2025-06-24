@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, ReactNode, useMemo, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, ReactNode, useMemo, useRef, useCallback, useEffect } from 'react';
 import { useEegDataHandler } from '../components/EegDataHandler';
 import { useEegConfig } from '../components/EegConfig';
 
@@ -14,8 +14,16 @@ interface EegSample {
   timestamp: bigint;
 }
 
+interface SampleChunk {
+  config: {
+    channelCount: number;
+    sampleRate: number;
+  };
+  samples: EegSample[];
+}
+
 interface EegDataContextType {
-  rawSamples: EegSample[][]; // A circular buffer of raw data chunks
+  rawSamples: SampleChunk[]; // Changed from EegSample[][] to SampleChunk[]
   fftData: Record<number, number[]>; // Latest FFT data per channel
   config: any;
   dataStatus: {
@@ -26,7 +34,7 @@ interface EegDataContextType {
   };
   // Add methods for data management
   clearOldData: () => void;
-  getLatestSamples: (count?: number) => EegSample[][];
+  getLatestSamples: (count?: number) => SampleChunk[];
 }
 
 // Create the context with a default value
@@ -39,7 +47,7 @@ interface EegDataProviderProps {
 
 export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const { config } = useEegConfig();
-  const [rawSamples, setRawSamples] = useState<EegSample[][]>([]);
+  const [rawSamples, setRawSamples] = useState<SampleChunk[]>([]);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
   const [dataReceived, setDataReceived] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
@@ -56,8 +64,11 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
   const handleSamples = useCallback((channelSamples: { values: Float32Array; timestamps: BigUint64Array }[]) => {
     const now = Date.now();
+    const currentChannelCount = config?.channels?.length || 1;
+    const currentSampleRate = config?.sample_rate || 250;
 
-    const newSampleChunks: EegSample[][] = channelSamples.map(channelData => {
+    // Create SampleChunk objects with metadata for each channel
+    const newSampleChunks: SampleChunk[] = channelSamples.map(channelData => {
       const samples: EegSample[] = [];
       for (let i = 0; i < channelData.values.length; i++) {
         samples.push({
@@ -65,26 +76,37 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           timestamp: channelData.timestamps[i],
         });
       }
-      return samples;
+      return {
+        config: {
+          channelCount: currentChannelCount,
+          sampleRate: currentSampleRate,
+        },
+        samples,
+      };
     });
 
     setRawSamples(prevSamples => {
       const newSamples = [...prevSamples, ...newSampleChunks];
-      sampleTimestamps.current.push(now);
+      sampleTimestamps.current.push(...Array(newSampleChunks.length).fill(now));
       
-      // Implement a robust circular buffer
+      // Implement channel-agnostic buffer trimming
       if (newSamples.length > MAX_SAMPLE_CHUNKS) {
-        const numChannels = config?.channels?.length || 1;
-        const excessChunks = newSamples.length - MAX_SAMPLE_CHUNKS;
-
-        // We need to remove enough chunks to get back under the limit.
-        // This must be a multiple of the number of channels to maintain data alignment.
-        // We use Math.ceil to ensure we remove enough full channel blocks.
-        const setsToRemove = Math.ceil(excessChunks / numChannels);
-        const removeCount = setsToRemove * numChannels;
-
-        if (removeCount > 0) {
-          const finalRemoveCount = Math.min(removeCount, newSamples.length);
+        // Calculate how many complete channel sets to remove
+        let totalChannels = 0;
+        let chunksToRemove = 0;
+        
+        for (const chunk of newSamples) {
+          totalChannels += chunk.config.channelCount;
+          chunksToRemove++;
+          if (totalChannels >= MAX_SAMPLE_CHUNKS * currentChannelCount) {
+            break;
+          }
+        }
+        
+        // Remove excess chunks and corresponding timestamps
+        if (chunksToRemove > 0) {
+          const excessChunks = newSamples.length - MAX_SAMPLE_CHUNKS;
+          const finalRemoveCount = Math.min(excessChunks, chunksToRemove);
           sampleTimestamps.current.splice(0, finalRemoveCount);
           return newSamples.slice(finalRemoveCount);
         }
@@ -134,6 +156,13 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const getLatestSamples = useCallback((count: number = 10) => {
     return rawSamples.slice(-count);
   }, [rawSamples]);
+
+  // Clear buffer when configuration changes to prevent misalignment
+  useEffect(() => {
+    setRawSamples([]);
+    sampleTimestamps.current = [];
+    console.log('[EegDataContext] Cleared buffer due to configuration change');
+  }, [config?.channels?.length, config?.sample_rate]);
 
   // Handle WebSocket status changes to detect reconnections
   const handleDataUpdate = useCallback((received: boolean) => {

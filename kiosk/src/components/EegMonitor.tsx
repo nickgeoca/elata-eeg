@@ -365,25 +365,42 @@ export default function EegMonitorWebGL() {
 
     if (newSampleChunks.length > 0) {
       let dataWasAdded = false;
-      // The rawSamples array is a sequence of chunks, e.g., [ch0, ch1, ch2, ch0, ch1, ch2, ...]
-      // We need to determine the correct channel for each new chunk.
-      newSampleChunks.forEach((channelBatch, index) => {
-        // The actual index in the original rawSamples array
-        const originalIndex = previousSamplesLength + index;
-        // The channel index is the original index modulo the number of channels
-        const chIndex = originalIndex % numChannels;
-
-        if (lines[chIndex] && channelBatch && channelBatch.length > 0) {
-          // Extract just the voltage values into a Float32Array
-          const values = new Float32Array(channelBatch.map(s => s.value));
-          lines[chIndex].shiftAdd(values);
-          dataWasAdded = true;
+      let totalSamplesProcessed = 0;
+      let totalChunksProcessed = 0;
+      
+      newSampleChunks.forEach((sampleChunk) => {
+        const chunkChannelCount = sampleChunk.config.channelCount;
+        const samples = sampleChunk.samples;
+        
+        if (samples && samples.length > 0) {
+          totalChunksProcessed++;
+          totalSamplesProcessed += samples.length;
+          
+          // Group samples by channel for efficient batch processing
+          const channelBatches: Record<number, number[]> = {};
+          
+          samples.forEach((sample, sampleIndex) => {
+            const chIndex = sampleIndex % chunkChannelCount;
+            if (!channelBatches[chIndex]) {
+              channelBatches[chIndex] = [];
+            }
+            channelBatches[chIndex].push(sample.value);
+          });
+          
+          // Add batched samples to WebGL lines
+          Object.entries(channelBatches).forEach(([chIndexStr, values]) => {
+            const chIndex = parseInt(chIndexStr);
+            if (lines[chIndex]) {
+              lines[chIndex].shiftAdd(new Float32Array(values));
+              dataWasAdded = true;
+            }
+          });
         }
       });
 
       if (dataWasAdded) {
-        // Trigger a re-render in EegRenderer
         setDataVersion(v => v + 1);
+        console.log(`Processed ${totalChunksProcessed} chunks with ${totalSamplesProcessed} samples`);
       }
     }
 
@@ -391,6 +408,34 @@ export default function EegMonitorWebGL() {
     lastProcessedLengthRef.current = currentSamplesLength;
 
   }, [rawSamples, linesReady, activeView]); // Re-run when new rawSamples arrive or lines are ready
+
+  // Update circular graph data when rawSamples change
+  useEffect(() => {
+    if (activeView === 'circularGraph' && rawSamples.length > 0) {
+      // Convert SampleChunk[] to number[][] for circular graph
+      const channelData: number[][] = [];
+      const numChannels = config?.channels?.length || 0;
+      
+      // Initialize arrays for each channel
+      for (let i = 0; i < numChannels; i++) {
+        channelData[i] = [];
+      }
+      
+      // Process chunks and extract samples by channel
+      rawSamples.forEach((sampleChunk, chunkIndex) => {
+        const chunkChannelCount = sampleChunk.config.channelCount;
+        const chIndex = chunkIndex % chunkChannelCount;
+        
+        if (chIndex < numChannels && sampleChunk.samples) {
+          // Add all sample values from this chunk to the appropriate channel
+          const values = sampleChunk.samples.map(s => s.value);
+          channelData[chIndex].push(...values);
+        }
+      });
+      
+      setCircularGraphData(channelData);
+    }
+  }, [rawSamples, activeView, config?.channels?.length]);
 
   // Reset processed index when WebGL lines are recreated or view changes
   useEffect(() => {
