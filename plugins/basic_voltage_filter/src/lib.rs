@@ -108,7 +108,7 @@ impl BasicVoltageFilterPlugin {
         }
 
         Ok(FilteredEegPacket {
-            timestamp: packet.timestamp,
+            timestamp: packet.timestamps.first().cloned().unwrap_or(0),
             source_frame_id: packet.frame_id,
             filtered_samples: filtered_samples.into(),
             channel_count: self.config.num_channels,

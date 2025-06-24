@@ -4,7 +4,7 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
-use log::{info, warn, debug, error};
+use log::{info, warn, debug, error, trace};
 use std::collections::VecDeque;
 use std::thread; // Add this import
 
@@ -271,8 +271,10 @@ fn spawn_interrupt_and_processing_tasks(
             match drdy_pin.poll_interrupt(true, Some(std::time::Duration::from_secs(1))) {
                 Ok(Some(event)) if event.trigger == Trigger::FallingEdge => {
                     // DRDY pin went low, data is ready
+                    debug!("DRDY interrupt received. Reading data from SPI...");
                     match read_data_from_spi(&mut spi, num_channels) {
                         Ok(samples) => {
+                            trace!("Raw data from SPI: {:?}", samples);
                             // Reset error counter on successful read
                             consecutive_errors = 0;
 
@@ -317,8 +319,7 @@ fn spawn_interrupt_and_processing_tasks(
                     if !interrupt_running.load(Ordering::SeqCst) {
                         break;
                     }
-                    // No need to log timeout every second if running normally
-                    // debug!("Interrupt timeout - no data ready");
+                    warn!("DRDY interrupt poll timed out after 1 second. No data ready from ADS1299.");
                 },
                 Err(e) => {
                     error!("Error polling for interrupt: {:?}", e);
@@ -414,17 +415,18 @@ fn spawn_interrupt_and_processing_tasks(
                         debug!("Sending batch of {} samples (sample_count: {})",
                             timestamps.len(), sample_count);
 
-                        // Create AdcData for each channel with the latest sample
-                        let mut data_vec = Vec::new();
-                        let timestamp = *timestamps.back().unwrap_or(&0);
-                        
-                        for (channel_idx, channel) in config.channels.iter().enumerate() {
-                            if let Some(latest_raw) = raw_sample_buffer.get(channel_idx).and_then(|v| v.back()) {
-                                data_vec.push(AdcData {
-                                    channel: *channel,
-                                    value: *latest_raw,
-                                    timestamp,
-                                });
+                        // Create AdcData for all samples in the batch
+                        let mut data_vec = Vec::with_capacity(timestamps.len() * num_channels);
+                        for i in 0..timestamps.len() {
+                            let timestamp = timestamps[i];
+                            for (channel_idx, &channel_num) in config.channels.iter().enumerate() {
+                                if let Some(raw_value) = raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)) {
+                                    data_vec.push(AdcData {
+                                        channel: channel_num,
+                                        value: *raw_value,
+                                        timestamp,
+                                    });
+                                }
                             }
                         }
 
@@ -476,17 +478,18 @@ fn spawn_interrupt_and_processing_tasks(
         if !timestamps.is_empty() {
             debug!("Sending final batch of {} samples before stopping", timestamps.len());
 
-            // Create AdcData for each channel with the latest sample
-            let mut data_vec = Vec::new();
-            let timestamp = *timestamps.back().unwrap_or(&0);
-            
-            for (channel_idx, channel) in config.channels.iter().enumerate() {
-                if let Some(latest_raw) = raw_sample_buffer.get(channel_idx).and_then(|v| v.back()) {
-                    data_vec.push(AdcData {
-                        channel: *channel,
-                        value: *latest_raw,
-                        timestamp,
-                    });
+            // Create AdcData for all samples in the batch
+            let mut data_vec = Vec::with_capacity(timestamps.len() * num_channels);
+            for i in 0..timestamps.len() {
+                let timestamp = timestamps[i];
+                for (channel_idx, &channel_num) in config.channels.iter().enumerate() {
+                    if let Some(raw_value) = raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)) {
+                        data_vec.push(AdcData {
+                            channel: channel_num,
+                            value: *raw_value,
+                            timestamp,
+                        });
+                    }
                 }
             }
 

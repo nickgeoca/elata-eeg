@@ -4,7 +4,11 @@ import { useRef, useEffect, useLayoutEffect, useState, useMemo } from 'react';
 // @ts-ignore: WebglLine might be missing from types or setY might be, but setY exists at runtime
 import { WebglPlot, ColorRGBA, WebglLine } from 'webgl-plot';
 import { getChannelColor } from '../../../kiosk/src/utils/colorUtils';
-import { FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ } from '../../../kiosk/src/utils/eegConstants'; // Import constants
+
+// Constants for FFT display range (can be adjusted as needed)
+export const FFT_MIN_FREQ_HZ = 1;  // Minimum frequency to display on the FFT plot in Hz
+export const FFT_MAX_FREQ_HZ = 70; // Maximum frequency to display on the FFT plot in Hz
+
 
 const DATA_Y_MAX = 10000.0; // Expected maximum for FFT power data (µV²/Hz)
 const Y_AXIS_LOG_MIN_POWER_CLAMP = 0.01; // Clamp input power to this minimum before log10
@@ -31,25 +35,15 @@ interface LabelInfo {
 
 interface FftRendererProps {
   config: any; // EEG configuration (for sample_rate, channels)
+  fftData: Record<number, number[]>; // FFT data passed as a prop
   containerWidth: number;
   containerHeight: number;
   targetFps?: number; // Optional, for controlling update rate
 }
 
-// Interface for DSP WebSocket response
-interface ChannelFftResult {
-  power: number[];
-  frequencies: number[];
-}
-
-interface BrainWavesAppletResponse {
-  timestamp: number;
-  fft_results: ChannelFftResult[];
-  error?: string;
-}
-
 export function AppletFftRenderer({ // Renamed from FftRenderer
   config,
+  fftData,
   containerWidth,
   containerHeight,
   targetFps = 30, // Default FFT update FPS
@@ -61,127 +55,10 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
   const gridLinesRef = useRef<WebglLine[]>([]); // Holds WebglLine objects for the grid
   const animationFrameIdRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
-  const wsRef = useRef<WebSocket | null>(null);
-  const [fftData, setFftData] = useState<ChannelFftResult[]>([]);
-  const [wsError, setWsError] = useState<string | null>(null);
 
   const [axisLabels, setAxisLabels] = useState<{ x: LabelInfo[], y: LabelInfo[] }>({ x: [], y: [] });
-
   const plotWidth = useMemo(() => Math.max(0, containerWidth - MARGIN_LEFT - MARGIN_RIGHT), [containerWidth]);
   const plotHeight = useMemo(() => Math.max(0, containerHeight - MARGIN_TOP - MARGIN_BOTTOM), [containerHeight]);
-
-  // WebSocket connection effect
-  useEffect(() => {
-    if (!config || !config.channels || config.channels.length === 0) {
-      return;
-    }
-
-    let reconnectAttempts = 0;
-    const maxReconnectAttempts = 5;
-    let reconnectTimeout: number | null = null;
-
-    const connectWebSocket = () => {
-      try {
-        // Connect to DSP WebSocket endpoint
-        const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-        const wsUrl = `ws://${wsHost}:8080/applet/brain_waves/data`;
-        console.log('[AppletFftRenderer] Attempting to connect to:', wsUrl);
-        const ws = new WebSocket(wsUrl);
-        wsRef.current = ws;
-
-        ws.onopen = () => {
-          console.log('[AppletFftRenderer] Connected to DSP WebSocket');
-          setWsError(null);
-          reconnectAttempts = 0; // Reset reconnection attempts on successful connection
-        };
-
-        ws.onmessage = (event) => {
-          try {
-            const response: BrainWavesAppletResponse = JSON.parse(event.data);
-            
-            console.log('[AppletFftRenderer] Received WebSocket message:', {
-              timestamp: response.timestamp,
-              fft_results_count: response.fft_results?.length || 0,
-              error: response.error
-            });
-            
-            if (response.error) {
-              console.error('[AppletFftRenderer] DSP error:', response.error);
-              setWsError(response.error);
-              return;
-            }
-
-            if (response.fft_results && response.fft_results.length > 0) {
-              // Debug: Log FFT data details
-              response.fft_results.forEach((result, i) => {
-                console.log(`[AppletFftRenderer] Channel ${i}: ${result.power.length} power bins, ${result.frequencies.length} freq bins`);
-                if (result.power.length > 0) {
-                  const maxPower = Math.max(...result.power);
-                  console.log(`[AppletFftRenderer] Channel ${i} max power: ${maxPower}`);
-                }
-              });
-              
-              setFftData(response.fft_results);
-              setWsError(null);
-            } else {
-              console.log('[AppletFftRenderer] No FFT results in message');
-            }
-          } catch (error) {
-            console.error('[AppletFftRenderer] Error parsing WebSocket message:', error);
-            setWsError('Failed to parse FFT data');
-          }
-        };
-
-        ws.onerror = (error) => {
-          console.error('[AppletFftRenderer] WebSocket error:', error);
-          setWsError('WebSocket connection error');
-        };
-
-        ws.onclose = (event) => {
-          console.log('[AppletFftRenderer] WebSocket connection closed', {
-            code: event.code,
-            reason: event.reason,
-            wasClean: event.wasClean,
-            reconnectAttempts
-          });
-          wsRef.current = null;
-          
-          // Only attempt to reconnect if it wasn't a clean close and we haven't exceeded max attempts
-          if (!event.wasClean && event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
-            reconnectAttempts++;
-            const delay = Math.min(2000 * reconnectAttempts, 10000); // Exponential backoff, max 10s
-            console.log(`[AppletFftRenderer] Attempting to reconnect in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
-            reconnectTimeout = window.setTimeout(connectWebSocket, delay);
-          } else if (reconnectAttempts >= maxReconnectAttempts) {
-            console.error('[AppletFftRenderer] Max reconnection attempts reached');
-            setWsError('Connection failed after multiple attempts');
-          }
-        };
-      } catch (error) {
-        console.error('[AppletFftRenderer] Failed to create WebSocket:', error);
-        setWsError('Failed to connect to DSP service');
-      }
-    };
-
-    connectWebSocket();
-
-    return () => {
-      // Clear any pending reconnection timeout
-      if (reconnectTimeout) {
-        clearTimeout(reconnectTimeout);
-        reconnectTimeout = null;
-      }
-      
-      if (wsRef.current) {
-        // Prevent the onclose handler from trying to reconnect
-        // when we are intentionally closing due to unmount.
-        wsRef.current.onclose = null;
-        wsRef.current.close();
-        wsRef.current = null;
-        console.log('[AppletFftRenderer] WebSocket intentionally closed on unmount.');
-      }
-    };
-  }, [config]);
 
   // Initialize WebGL context and plot instance
   useLayoutEffect(() => {
@@ -314,135 +191,70 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
 
   }, [plotWidth, plotHeight, FFT_MIN_FREQ_HZ, FFT_MAX_FREQ_HZ]);
 
-  // Effect to create/update FFT lines based on WebSocket data
+  // Effect to create/update FFT lines
   useEffect(() => {
-    setFftLinesReady(false); 
-
     if (!wglpRef.current || !config || !config.channels || !config.sample_rate || containerWidth <= 0) {
-      if (linesRef.current.length > 0) {
-        try {
-          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
-            wglpRef.current.removeAllLines();
-          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
-            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
-          } else {
-            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
-          }
-        } catch (error) {
-          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
-        }
-        linesRef.current = [];
-      }
       return;
     }
-
+    const wglp = wglpRef.current;
     const numChannels = config.channels.length;
+    const sampleRate = config.sample_rate;
+    const firstChannelData = Object.values(fftData)[0];
+    const numFreqBins = firstChannelData ? firstChannelData.length : 0;
 
-    if (numChannels === 0 || fftData.length === 0) {
+    if (numChannels === 0 || numFreqBins === 0) {
       if (linesRef.current.length > 0) {
-        try {
-          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
-            wglpRef.current.removeAllLines();
-          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
-            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
-          } else {
-            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
-          }
-        } catch (error) {
-          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
-        }
+        linesRef.current.forEach(line => wglp.removeLine(line));
         linesRef.current = [];
       }
       return;
     }
 
-    // Use the first channel's frequency data to determine the relevant frequency range
-    const firstChannelFreqs = fftData[0]?.frequencies || [];
+    // Calculate frequency bins and their corresponding x-coordinates
+    const freqStep = sampleRate / (2 * (numFreqBins - 1));
     const relevantFreqIndices: number[] = [];
     const xCoords: number[] = [];
 
-    firstChannelFreqs.forEach((freq, index) => {
+    for (let i = 0; i < numFreqBins; i++) {
+      const freq = i * freqStep;
       if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
-        relevantFreqIndices.push(index);
+        relevantFreqIndices.push(i);
         const normalizedX = 2 * (freq - FFT_MIN_FREQ_HZ) / (FFT_MAX_FREQ_HZ - FFT_MIN_FREQ_HZ) - 1;
         xCoords.push(normalizedX);
       }
-    });
-
-    if (xCoords.length === 0) {
-      console.warn(`[AppletFftRenderer] No frequency bins found in the range ${FFT_MIN_FREQ_HZ}-${FFT_MAX_FREQ_HZ} Hz.`);
-      if (linesRef.current.length > 0) {
-        try {
-          if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
-            wglpRef.current.removeAllLines();
-          } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
-            linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
-          } else {
-            console.warn('[AppletFftRenderer] No remove method available for FFT lines');
-          }
-        } catch (error) {
-          console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
-        }
-        linesRef.current = [];
-      }
-      return;
     }
 
-    // Clear existing lines
-    if (linesRef.current.length > 0) {
-      try {
-        if (wglpRef.current && typeof wglpRef.current.removeAllLines === 'function') {
-          wglpRef.current.removeAllLines();
-        } else if (wglpRef.current && typeof wglpRef.current.removeLine === 'function') {
-          linesRef.current.forEach(line => wglpRef.current!.removeLine(line));
-        } else {
-          console.warn('[AppletFftRenderer] No remove method available for FFT lines');
-        }
-      } catch (error) {
-        console.warn('[AppletFftRenderer] Error clearing FFT lines:', error);
-      }
-    }
-    linesRef.current = [];
-
-    const newLines: WebglLine[] = [];
-
-    for (let i = 0; i < numChannels; i++) {
-      const colorTuple = getChannelColor(i);
-      const color = new ColorRGBA(colorTuple[0], colorTuple[1], colorTuple[2], 1);
-      
-      const line = new WebglLine(color, xCoords.length);
-      line.lineWidth = 1.5;
-      
-      if (line.xy) {
+    // Recreate lines if channel count or frequency bins change
+    if (linesRef.current.length !== numChannels || (linesRef.current[0] && linesRef.current[0].numPoints !== xCoords.length)) {
+      linesRef.current.forEach(line => wglp.removeLine(line));
+      const newLines: WebglLine[] = [];
+      for (let i = 0; i < numChannels; i++) {
+        const chIndex = config.channels[i];
+        const colorTuple = getChannelColor(chIndex);
+        const color = new ColorRGBA(colorTuple[0], colorTuple[1], colorTuple[2], 1);
+        const line = new WebglLine(color, xCoords.length);
+        line.lineWidth = 1.5;
+        
+        // Set initial X coordinates
         for (let j = 0; j < xCoords.length; j++) {
-          if ((j * 2 + 1) < line.xy.length) { 
-            line.xy[j * 2] = xCoords[j];         
-            line.xy[j * 2 + 1] = -0.5; // Default Y position          
-          }
+          line.xy[j * 2] = xCoords[j];
+          line.xy[j * 2 + 1] = -0.5; // Default Y
         }
+        
+        line.scaleY = 2.0;
+        line.offsetY = 0;
+        wglp.addLine(line);
+        newLines.push(line);
       }
-
-      line.scaleY = 2.0;
-      line.offsetY = 0;
-
-      newLines.push(line);
-      if (wglpRef.current) {
-        wglpRef.current.addLine(line);
-      }
+      linesRef.current = newLines;
     }
+    setFftLinesReady(true);
 
-    linesRef.current = newLines;
-    setFftLinesReady(true); 
+  }, [config, containerWidth, plotWidth, fftData]);
 
-  }, [config, containerWidth, containerHeight, fftData]);
-
-  // Animation loop to update FFT lines with WebSocket data
+  // Animation loop to update FFT lines with new data
   useEffect(() => {
-    if (!wglpRef.current || !fftLinesReady || linesRef.current.length === 0 || fftData.length === 0) {
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
-        animationFrameIdRef.current = null;
-      }
+    if (!wglpRef.current || !fftLinesReady || linesRef.current.length === 0 || Object.keys(fftData).length === 0) {
       return;
     }
 
@@ -456,33 +268,28 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       }
       lastUpdateTimeRef.current = timestamp;
 
-      const activeChannels = config?.channels?.length || 0;
+      const sampleRate = config.sample_rate;
+      const firstChannelData = Object.values(fftData)[0];
+      const numFreqBins = firstChannelData ? firstChannelData.length : 0;
+      const freqStep = sampleRate / (2 * (numFreqBins - 1));
+      
+      const relevantFreqIndices: number[] = [];
+      for (let i = 0; i < numFreqBins; i++) {
+        const freq = i * freqStep;
+        if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
+          relevantFreqIndices.push(i);
+        }
+      }
 
-      for (let i = 0; i < activeChannels && i < fftData.length; i++) {
-        const line = linesRef.current[i];
-        const channelFftResult = fftData[i];
+      linesRef.current.forEach((line, lineIndex) => {
+        const chIndex = config.channels[lineIndex];
+        const channelPowerData = fftData[chIndex];
 
-        if (line && channelFftResult && channelFftResult.power && channelFftResult.frequencies) {
-          const frequencies = channelFftResult.frequencies;
-          const powerData = channelFftResult.power;
+        if (line && channelPowerData && line.numPoints === relevantFreqIndices.length) {
+          for (let j = 0; j < relevantFreqIndices.length; j++) {
+            const fftBinIndex = relevantFreqIndices[j];
+            let currentMagnitude = channelPowerData[fftBinIndex] || 0;
 
-          // Find relevant frequency indices for this channel
-          const relevantIndices: number[] = [];
-          frequencies.forEach((freq, index) => {
-            if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
-              relevantIndices.push(index);
-            }
-          });
-
-          if (line.numPoints !== relevantIndices.length) {
-            continue; 
-          }
-
-          for (let j = 0; j < relevantIndices.length; j++) {
-            const fftBinIndex = relevantIndices[j];
-            let currentMagnitude = powerData[fftBinIndex] || 0;
-
-            // Clamp very small values to prevent log issues
             if (currentMagnitude <= 0 || !isFinite(currentMagnitude)) {
               currentMagnitude = Y_AXIS_LOG_MIN_POWER_CLAMP;
             }
@@ -493,22 +300,11 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
             if (!isFinite(normalizedMagnitude)) {
                 normalizedMagnitude = -0.5;
             }
-
-            if (line.xy && (j * 2 + 1) < line.xy.length) {
-                line.xy[j * 2 + 1] = normalizedMagnitude;
-            }
-          }
-        } else if (line) {
-          // No data available, set to baseline
-          if (line.xy) {
-            for (let j = 0; j < line.numPoints; j++) {
-                if ((j * 2 + 1) < line.xy.length) {
-                    line.xy[j * 2 + 1] = -0.5; 
-                }
-            }
+            line.xy[j * 2 + 1] = normalizedMagnitude;
           }
         }
-      }
+      });
+      
       wglpRef.current?.update();
     };
 
@@ -520,7 +316,7 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
         animationFrameIdRef.current = null;
       }
     };
-  }, [fftLinesReady, fftData, config, targetFps, plotWidth, plotHeight]); 
+  }, [fftLinesReady, fftData, config, targetFps]);
 
   return (
     <div style={{ width: containerWidth, height: containerHeight, position: 'relative', backgroundColor: `rgba(${CANVAS_BG_COLOR.r*255}, ${CANVAS_BG_COLOR.g*255}, ${CANVAS_BG_COLOR.b*255}, ${CANVAS_BG_COLOR.a})` }}>
@@ -532,23 +328,6 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
           display: 'block',
         }}
       />
-      {/* Error display */}
-      {wsError && (
-        <div
-          style={{
-            position: 'absolute',
-            top: 10,
-            left: 10,
-            color: '#ff6b6b',
-            fontSize: '12px',
-            backgroundColor: 'rgba(0, 0, 0, 0.7)',
-            padding: '5px 10px',
-            borderRadius: '3px',
-          }}
-        >
-          DSP Error: {wsError}
-        </div>
-      )}
       {/* X-Axis Labels */}
       {axisLabels.x.map((label, index) => (
         <div

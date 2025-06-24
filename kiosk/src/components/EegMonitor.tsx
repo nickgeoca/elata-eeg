@@ -1,15 +1,14 @@
 'use client';
 import React from 'react'; // Added to resolve React.Fragment error
 
-import { useRef, useState, useEffect, useCallback, useLayoutEffect } from 'react';
+import { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { useEegConfig } from './EegConfig';
 // EegConfigDisplay is removed as we are inlining and modifying its logic.
 // EegChannelConfig is also not used in the settings panel.
-import { useEegDataHandler } from './EegDataHandler';
 import { EegRenderer } from './EegRenderer';
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
-import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS } from '../utils/eegConstants';
+import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS, DISPLAY_FPS, SAMPLES_PER_DISPLAY_FRAME } from '../utils/eegConstants';
 import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
@@ -17,41 +16,49 @@ import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
 import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWavesDisplay';
 import { CircularGraphWrapper } from './CircularGraphWrapper';
+import { useEegData } from '../context/EegDataContext';
 
 export default function EegMonitorWebGL() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const windowSizeRef = useRef<number>(500); // Default, will be updated based on config
-  const dataRef = useRef<any[]>([]); // Re-added definition
-  const [dataReceived, setDataReceived] = useState(false);
-  const [driverError, setDriverError] = useState<string | null>(null);
-  // Ref to hold the last update timestamp for each channel's data chunk
-  const channelTimestampRef = useRef<number[]>([]);
-  // Ref to hold the single latest timestamp of any received data packet
-  const latestTimestampRef = useRef<number>(performance.now());
+  const dataRef = useRef<any[]>([]); // Holds the WebGL line objects
+  const canvasRef = useRef<HTMLCanvasElement>(null); // Re-added for EegRenderer
+  const latestTimestampRef = useRef<number>(0); // Re-added for EegRenderer
+  const debugInfoRef = useRef({ // Re-added for EegRenderer
+    lastPacketTime: 0,
+    packetsReceived: 0,
+    samplesProcessed: 0,
+  });
   // Removed canvasDimensions state, EegRenderer handles this
 
   type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph'; // fftGraph removed
   type ActiveView = DataView | 'settings';
  
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
+  const activeViewRef = useRef(activeView);
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
   const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph'); // To store the last non-settings view
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
-  const fftDataRef = useRef<Record<number, number[]>>({}); // Ref to store latest FFT data for all channels
-  const [fftDataVersion, setFftDataVersion] = useState(0); // Version counter for fftDataRef updates
   const [circularGraphData, setCircularGraphData] = useState<number[][]>([]); // State for circular graph data
+  
+  // Sample queue for smooth display - stores individual samples to be added at display rate
+  const sampleQueueRef = useRef<any[][]>([]); // Queue of individual samples [channel][sample]
+  const displayIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
-  const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.5); // Added for UI Voltage Scaling
+  const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.25); // Added for UI Voltage Scaling
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
   const [canScrollSettings, setCanScrollSettings] = useState(false); // True if settings panel has enough content to scroll
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
-  // Get configuration from context
-  const { config, status: configStatus, refreshConfig } = useEegConfig();
+  // Get all data and config from the new central context
+  const { rawSamples, fftData, config, dataStatus } = useEegData();
+  const { dataReceived, driverError, wsStatus } = dataStatus;
+  const { status: configStatus, refreshConfig } = useEegConfig(); // Keep for settings UI
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -241,17 +248,6 @@ export default function EegMonitorWebGL() {
     configWebSocket.send(JSON.stringify(newConfigPayload));
   };
 
-  // Debug info reference (ensure it's defined)
-  const debugInfoRef = useRef<{
-    lastPacketTime: number;
-    packetsReceived: number;
-    samplesProcessed: number;
-  }>({
-    lastPacketTime: 0,
-    packetsReceived: 0,
-    samplesProcessed: 0
-  });
-
   // Use the command WebSocket context
   const {
     wsConnected,
@@ -263,93 +259,6 @@ export default function EegMonitorWebGL() {
   } = useCommandWebSocket();
 
   // Update canvas dimensions based on container size
-  // Effect to update the windowSizeRef based on config and container width
-  useEffect(() => {
-    // Function to calculate and update windowSizeRef
-    const updateWindowSize = () => {
-      if (containerRef.current && config?.sample_rate) {
-        const { width } = containerRef.current.getBoundingClientRect();
-        const sampleRate = config.sample_rate;
-        // Calculate samples needed based on container width, sample rate, and window duration
-        const samplesNeeded = Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000));
-        windowSizeRef.current = samplesNeeded;
-        console.log(`Window size ref updated: ${samplesNeeded} samples (based on width ${width}, rate ${sampleRate})`);
-      }
-    };
-    
-    // Update initially when config is available
-    updateWindowSize();
-    
-    // Optional: Add resize listener if window size should adapt dynamically to container resize
-    // Note: EegRenderer already uses ResizeObserver, so this might be redundant
-    // If needed, consider using the ResizeObserver from EegRenderer or adding one here.
-    // For now, we only update based on config load.
-  }, [config?.sample_rate]); // Remove containerRef dependency here, handled by ResizeObserver below
-
-  // Handle data updates (memoized with useCallback)
-  const handleDataUpdate = useCallback((received: boolean) => {
-    setDataReceived(received);
-    if (received) {
-      setDataVersion(v => v + 1);
-      
-      // Update circular graph data if in circular view
-      if (activeView === 'circularGraph' && dataRef.current) {
-        const convertedData: number[][] = [];
-        for (let i = 0; i < dataRef.current.length; i++) {
-          const line = dataRef.current[i];
-          if (line && line.xy) {
-            // Extract Y values from WebGL line data
-            const yValues = [];
-            for (let j = 1; j < line.xy.length; j += 2) {
-              yValues.push(line.xy[j]);
-            }
-            convertedData.push(yValues);
-          }
-        }
-        setCircularGraphData(convertedData);
-      }
-    }
-  }, [setDataReceived, activeView, setDataVersion]); // setDataReceived is stable
-
-  // Handle driver errors (memoized with useCallback)
-  const handleDriverError = useCallback((error: string) => {
-    console.error("Driver error:", error);
-    setDriverError(error);
-    // Auto-clear error after 10 seconds
-    const timer = setTimeout(() => setDriverError(null), 10000);
-    // Optional: Cleanup timeout if component unmounts or error changes before timeout fires
-    // return () => clearTimeout(timer); // Note: useCallback doesn't directly support cleanup return like useEffect
-  }, [setDriverError]); // setDriverError is stable
-
-  // Handle FFT data updates
-  const handleFftData = useCallback((channelIndex: number, fftOutput: number[]) => {
-    fftDataRef.current[channelIndex] = fftOutput;
-    setFftDataVersion(v => v + 1);
-    // Optional: Add logging for FFT data if needed for debugging
-    // console.log(`[EegMonitor] Received FFT data for Ch ${channelIndex}:`, fftOutput.slice(0, 5));
-  }, [setFftDataVersion]); // setFftDataVersion is stable
-
-  // Effect to initialize/resize channelTimestampRef based on channel count
-  useEffect(() => {
-    const numChannels = config?.channels?.length || 0;
-    if (numChannels > 0 && channelTimestampRef.current.length !== numChannels) {
-      // Initialize or resize the array, filling with the current time
-      channelTimestampRef.current = Array(numChannels).fill(performance.now());
-      console.log(`Initialized/Resized channelTimestampRef for ${numChannels} channels.`);
-    }
-  }, [config?.channels?.length]); // Depend on the number of channels
-
-  // Get data handler status and debug info
-  const { status, debugInfo } = useEegDataHandler({
-    config,
-    onDataUpdate: handleDataUpdate,
-    onError: handleDriverError,
-    linesRef: dataRef, // Pass dataRef as linesRef (holds WebglStep instances)
-    lastDataChunkTimeRef: channelTimestampRef, // Pass the array ref for per-channel times
-    latestTimestampRef: latestTimestampRef,     // Pass the single ref for the overall latest time
-    debugInfoRef: debugInfoRef, // Pass debugInfoRef for packet counting
-    onFftData: undefined // Applet view handles its own data via WebSocket
-  });
  
   // Effect to update lastActiveDataView when activeView changes (and is not settings)
   useEffect(() => {
@@ -358,193 +267,174 @@ export default function EegMonitorWebGL() {
     }
   }, [activeView]);
 
-  // Removed dedicated useLayoutEffect for ResizeObserver
+  // Effect to setup ResizeObserver to monitor container size
+  useLayoutEffect(() => {
+    const target = containerRef.current;
+    // Only run if the target element exists and we are in a view that shows the graph
+    if (!target || (activeView !== 'signalGraph' && activeView !== 'circularGraph')) {
+      return;
+    }
 
-  // Effect to create WebGL lines when config and CONTAINER SIZE are ready
+    const resizeObserver = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        // Update state with the new dimensions
+        setContainerSize({ width, height });
+      }
+    });
+
+    resizeObserver.observe(target);
+
+    // Set initial size
+    setContainerSize({ width: target.offsetWidth, height: target.offsetHeight });
+
+    // Cleanup observer on unmount or when activeView changes
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [activeView]); // Rerun when the active view changes
+
+  // Effect to create/update WebGL lines when config or container size changes
   // Constants for scaling
   const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const BASE_VISUAL_AMPLITUDE_SCALE = 1; // Renamed from VISUAL_AMPLITUDE_SCALE for UI scaling
+  const REFERENCE_UV_RANGE = 200.0; // The peak-to-peak microvolt range we want to fit in the channel's vertical space by default
   const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
 
   useEffect(() => {
-    // --- ResizeObserver Setup ---
-    let resizeObserver: ResizeObserver | null = null;
-    const target = containerRef.current;
-    let sizeUpdateTimeoutId: NodeJS.Timeout | null = null;
+    const numChannels = config?.channels?.length || 0;
+    const sampleRate = config?.sample_rate;
+    const MIN_VALID_WIDTH = 50;
 
-    // Setup ResizeObserver only for graph views ('signalGraph', 'circularGraph')
-    if ((activeView === 'signalGraph' || activeView === 'circularGraph') && target) { // fftGraph condition removed
-        console.log(`[EegMonitor LineEffect] Setting up ResizeObserver for ${activeView}.`);
-        resizeObserver = new ResizeObserver(entries => {
-          for (let entry of entries) {
-            const { width, height } = entry.contentRect;
-            console.log(`[EegMonitor ResizeObserver] Observed size change: ${width}x${height}. Current activeView: ${activeView}`);
-            
-            // Additional debugging for height issues
-            if (height === 0) {
-              console.warn(`[EegMonitor ResizeObserver] WARNING: Container height is 0! This will make the graph invisible.`);
-              console.log(`[EegMonitor ResizeObserver] Container element:`, target);
-              console.log(`[EegMonitor ResizeObserver] Container computed style:`, target ? window.getComputedStyle(target) : 'N/A');
-              console.log(`[EegMonitor ResizeObserver] Container parent:`, target?.parentElement);
-              console.log(`[EegMonitor ResizeObserver] Container parent computed style:`, target?.parentElement ? window.getComputedStyle(target.parentElement) : 'N/A');
-            }
-            
-            // Clear any existing timeout to avoid multiple rapid updates
-            if (sizeUpdateTimeoutId) {
-              clearTimeout(sizeUpdateTimeoutId);
-            }
-            
-            // Use a small timeout to ensure the size is stable
-            sizeUpdateTimeoutId = setTimeout(() => {
-              setContainerSize(prevSize => {
-                if (prevSize.width !== width || prevSize.height !== height) {
-                  console.log(`[EegMonitor ResizeObserver] Setting container size: ${width}x${height}`);
-                  return { width, height };
-                }
-                return prevSize;
-              });
-            }, 50); // Small delay to ensure DOM is fully laid out
-          }
-        });
-        resizeObserver.observe(target);
+    // Create or update lines only if necessary
+    if (config && sampleRate && numChannels > 0 && containerSize.width > MIN_VALID_WIDTH) {
+      const initialNumPoints = Math.ceil(sampleRate * (WINDOW_DURATION / 1000));
+      const ySpacing = 2.0 / numChannels;
 
-        // Check initial size when observer is set up
-        const initialRect = target.getBoundingClientRect();
-        if (initialRect.width > 0 && initialRect.height > 0 && (containerSize.width !== initialRect.width || containerSize.height !== initialRect.height)) {
-            console.log(`[EegMonitor ResizeObserver] Setting initial size: ${initialRect.width}x${initialRect.height}`);
-            setContainerSize({ width: initialRect.width, height: initialRect.height });
+      // If number of lines has changed, recreate them
+      if (dataRef.current.length !== numChannels) {
+        console.log(`[EegMonitor] Creating ${numChannels} WebGL lines with ${initialNumPoints} points each.`);
+        const lines: WebglStep[] = [];
+        for (let i = 0; i < numChannels; i++) {
+          const line = new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
+          line.lineSpaceX(-1, 2 / initialNumPoints);
+          lines.push(line);
         }
-    }
-    // --- End ResizeObserver Setup ---
+        dataRef.current = lines;
+        setLinesReady(true);
+      }
 
-
-    console.log(`[EegMonitor LineEffect RUNS] activeView: ${activeView}, containerSize: ${JSON.stringify(containerSize)}, Config: ${!!config}, Channels: ${config?.channels?.length}, ContainerWidth: ${containerSize.width}`);
-
-    // Logic for creating/clearing lines based on activeView
-    if (activeView === 'signalGraph') { // fftGraph condition removed
-      // Add a minimum width threshold to ensure container is properly measured
-      const MIN_VALID_WIDTH = 50; // Minimum width to consider container properly measured
-      
-      // Depend on config, channels, and the container SIZE state
-      // More robust condition checking: config exists, channels array exists and has elements, container width is valid
-      if (config && config.channels && Array.isArray(config.channels) && config.channels.length > 0 && containerSize.width > MIN_VALID_WIDTH) {
-        const numChannels = config.channels.length;
-        const width = containerSize.width; // Use width from state
-        const sampleRate = config.sample_rate || 250; // Use default if needed
-
-        // Calculate points needed based on current width
-        const initialNumPoints = Math.max(10, Math.ceil((width / 800) * (sampleRate * WINDOW_DURATION / 1000))); // Ensure at least 10 points
-
-        console.log(`[EegMonitor] Measured container width: ${width}`); // Log width
-        console.log(`[EegMonitor] Calculated initialNumPoints: ${initialNumPoints}`); // Log points
-        console.log(`[EegMonitor] Container size from state:`, containerSize);
-        console.log(`[EegMonitor] Container element rect:`, containerRef.current?.getBoundingClientRect());
-        console.log(`[EegMonitor] activeView:`, activeView);
-
-      // Skip condition removed to ensure lines are always reconfigured when config.channels changes.
-      // The useEffect dependency on config.channels handles triggering this.
-      console.log(`[EegMonitor LineEffect] Proceeding to create/update lines. Current lines: ${dataRef.current?.length}, Required: ${numChannels}. Current points: ${dataRef.current?.[0]?.numPoints}, Required: ${initialNumPoints}`);
-
-      console.log(`[EegMonitor] Creating/Updating ${numChannels} WebGL lines with ${initialNumPoints} points each (Width: ${width}).`);
-
-      const lines: WebglStep[] = [];
-      const ySpacing = 2.0 / numChannels; // Total Y range is 2 (-1 to 1)
-
-      for (let i = 0; i < numChannels; i++) {
-        // Reuse existing line instance if possible, otherwise create new
-        const line = dataRef.current?.[i] instanceof WebglStep
-                     ? dataRef.current[i]
-                     : new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
-
-        // Ensure numPoints is updated if it changed
-        if (line.numPoints !== initialNumPoints) {
-            line.numPoints = initialNumPoints;
-        }
-
-        // Set color - MOVED TO EegRenderer
-        /*
-        try {
-          const colorTuple = getChannelColor(i);
-          // Ensure color values are in 0-1 range for WebglPlot ColorRGBA
-          line.color = new ColorRGBA(
-            colorTuple[0] / 255,
-            colorTuple[1] / 255,
-            colorTuple[2] / 255,
-            1
-          );
-        } catch {
-          line.color = new ColorRGBA(1, 1, 1, 1); // fallback white
-        }
-        */
-
+      // Always update scaling and positioning as it can change dynamically
+      dataRef.current.forEach((line, i) => {
         line.lineWidth = 1;
-        // Original Scale Y: Convert to microvolts AND scale for visual spacing/amplitude
-        // const calculatedScaleY = (ySpacing * VISUAL_AMPLITUDE_SCALE) * MICROVOLT_CONVERSION_FACTOR;
-        // New calculation using uiVoltageScaleFactor:
-        const finalVisualAmplitudeScale = BASE_VISUAL_AMPLITUDE_SCALE * uiVoltageScaleFactor;
-        
-        // Since we're now using filtered data from the DSP, the data should be in the proper range
-        // Start with a moderate scaling and adjust based on the actual data range
-        const calculatedScaleY = (ySpacing * finalVisualAmplitudeScale) * 1000; // Use 1000 instead of 1e6 for more reasonable scaling
+        const calculatedScaleY = ((ySpacing * MICROVOLT_CONVERSION_FACTOR) / REFERENCE_UV_RANGE) * uiVoltageScaleFactor;
         line.scaleY = calculatedScaleY;
-        console.log(`[EegMonitor LineEffect] Ch ${i}: ySpacing=${ySpacing.toFixed(4)}, finalVisualAmplitudeScale=${finalVisualAmplitudeScale}, calculatedScaleY=${calculatedScaleY} (using filtered data with moderate scaling)`);
-
-        // Center channel i vertically within its allocated space
         line.offsetY = 1 - (i + 0.5) * ySpacing;
+      });
 
-        // Set horizontal spacing
-        line.lineSpaceX(-1, 2 / initialNumPoints);
-
-        lines.push(line);
+      setDataVersion(v => v + 1);
+    } else {
+      // If no channels or invalid config, clear the lines
+      if (dataRef.current.length > 0) {
+        dataRef.current = [];
+        setLinesReady(false);
+        setDataVersion(v => v + 1);
       }
-      dataRef.current = lines;
-      console.log(`[EegMonitor] Assigned ${lines.length} lines to dataRef. Bumping version.`);
-      setLinesReady(true); // Mark lines as ready
-      setDataVersion(v => v + 1); // Increment version
-
-      } else {
-          // This block executes if not in settings view, AND (config is null, or channels are null/empty, or containerSize.width is invalid)
-          // Provide detailed logging for debugging
-          const configExists = !!config;
-          const channelsExist = !!config?.channels;
-          const channelsIsArray = Array.isArray(config?.channels);
-          const channelsLength = config?.channels?.length || 0;
-          const containerWidthValid = containerSize.width > MIN_VALID_WIDTH;
-          
-          console.log(`[EegMonitor LineEffect SKIPPING line creation for ${activeView}] Condition not met:`);
-          console.log(`  - config exists: ${configExists}`);
-          console.log(`  - config.channels exists: ${channelsExist}`);
-          console.log(`  - config.channels is array: ${channelsIsArray}`);
-          console.log(`  - config.channels.length: ${channelsLength}`);
-          console.log(`  - containerSize.width (${containerSize.width}) > MIN_VALID_WIDTH (${MIN_VALID_WIDTH}): ${containerWidthValid}`);
-          
-          if (linesReady || dataRef.current.length > 0) { // If lines were previously ready or data exists
-              console.log(`[EegMonitor LineEffect] Clearing existing lines due to failed conditions.`);
-              dataRef.current = [];
-              setLinesReady(false);
-              setDataVersion(v => v + 1);
-          }
-      }
-    } else { // activeView is 'settings' or 'appletBrainWaves'
-        console.log(`[EegMonitor LineEffect] In ${activeView} view, ensuring lines are cleared (if they existed).`);
-        if (dataRef.current.length > 0 || linesReady) {
-             console.log(`[EegMonitor LineEffect] Clearing lines for ${activeView} view.`);
-             dataRef.current = [];
-             setLinesReady(false);
-             setDataVersion(v => v + 1);
-        }
     }
-    
-    // Cleanup function for the effect
-    return () => {
-        if (resizeObserver && target) {
-            console.log("[EegMonitor LineEffect] Cleaning up ResizeObserver.");
-            resizeObserver.unobserve(target);
-            resizeObserver.disconnect();
+  }, [config?.channels?.length, config?.sample_rate, containerSize.width, uiVoltageScaleFactor]);
+
+  // Ref to track the last processed sample index to avoid reprocessing
+  const lastProcessedIndexRef = useRef<number>(0);
+
+  // Effect for processing new data - queue samples for smooth display
+  useEffect(() => {
+    if (activeViewRef.current === 'signalGraph' && rawSamples.length > 0) {
+      const lines = dataRef.current;
+      if (lines.length > 0) {
+        // Only process new samples since the last processed index
+        const newSamples = rawSamples.slice(lastProcessedIndexRef.current);
+        
+        if (newSamples.length > 0) {
+          // Instead of adding all samples at once, queue them for smooth display
+          newSamples.forEach((samplesBatch) => {
+            if (samplesBatch && samplesBatch.length > 0) {
+              // The batch is now an array of EegSample objects
+              const batchSize = samplesBatch.length;
+              
+              // Queue the EegSample objects directly
+              for (let sampleIndex = 0; sampleIndex < batchSize; sampleIndex++) {
+                const sample = samplesBatch[sampleIndex];
+                if (sample) {
+                  // This assumes newSamples is structured as [channel][sample]
+                  // which needs verification based on context provider.
+                  // For now, let's assume the structure is correct and we queue the sample.
+                  // The queue will hold EegSample objects.
+                  sampleQueueRef.current.push(sample as any);
+                }
+              }
+            }
+          });
+          
+          // Update the last processed index
+          lastProcessedIndexRef.current = rawSamples.length;
+          console.log(`[EegMonitor] Queued ${newSamples.length} batches, queue size: ${sampleQueueRef.current.length}`);
         }
-    };
-    // Depend on config, container size state, activeView, AND uiVoltageScaleFactor
-  }, [config?.channels, config?.sample_rate, containerSize, activeView, uiVoltageScaleFactor]);
+      }
+    }
+  }, [rawSamples]); // Re-run when new rawSamples arrive
+
+  // Effect for smooth sample display at controlled rate
+  useEffect(() => {
+    if (activeViewRef.current === 'signalGraph' && linesReady) {
+      const displayInterval = 1000 / DISPLAY_FPS; // ~16.67ms for 60 FPS
+      
+      const processSampleQueue = () => {
+        const lines = dataRef.current;
+        if (lines.length > 0 && sampleQueueRef.current.length > 0) {
+          // Add samples at controlled rate for smooth scrolling
+          const samplesToAdd = Math.min(SAMPLES_PER_DISPLAY_FRAME, sampleQueueRef.current.length);
+          
+          for (let i = 0; i < samplesToAdd; i++) {
+            const sample = sampleQueueRef.current.shift();
+            if (sample) {
+              // sample is now an EegSample object
+              const value = (sample as any).value;
+              const channelSample = new Float32Array([value]);
+              // This part needs to be adapted based on how channels are handled in the queue
+              // Assuming the queue stores samples for all channels for a single time point
+              if (Array.isArray(sample)) {
+                sample.forEach((channelSampleData, chIndex) => {
+                  if (lines[chIndex] && channelSampleData) {
+                    const value = (channelSampleData as any).value;
+                    lines[chIndex].shiftAdd(new Float32Array([value]));
+                  }
+                });
+              }
+            }
+          }
+          
+          if (samplesToAdd > 0) {
+            setDataVersion(v => v + 1);
+          }
+        }
+      };
+
+      displayIntervalRef.current = setInterval(processSampleQueue, displayInterval);
+
+      return () => {
+        if (displayIntervalRef.current) {
+          clearInterval(displayIntervalRef.current);
+          displayIntervalRef.current = null;
+        }
+      };
+    }
+  }, [linesReady, activeView]); // Re-run when lines are ready or view changes
+
+  // Reset processed index and sample queue when WebGL lines are recreated
+  useEffect(() => {
+    lastProcessedIndexRef.current = 0;
+    sampleQueueRef.current = []; // Clear the sample queue
+    console.log('[EegMonitor] Reset processed index and cleared sample queue due to lines recreation');
+  }, [linesReady]);
   
   // Use the FPS from config with no fallback
   const displayFps = config?.fps || 0;
@@ -568,13 +458,11 @@ export default function EegMonitorWebGL() {
       setActiveView('appletBrainWaves');
     } else if (activeView === 'appletBrainWaves') {
       setActiveView('signalGraph');
-      refreshConfig();
     }
     // If currently in settings, this function shouldn't be called, but handle gracefully
     // by defaulting to signal graph
     else if (activeView === 'settings') {
       setActiveView('signalGraph');
-      refreshConfig();
     }
   };
  
@@ -593,34 +481,6 @@ export default function EegMonitorWebGL() {
     }
   };
   
-  // Effect to handle transition from settings to graph view (signalGraph, circularGraph)
-  useEffect(() => {
-    if ((activeView === 'signalGraph' || activeView === 'circularGraph') && containerRef.current) { // fftGraph condition removed
-      console.log(`[EegMonitor TransitionEffect RUNS for ${activeView}] Scheduling size check.`);
-      
-      // Use a timeout to ensure the DOM has updated after the view switch
-      const transitionTimeoutId = setTimeout(() => {
-        const rect = containerRef.current?.getBoundingClientRect();
-        console.log(`[EegMonitor TransitionEffect TIMEOUT] Measured rect: ${JSON.stringify(rect)}`);
-        if (rect && rect.width > 0) {
-          console.log(`[EegMonitor] Post-transition size check: ${rect.width}x${rect.height}`);
-          // Update container size if it's not already set correctly
-          setContainerSize(prevSize => {
-            if (prevSize.width !== rect.width || prevSize.height !== rect.height) {
-              console.log(`[EegMonitor TransitionEffect TIMEOUT] Updating container size from ${JSON.stringify(prevSize)} to ${rect.width}x${rect.height}`);
-              return { width: rect.width, height: rect.height };
-            }
-            console.log(`[EegMonitor TransitionEffect TIMEOUT] Container size already correct: ${JSON.stringify(prevSize)}`);
-            return prevSize;
-          });
-        } else {
-          console.log(`[EegMonitor TransitionEffect TIMEOUT] Rect not valid or width is 0. rect: ${JSON.stringify(rect)}`);
-        }
-      }, 100); // Small delay to ensure DOM is updated
-      
-      return () => clearTimeout(transitionTimeoutId);
-    }
-  }, [activeView]);
 
   // Effect for settings panel scroll detection
   useEffect(() => {
@@ -674,6 +534,16 @@ export default function EegMonitorWebGL() {
     }
   }, [activeView, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
 
+  // Cleanup effect for display interval
+  useEffect(() => {
+    return () => {
+      if (displayIntervalRef.current) {
+        clearInterval(displayIntervalRef.current);
+        displayIntervalRef.current = null;
+      }
+    };
+  }, []);
+
   return (
     <div className="h-screen w-screen bg-gray-900 flex flex-col">
       {/* Header with controls */}
@@ -685,18 +555,9 @@ export default function EegMonitorWebGL() {
             <span className={`inline-block w-3 h-3 rounded-full mx-2 ${dataReceived ? 'bg-green-500' : 'bg-gray-500'}`}></span>
             <span>{dataReceived ? 'receiving data' : 'no data'}</span>
           </div>
-          {debugInfo && (
-            <div className="ml-4 text-xs text-gray-300">
-              <span>WS: {status} | </span>
-              <span>Conn: {debugInfo.connectionAttempts} | </span>
-              <span>Msgs: {debugInfo.messagesReceived} | </span>
-              <span>Bin: {debugInfo.binaryPacketsReceived} | </span>
-              <span>Text: {debugInfo.textPacketsReceived}</span>
-              {debugInfo.lastError && (
-                <span className="text-red-400"> | Err: {debugInfo.lastError}</span>
-              )}
-            </div>
-          )}
+          <div className="ml-4 text-xs text-gray-300">
+            <span>WS: {wsStatus}</span>
+          </div>
         </div>
         <div className="flex items-baseline space-x-2">
           {/* Use the EegRecordingControls component */}
@@ -946,7 +807,7 @@ export default function EegMonitorWebGL() {
                 {/* Channel labels */}
                 <div className="absolute -left-8 h-full flex flex-col justify-between">
                   {config?.channels && config.channels.length > 0 ? (
-                    config.channels.map((chIdx) => (
+                    config.channels.map((chIdx: number) => (
                       <div key={chIdx} className="text-gray-400 font-medium">Ch{chIdx}</div>
                     ))
                   ) : (
@@ -999,7 +860,6 @@ export default function EegMonitorWebGL() {
           <div className="relative h-full p-2" ref={containerRef}> {/* Added padding for aesthetics */}
             {config && containerSize.width > 0 && containerSize.height > 0 ? (
               <BrainWavesDisplay
-                eegConfig={config}
                 containerWidth={containerSize.width}
                 containerHeight={containerSize.height} // Use full container height
               />

@@ -184,7 +184,7 @@ async fn data_acquisition_loop(
                 let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
                 if min_buffer_size >= batch_size {
                     let mut voltage_samples = Vec::new();
-                    let mut latest_timestamp = 0u64;
+                    let mut sample_timestamps = Vec::new();
 
                     for channel_idx in 0..num_channels {
                         let channel = channel_idx as u8;
@@ -196,14 +196,20 @@ async fn data_acquisition_loop(
                                 (*raw as f32) * (vref_f32 / (1 << 24) as f32)
                             }).collect();
 
-                            if let Some((_, timestamp)) = batch.last() {
-                                latest_timestamp = latest_timestamp.max(*timestamp);
+                            // Collect timestamps from the batch
+                            for &(_, timestamp) in &batch {
+                                sample_timestamps.push(timestamp);
                             }
                             voltage_samples.push(voltages);
                         } else {
                             voltage_samples.push(vec![0.0; batch_size]);
                         }
                     }
+
+                    // Sort timestamps to ensure they are monotonic, just in case.
+                    sample_timestamps.sort_unstable();
+                    // Remove duplicates that might arise from buffering logic
+                    sample_timestamps.dedup();
 
                     let mut flattened_samples = Vec::new();
                     if !voltage_samples.is_empty() {
@@ -218,7 +224,7 @@ async fn data_acquisition_loop(
                     }
 
                     let eeg_packet = EegPacket::new(
-                        latest_timestamp,
+                        sample_timestamps,
                         frame_counter,
                         flattened_samples,
                         num_channels,

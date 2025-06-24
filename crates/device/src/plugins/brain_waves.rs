@@ -218,7 +218,7 @@ impl BrainWaveAnalyzer {
             .unwrap_or(0);
             
         if min_buffer_size >= self.fft_size {
-            Some(self.analyze_brain_waves(eeg_packet.timestamp, eeg_packet.frame_id))
+            Some(self.analyze_brain_waves(eeg_packet.timestamps.first().cloned().unwrap_or(0), eeg_packet.frame_id))
         } else {
             None
         }

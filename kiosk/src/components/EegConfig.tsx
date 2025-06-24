@@ -21,12 +21,14 @@ interface EegConfigContextType {
   config: EegConfig | null;
   status: string;
   refreshConfig: () => void;
+  isConfigReady: boolean;
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
   config: null,
   status: 'Initializing...',
-  refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); } // Default no-op
+  refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); },
+  isConfigReady: false,
 });
 
 // Hook to use the EEG configuration
@@ -37,6 +39,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<EegConfig | null>(null);
   const configRef = useRef<EegConfig | null>(null); // Add a ref for the latest config
   const [status, setStatus] = useState('Initializing...'); // Start as Initializing
+  const [isConfigReady, setIsConfigReady] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef<number>(0);
@@ -45,57 +48,26 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   // Helper function to deeply compare relevant parts of EEG configurations
   // Compares server-provided data against the current state (excluding client-added 'fps')
   const areConfigsEqual = (currentConfig: EegConfig | null, newServerData: any): boolean => {
-    if (!currentConfig) return false; // If no current config, new data means change
+    if (!currentConfig) return false;
+    // Create string representations to safely compare.
+    const currentChannels = JSON.stringify(currentConfig.channels?.slice().sort());
+    const newChannels = JSON.stringify(newServerData.channels?.slice().sort());
 
-    // Compare server-provided fields
-    if (currentConfig.sample_rate !== newServerData.sample_rate) {
-      console.log('Config comparison: sample_rate differs', currentConfig.sample_rate, newServerData.sample_rate);
-      return false;
-    }
-    if (currentConfig.gain !== newServerData.gain) {
-      console.log('Config comparison: gain differs', currentConfig.gain, newServerData.gain);
-      return false;
-    }
-    if (currentConfig.board_driver !== newServerData.board_driver) {
-      console.log('Config comparison: board_driver differs', currentConfig.board_driver, newServerData.board_driver);
-      return false;
-    }
-    if (currentConfig.batch_size !== newServerData.batch_size) {
-      console.log('Config comparison: batch_size differs', currentConfig.batch_size, newServerData.batch_size);
-      return false;
-    }
-    
-    // Special handling for powerline_filter_hz which can be null, undefined, or a number
-    if (currentConfig.powerline_filter_hz !== newServerData.powerline_filter_hz) {
-      console.log('Config comparison: powerline_filter_hz differs',
-        currentConfig.powerline_filter_hz, newServerData.powerline_filter_hz,
-        'Types:', typeof currentConfig.powerline_filter_hz, typeof newServerData.powerline_filter_hz);
-      return false;
-    }
-
-    // Compare channels array
-    if (!newServerData.channels || !Array.isArray(newServerData.channels) ||
-        currentConfig.channels.length !== newServerData.channels.length) {
-      console.log('Config comparison: channels array structure differs',
-        currentConfig.channels, newServerData.channels);
-      return false;
-    }
-    
-    for (let i = 0; i < currentConfig.channels.length; i++) {
-      if (currentConfig.channels[i] !== newServerData.channels[i]) {
-        console.log('Config comparison: channel at index', i, 'differs',
-          currentConfig.channels[i], newServerData.channels[i]);
-        return false;
-      }
-    }
-
-    console.log('Config comparison: configs are equal');
-    return true;
+    return (
+      currentConfig.sample_rate === newServerData.sample_rate &&
+      currentConfig.gain === newServerData.gain &&
+      currentConfig.board_driver === newServerData.board_driver &&
+      currentConfig.batch_size === newServerData.batch_size &&
+      currentConfig.powerline_filter_hz === newServerData.powerline_filter_hz &&
+      currentChannels === newChannels
+    );
   };
 
-  const connectWebSocket = useCallback(() => {
-    // Clear any existing reconnect timeout
-    if (reconnectTimeoutRef.current) {
+  // Main connection effect
+  useEffect(() => {
+    const connectWebSocket = () => {
+      // Clear any existing reconnect timeout
+      if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = null;
     }
@@ -142,37 +114,24 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Assume it's a full config object (variable 'data' holds the parsed new server data)
-        console.log('Config WebSocket (EegConfigProvider): Current config (from ref):', configRef.current);
-        console.log('Config WebSocket (EegConfigProvider): New config data:', data);
-        console.log('Config WebSocket (EegConfigProvider): Current powerline_filter_hz (from ref):', configRef.current?.powerline_filter_hz);
-        console.log('Config WebSocket (EegConfigProvider): New powerline_filter_hz:', data.powerline_filter_hz);
-        
-        const configsEqual = areConfigsEqual(configRef.current, data); // Use configRef.current
-        console.log('Config WebSocket (EegConfigProvider): areConfigsEqual result:', configsEqual);
+        const configsEqual = areConfigsEqual(configRef.current, data);
         
         if (configsEqual) {
-          console.log('Config WebSocket (EegConfigProvider): Received EEG configuration, but it is identical to the current one. No update needed.', data);
-          
-          // If config is already set and status is 'Connected', no need to update status again.
-          // If config was null, and this is the first valid data, status should be updated.
-          if (!configRef.current) { // Use configRef.current
-            const FPS = 60.0; // Keep client-side FPS calculation for now
-            const configWithFps = { ...data, fps: FPS };
-            setConfig(configWithFps); // Set initial config
-            // configRef.current will be updated by the useEffect below
-            setStatus('Connected');
-            console.log('Config WebSocket (EegConfigProvider): Set initial EEG configuration:', configWithFps);
+          if (!isProduction) {
+            console.log('Config WebSocket (EegConfigProvider): Received identical configuration. No update needed.');
           }
-          return; // Configs are the same, do nothing further
+          return; // Configs are the same, do nothing further.
         }
 
-        // Configs are different, or it's the first config
-        const FPS = 60.0; // Keep client-side FPS calculation for now
+        // If we're here, it's either the first config or a new one.
+        console.log('Config WebSocket (EegConfigProvider): Received new configuration, applying update.');
+        const FPS = 60.0;
         const configWithFps = { ...data, fps: FPS };
-        console.log('Config WebSocket (EegConfigProvider): Setting new config with FPS:', configWithFps);
         setConfig(configWithFps);
-        console.log('Config WebSocket (EegConfigProvider): Received and applied updated EEG configuration:', configWithFps);
-        setStatus('Connected'); // Ensure status reflects that we have a valid config
+        setStatus('Connected');
+        if (!isConfigReady) {
+          setIsConfigReady(true);
+        }
       } catch (error) {
         console.error('Config WebSocket (EegConfigProvider): Error parsing config data:', error);
         setStatus('Error parsing data');
@@ -207,32 +166,31 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       // The onclose event will usually fire after an error, triggering reconnect logic there.
     };
 
-  }, [isProduction]);
+    };
 
-  // Effect to keep configRef.current updated with the latest config state
-  useEffect(() => {
-    configRef.current = config;
-  }, [config]);
+    connectWebSocket();
 
-  useEffect(() => {
-    connectWebSocket(); // Initial connection attempt
-
-    // Cleanup function
+    // Cleanup function for the main effect
     return () => {
+      console.log("Cleaning up EegConfigProvider effect.");
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
       }
-      if (wsRef.current) {
-        try {
-          // Prevent reconnect logic during cleanup
-          wsRef.current.onclose = null;
-          wsRef.current.onerror = null;
-          wsRef.current.close();
-        } catch (e) { /* Ignore */ }
+      const ws = wsRef.current;
+      if (ws) {
+        // Prevent reconnect logic during cleanup
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
         wsRef.current = null;
       }
     };
-  }, [connectWebSocket]); // useEffect depends on the stable connectWebSocket callback
+  }, [isProduction, isConfigReady]); // Rerun if isProduction changes
+
+  // Effect to keep configRef updated
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
 
   const refreshConfig = useCallback(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -241,7 +199,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <EegConfigContext.Provider value={{ config, status, refreshConfig }}>
+    <EegConfigContext.Provider value={{ config, status, refreshConfig, isConfigReady }}>
       {children}
     </EegConfigContext.Provider>
   );

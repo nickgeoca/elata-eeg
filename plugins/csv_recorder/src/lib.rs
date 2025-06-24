@@ -188,28 +188,29 @@ impl CsvRecorderPlugin {
         
         // Set start timestamp if this is the first data
         if self.start_timestamp.is_none() {
-            self.start_timestamp = Some(packet.timestamp);
+            self.start_timestamp = packet.timestamps.first().cloned();
         }
         
         let writer = self.writer.as_mut().unwrap();
-        let samples_per_channel = packet.samples.len() / self.config.adc_config.channels.len();
         let num_channels = self.config.adc_config.channels.len();
-        
-        // Calculate sample rate from ADC config
-        let sample_rate = self.config.adc_config.sample_rate;
-        let us_per_sample = 1_000_000 / sample_rate as u64;
+        if num_channels == 0 {
+            return Ok("No channels configured".to_string());
+        }
+        let samples_per_channel = packet.samples.len() / num_channels;
         
         // Write each sample as a row
         for i in 0..samples_per_channel {
-            let sample_timestamp = packet.timestamp + (i as u64 * us_per_sample);
-            
             // Create a record with timestamp, voltage values, and raw values
             let mut record = Vec::with_capacity(1 + num_channels * 2);
+            // Get the correct timestamp for this sample index.
+            // The samples are interleaved, so we need to calculate the correct index.
+            let timestamp_idx = i * num_channels;
+            let sample_timestamp = packet.timestamps.get(timestamp_idx).cloned().unwrap_or(0);
             record.push(sample_timestamp.to_string());
             
             // Add voltage values for each configured channel
             for channel_idx in 0..num_channels {
-                let sample_idx = channel_idx * samples_per_channel + i;
+                let sample_idx = i * num_channels + channel_idx;
                 if sample_idx < packet.samples.len() {
                     record.push(packet.samples[sample_idx].to_string());
                 } else {
@@ -220,7 +221,7 @@ impl CsvRecorderPlugin {
             // Add raw values (for now, convert voltage back to approximate raw)
             // TODO: This should be actual raw samples when available in EegPacket
             for channel_idx in 0..num_channels {
-                let sample_idx = channel_idx * samples_per_channel + i;
+                let sample_idx = i * num_channels + channel_idx;
                 if sample_idx < packet.samples.len() {
                     // Approximate raw value (this is a placeholder)
                     let raw_approx = (packet.samples[sample_idx] * 1000.0) as i32;

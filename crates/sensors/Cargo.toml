@@ -30,7 +30,7 @@ aligned-utils = "1.0"
 rand_distr = "0.4"
 thiserror = "1.0"
 async-trait = "0.1.68"
-log = "0.4"
+log = { version = "0.4", features = ["max_level_trace", "release_max_level_warn"] }
 futures = "0.3"
 once_cell = "1.18"
 lazy_static = "1.4.0"

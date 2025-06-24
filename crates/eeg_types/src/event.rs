@@ -9,8 +9,8 @@ use std::sync::Arc;
 /// Raw EEG data packet from the sensor hardware
 #[derive(Debug, Clone)]
 pub struct EegPacket {
-    /// Timestamp when the data was acquired (milliseconds since Unix epoch)
-    pub timestamp: u64,
+    /// Per-sample timestamps (microseconds since Unix epoch)
+    pub timestamps: Arc<[u64]>,
     /// Monotonic frame counter for detecting data gaps
     pub frame_id: u64,
     /// EEG voltage samples for all channels - using Arc<[f32]> for zero-copy sharing
@@ -178,7 +178,8 @@ impl SensorEvent {
     /// Get the timestamp of any event type
     pub fn timestamp(&self) -> u64 {
         match self {
-            SensorEvent::RawEeg(packet) => packet.timestamp,
+            // Return the timestamp of the first sample in the packet
+            SensorEvent::RawEeg(packet) => packet.timestamps.first().cloned().unwrap_or(0),
             SensorEvent::FilteredEeg(packet) => packet.timestamp,
             SensorEvent::Fft(packet) => packet.timestamp,
             SensorEvent::System(event) => event.timestamp,
@@ -199,14 +200,14 @@ impl SensorEvent {
 impl EegPacket {
     /// Create a new EEG packet with the given parameters
     pub fn new(
-        timestamp: u64,
+        timestamps: Vec<u64>,
         frame_id: u64,
         samples: Vec<f32>,
         channel_count: usize,
         sample_rate: f32,
     ) -> Self {
         Self {
-            timestamp,
+            timestamps: timestamps.into(),
             frame_id,
             samples: samples.into(),
             channel_count,
@@ -229,11 +230,28 @@ impl EegPacket {
 
     pub fn to_binary(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        // Simplified binary format: [timestamp_u64_le][error_flag_u8][data_payload]
-        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
-        buffer.push(0); // No error
-        for &sample in self.samples.iter() {
-            buffer.extend_from_slice(&sample.to_le_bytes());
+        // Format: [num_samples_u32_le][timestamps_u64_le...][samples_f32_le...]
+        // Ensure timestamps and samples have the same length
+        let num_samples = self.samples.len();
+        if self.timestamps.len() != num_samples {
+            // Handle error: lengths do not match. For now, we'll truncate to the shorter length.
+            // A more robust solution might return an error or log a warning.
+            let effective_len = std::cmp::min(self.timestamps.len(), num_samples);
+            buffer.extend_from_slice(&(effective_len as u32).to_le_bytes());
+            for &ts in self.timestamps.iter().take(effective_len) {
+                buffer.extend_from_slice(&ts.to_le_bytes());
+            }
+            for &sample in self.samples.iter().take(effective_len) {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
+        } else {
+            buffer.extend_from_slice(&(num_samples as u32).to_le_bytes());
+            for &ts in self.timestamps.iter() {
+                buffer.extend_from_slice(&ts.to_le_bytes());
+            }
+            for &sample in self.samples.iter() {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
         }
         buffer
     }
@@ -378,9 +396,10 @@ mod tests {
     #[test]
     fn test_eeg_packet_creation() {
         let samples = vec![1.0, 2.0, 3.0, 4.0]; // 2 channels, 2 samples each
-        let packet = EegPacket::new(1000, 1, samples, 2, 250.0);
+        let timestamps = vec![1000, 1002, 1000, 1002];
+        let packet = EegPacket::new(timestamps.clone(), 1, samples, 2, 250.0);
         
-        assert_eq!(packet.timestamp, 1000);
+        assert_eq!(packet.timestamps.as_ref(), timestamps.as_slice());
         assert_eq!(packet.frame_id, 1);
         assert_eq!(packet.channel_count, 2);
         assert_eq!(packet.sample_rate, 250.0);
@@ -390,7 +409,8 @@ mod tests {
     #[test]
     fn test_channel_samples() {
         let samples = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 3 channels, 2 samples each
-        let packet = EegPacket::new(1000, 1, samples, 3, 250.0);
+        let timestamps = vec![1000, 1002, 1000, 1002, 1000, 1002];
+        let packet = EegPacket::new(timestamps, 1, samples, 3, 250.0);
         
         assert_eq!(packet.channel_samples(0), Some([1.0, 2.0].as_slice()));
         assert_eq!(packet.channel_samples(1), Some([3.0, 4.0].as_slice()));
@@ -400,10 +420,11 @@ mod tests {
 
     #[test]
     fn test_sensor_event_timestamp() {
-        let eeg_packet = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
+        let timestamps = vec![1000, 1002];
+        let eeg_packet = Arc::new(EegPacket::new(timestamps, 1, vec![1.0, 2.0], 1, 250.0));
         let event = SensorEvent::RawEeg(eeg_packet);
         
-        assert_eq!(event.timestamp(), 1000);
+        assert_eq!(event.timestamp(), 1000); // Should return the first timestamp
         assert_eq!(event.event_type_name(), "RawEeg");
     }
 }
