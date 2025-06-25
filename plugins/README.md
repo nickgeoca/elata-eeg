@@ -164,3 +164,7 @@ To create a new plugin (e.g., `my_awesome_plugin`), follow these steps:
     ```
 
 After these steps, a recompile of the `device` crate will include your new plugin, and the `PluginSupervisor` will automatically start and manage it.
+
+# Considerations
+1 Metrics plugin
+ - Publish BusStats { queue_len, drops, max_latency } every second. Surface it in the GUI.

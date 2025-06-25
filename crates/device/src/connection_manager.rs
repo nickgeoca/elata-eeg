@@ -203,21 +203,11 @@ impl ConnectionManager {
                 Some(("FilteredEeg".to_string(), Message::binary(binary_data)))
             }
             SensorEvent::Fft(fft_packet) => {
-                let json_message = match parse_fft_binary_data(&fft_packet.to_binary()) {
-                    Ok(fft_results) => json!({
-                        "type": "FftPacket",
-                        "timestamp": chrono::Utc::now().timestamp_millis(),
-                        "data": fft_results
-                    }).to_string(),
-                    Err(e) => {
-                        error!("Failed to parse FFT data for client: {}", e);
-                        json!({
-                            "type": "error",
-                            "message": format!("Failed to parse FFT data: {}", e)
-                        }).to_string()
-                    }
-                };
-                Some(("FftPacket".to_string(), Message::text(json_message)))
+                let json_message = json!({
+                    "type": "FftPacket",
+                    "data": *fft_packet
+                });
+                Some(("FftPacket".to_string(), Message::text(json_message.to_string())))
             }
             _ => None, // Ignore RawEeg, System events, etc.
         }
@@ -260,64 +250,3 @@ fn eeg_packet_to_binary(packet: &eeg_types::FilteredEegPacket) -> Vec<u8> {
     buffer
 }
 
-
-/// Parse binary FFT data into the JSON format expected by the kiosk.
-/// This function is moved from `server.rs` to centralize logic here.
-fn parse_fft_binary_data(binary_data: &[u8]) -> Result<Vec<serde_json::Value>, String> {
-    if binary_data.len() < 16 {
-        return Err("Binary data too short".to_string());
-    }
-
-    let mut offset = 0;
-
-    // Timestamp (8 bytes) and source_frame_id (8 bytes) are part of the binary format
-    // but not directly used in the final JSON, so we read and discard them.
-    offset += 16;
-
-    // Read number of channels (4 bytes)
-    if offset + 4 > binary_data.len() {
-        return Err("Not enough data for num_channels".to_string());
-    }
-    let num_channels = u32::from_le_bytes(
-        binary_data[offset..offset + 4].try_into()
-            .map_err(|_| "Failed to read num_channels")?
-    ) as usize;
-    offset += 4;
-
-    let mut fft_results = Vec::new();
-
-    // Read brain wave data for each channel
-    for _ in 0..num_channels {
-        // Each channel block has channel_idx (4) + 5 bands * 4 bytes/band = 24 bytes
-        if offset + 24 > binary_data.len() {
-            return Err("Not enough data for a full channel block".to_string());
-        }
-
-        // Skip channel index (4 bytes)
-        offset += 4;
-
-        // Read brain wave band powers (5 * 4 bytes each)
-        let delta = f32::from_le_bytes(binary_data[offset..offset+4].try_into().unwrap());
-        offset += 4;
-        let theta = f32::from_le_bytes(binary_data[offset..offset+4].try_into().unwrap());
-        offset += 4;
-        let alpha = f32::from_le_bytes(binary_data[offset..offset+4].try_into().unwrap());
-        offset += 4;
-        let beta = f32::from_le_bytes(binary_data[offset..offset+4].try_into().unwrap());
-        offset += 4;
-        let gamma = f32::from_le_bytes(binary_data[offset..offset+4].try_into().unwrap());
-        offset += 4;
-
-        // The kiosk applet expects 'power' and 'frequencies' arrays.
-        // We provide representative frequencies for each band.
-        let frequencies = vec![2.0, 6.0, 10.5, 21.5, 65.0];
-        let power = vec![delta, theta, alpha, beta, gamma];
-
-        fft_results.push(json!({
-            "power": power,
-            "frequencies": frequencies
-        }));
-    }
-
-    Ok(fft_results)
-}

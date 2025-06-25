@@ -46,28 +46,19 @@ pub struct FftPacket {
     pub timestamp: u64,
     /// Reference to the original frame that was analyzed
     pub source_frame_id: u64,
-    /// Brain wave frequency bands for each channel
-    #[serde(with = "serde_arc_slice")]
-    pub brain_waves: Arc<[BrainWaves]>,
+    /// Power Spectral Density data for each channel
+    pub psd_packets: Vec<PsdPacket>,
     /// FFT configuration used for this analysis
     pub fft_config: FftConfig,
 }
 
-/// Brain wave frequency bands for a single channel
+/// Power Spectral Density (PSD) data for a single channel
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct BrainWaves {
+pub struct PsdPacket {
     /// Channel index
     pub channel: usize,
-    /// Delta band power (0.5-4 Hz)
-    pub delta: f32,
-    /// Theta band power (4-8 Hz)
-    pub theta: f32,
-    /// Alpha band power (8-13 Hz)
-    pub alpha: f32,
-    /// Beta band power (13-30 Hz)
-    pub beta: f32,
-    /// Gamma band power (30-100 Hz)
-    pub gamma: f32,
+    /// Power spectral density values (µV²/Hz)
+    pub psd: Vec<f32>,
 }
 
 /// FFT analysis configuration
@@ -81,28 +72,6 @@ pub struct FftConfig {
     pub window_function: String,
 }
 
-// Helper module for serializing Arc<[T]>
-mod serde_arc_slice {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    use std::sync::Arc;
-
-    pub fn serialize<S, T>(arc_slice: &Arc<[T]>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-        T: Serialize,
-    {
-        arc_slice.as_ref().serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D, T>(deserializer: D) -> Result<Arc<[T]>, D::Error>
-    where
-        D: Deserializer<'de>,
-        T: Deserialize<'de>,
-    {
-        let vec = Vec::<T>::deserialize(deserializer)?;
-        Ok(vec.into())
-    }
-}
 
 /// System status and control events
 #[derive(Debug, Clone)]
@@ -350,71 +319,20 @@ impl FftPacket {
     pub fn new(
         timestamp: u64,
         source_frame_id: u64,
-        brain_waves: Vec<BrainWaves>,
+        psd_packets: Vec<PsdPacket>,
         fft_config: FftConfig,
     ) -> Self {
         Self {
             timestamp,
             source_frame_id,
-            brain_waves: brain_waves.into(),
+            psd_packets,
             fft_config,
         }
     }
 
-    /// Get brain waves for a specific channel
-    pub fn channel_brain_waves(&self, channel: usize) -> Option<&BrainWaves> {
-        self.brain_waves.iter().find(|bw| bw.channel == channel)
-    }
-
-
-    /// Convert to binary format for efficient transmission
-    pub fn to_binary(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        // Binary format: [timestamp_u64_le][source_frame_id_u64_le][num_channels_u32_le][brain_wave_data]
-        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
-        buffer.extend_from_slice(&self.source_frame_id.to_le_bytes());
-        buffer.extend_from_slice(&(self.brain_waves.len() as u32).to_le_bytes());
-        
-        for brain_wave in self.brain_waves.iter() {
-            buffer.extend_from_slice(&(brain_wave.channel as u32).to_le_bytes());
-            buffer.extend_from_slice(&brain_wave.delta.to_le_bytes());
-            buffer.extend_from_slice(&brain_wave.theta.to_le_bytes());
-            buffer.extend_from_slice(&brain_wave.alpha.to_le_bytes());
-            buffer.extend_from_slice(&brain_wave.beta.to_le_bytes());
-            buffer.extend_from_slice(&brain_wave.gamma.to_le_bytes());
-        }
-        
-        buffer
-    }
-}
-
-impl BrainWaves {
-    /// Create new brain waves data for a channel
-    pub fn new(channel: usize, delta: f32, theta: f32, alpha: f32, beta: f32, gamma: f32) -> Self {
-        Self {
-            channel,
-            delta,
-            theta,
-            alpha,
-            beta,
-            gamma,
-        }
-    }
-
-    /// Get the dominant frequency band
-    pub fn dominant_band(&self) -> (&'static str, f32) {
-        let bands = [
-            ("delta", self.delta),
-            ("theta", self.theta),
-            ("alpha", self.alpha),
-            ("beta", self.beta),
-            ("gamma", self.gamma),
-        ];
-        
-        bands.iter()
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(name, value)| (*name, *value))
-            .unwrap_or(("unknown", 0.0))
+    /// Get PSD data for a specific channel
+    pub fn channel_psd(&self, channel: usize) -> Option<&PsdPacket> {
+        self.psd_packets.iter().find(|p| p.channel == channel)
     }
 }
 

@@ -8,6 +8,4 @@ pub mod brain_waves;
 
 // Re-export all plugin types for easy access by the supervisor.
 // This abstracts away whether a plugin is built-in or external.
-pub use brain_waves::{BrainWavesPlugin, BrainWavesConfig};
-pub use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterConfig};
-pub use csv_recorder_plugin::{CsvRecorderPlugin, CsvRecorderConfig};
+pub use brain_waves::BrainWavesPlugin;

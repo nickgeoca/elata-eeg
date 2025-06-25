@@ -204,7 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // === PLUGIN SUPERVISOR INITIALIZATION ===
     
     let mut plugin_supervisor = PluginSupervisor::new(event_bus.clone());
-    plugin_supervisor.register_plugins().await;
+    // Register plugins
+    plugin_supervisor.add_plugin(Box::new(plugins::brain_waves::BrainWavesPlugin::new()));
+    plugin_supervisor.add_plugin(Box::new(basic_voltage_filter_plugin::BasicVoltageFilterPlugin::new()));
+    plugin_supervisor.add_plugin(Box::new(csv_recorder_plugin::CsvRecorderPlugin::new()));
+
+    plugin_supervisor.initialize_plugins().await;
     plugin_supervisor.start_all(shutdown_token.clone());
     
     tracing::info!("Plugin supervisor initialized and all plugins started.");

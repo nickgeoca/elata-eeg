@@ -5,18 +5,18 @@ use std::io;
 use chrono::{Local, DateTime};
 use csv::Writer;
 use std::time::Instant;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
 use anyhow::Result;
-use tracing::{info, warn, error, debug};
+use tracing::{info, warn, error};
 
 use eeg_types::{
-    event::{SensorEvent, EegPacket},
-    plugin::{EegPlugin, PluginConfig},
-    event::EventFilter,
+    event::{SensorEvent, EegPacket, EventFilter},
     config::{DaemonConfig, DriverType},
 };
+use device::plugin::{EegPlugin, PluginConfig};
+use device::event_bus::EventBus;
 use eeg_sensor::AdcConfig;
 
 /// Configuration for the CSV Recorder Plugin
@@ -60,9 +60,7 @@ impl PluginConfig for CsvRecorderConfig {
     }
 }
 
-/// CSV Recorder Plugin - handles recording EEG data to CSV files
-pub struct CsvRecorderPlugin {
-    config: CsvRecorderConfig,
+struct RecorderState {
     writer: Option<Writer<File>>,
     file_path: Option<String>,
     is_recording: bool,
@@ -71,80 +69,57 @@ pub struct CsvRecorderPlugin {
     recording_start_time: Option<Instant>,
 }
 
+/// CSV Recorder Plugin - handles recording EEG data to CSV files
+pub struct CsvRecorderPlugin {
+    config: CsvRecorderConfig,
+    state: Arc<Mutex<RecorderState>>,
+}
+
 impl Clone for CsvRecorderPlugin {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            writer: None, // Do not clone the writer
-            file_path: None,
-            is_recording: false,
-            start_timestamp: None,
-            last_flush_time: Instant::now(),
-            recording_start_time: None,
+            state: Arc::new(Mutex::new(RecorderState {
+                writer: None,
+                file_path: None,
+                is_recording: false,
+                start_timestamp: None,
+                last_flush_time: Instant::now(),
+                recording_start_time: None,
+            })),
         }
     }
 }
 
 impl CsvRecorderPlugin {
     pub fn new() -> Self {
-        Self {
-            config: CsvRecorderConfig::default(),
+        let state = RecorderState {
             writer: None,
             file_path: None,
             is_recording: false,
             start_timestamp: None,
             last_flush_time: Instant::now(),
             recording_start_time: None,
+        };
+        Self {
+            config: CsvRecorderConfig::default(),
+            state: Arc::new(Mutex::new(state)),
         }
     }
 
     /// Start recording to a new CSV file
-    pub async fn start_recording(&mut self) -> io::Result<String> {
-        if self.is_recording {
-            return Ok(format!("Already recording to {}", self.file_path.clone().unwrap_or_default()));
+    async fn start_recording(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>) -> io::Result<String> {
+        if state.is_recording {
+            return Ok(format!("Already recording to {}", state.file_path.clone().unwrap_or_default()));
         }
         
-        // Update shared recording state
         self.config.is_recording_shared.store(true, Ordering::Relaxed);
         
-        debug!("Recordings directory from config: {}", self.config.daemon_config.recordings_directory);
+        let recordings_dir = &self.config.daemon_config.recordings_directory;
+        std::fs::create_dir_all(recordings_dir)?;
         
-        // Get absolute path of the current directory
-        let current_dir = match std::env::current_dir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                error!("Failed to get current directory: {}", e);
-                return Err(io::Error::new(io::ErrorKind::Other, "Failed to get current directory"));
-            }
-        };
-        debug!("Current directory: {:?}", current_dir);
-        
-        // Determine if we're running from the daemon directory
-        let is_in_daemon_dir = current_dir.to_string_lossy().ends_with("/daemon");
-        debug!("Running from daemon directory: {}", is_in_daemon_dir);
-        
-        // Adjust the path if needed to ensure it's relative to the repo root
-        let recordings_dir = if is_in_daemon_dir && self.config.daemon_config.recordings_directory.starts_with("./") {
-            // Convert "./recordings/" to "../recordings/" when running from daemon directory
-            let adjusted_path = format!("..{}", &self.config.daemon_config.recordings_directory[1..]);
-            debug!("Adjusted recordings path: {}", adjusted_path);
-            adjusted_path
-        } else {
-            self.config.daemon_config.recordings_directory.clone()
-        };
-        
-        // Debug: Print the absolute path of the recordings directory
-        let absolute_recordings_path = current_dir.join(&recordings_dir);
-        debug!("Absolute recordings path: {:?}", absolute_recordings_path);
-        
-        // Create recordings directory if it doesn't exist
-        std::fs::create_dir_all(&recordings_dir)?;
-        
-        // Create filename with current timestamp and parameters
         let now: DateTime<Local> = Local::now();
         let driver = format!("{:?}", self.config.adc_config.board_driver);
-        
-        // Get session field from config
         let session_prefix = if self.config.daemon_config.session.is_empty() {
             "".to_string()
         } else {
@@ -158,21 +133,14 @@ impl CsvRecorderPlugin {
             now.format("%Y-%m-%d_%H-%M"),
             driver,
         );
-        debug!("Creating recording file at: {}", filename);
         
-        // Create CSV writer
         let file = File::create(&filename)?;
         let mut writer = csv::Writer::from_writer(file);
         
-        // Write header row with both voltage and raw samples
         let mut header = vec!["timestamp".to_string()];
-        
-        // Add voltage channel headers using the actual channel indices
         for &channel_idx in &self.config.adc_config.channels {
             header.push(format!("ch{}_voltage", channel_idx));
         }
-        
-        // Add raw channel headers using the actual channel indices
         for &channel_idx in &self.config.adc_config.channels {
             header.push(format!("ch{}_raw_sample", channel_idx));
         }
@@ -180,31 +148,30 @@ impl CsvRecorderPlugin {
         writer.write_record(&header)?;
         writer.flush()?;
         
-        self.writer = Some(writer);
-        self.file_path = Some(filename.clone());
-        self.is_recording = true;
-        self.start_timestamp = None; // Will be set when first data arrives
-        self.recording_start_time = Some(Instant::now());
+        state.writer = Some(writer);
+        state.file_path = Some(filename.clone());
+        state.is_recording = true;
+        state.start_timestamp = None;
+        state.recording_start_time = Some(Instant::now());
         
         info!("Started recording to {}", filename);
         Ok(format!("Started recording to {}", filename))
     }
     
     /// Stop recording and close the CSV file
-    pub async fn stop_recording(&mut self) -> io::Result<String> {
-        if !self.is_recording {
+    async fn stop_recording(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>) -> io::Result<String> {
+        if !state.is_recording {
             return Ok("Not currently recording".to_string());
         }
         
-        if let Some(mut writer) = self.writer.take() {
+        if let Some(mut writer) = state.writer.take() {
             writer.flush()?;
         }
         
-        let file_path = self.file_path.take().unwrap_or_default();
-        self.is_recording = false;
-        self.start_timestamp = None;
+        let file_path = state.file_path.take().unwrap_or_default();
+        state.is_recording = false;
+        state.start_timestamp = None;
         
-        // Update shared recording state
         self.config.is_recording_shared.store(false, Ordering::Relaxed);
         
         info!("Stopped recording to {}", file_path);
@@ -212,68 +179,51 @@ impl CsvRecorderPlugin {
     }
     
     /// Write EEG packet data to the CSV file
-    async fn write_eeg_packet(&mut self, packet: &EegPacket) -> io::Result<String> {
-        if !self.is_recording || self.writer.is_none() {
+    async fn write_eeg_packet(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>, packet: &EegPacket) -> io::Result<String> {
+        if !state.is_recording || state.writer.is_none() {
             return Ok("Not recording".to_string());
         }
         
-        // Set start timestamp if this is the first data
-        if self.start_timestamp.is_none() {
-            self.start_timestamp = packet.timestamps.first().cloned();
+        if state.start_timestamp.is_none() {
+            state.start_timestamp = packet.timestamps.first().cloned();
         }
         
-        let writer = self.writer.as_mut().unwrap();
+        let writer = state.writer.as_mut().unwrap();
         let num_channels = self.config.adc_config.channels.len();
         if num_channels == 0 {
             return Ok("No channels configured".to_string());
         }
         let samples_per_channel = packet.voltage_samples.len() / num_channels;
         
-        // Write each sample as a row
         for i in 0..samples_per_channel {
-            // Create a record with timestamp, voltage values, and raw values
             let mut record = Vec::with_capacity(1 + num_channels * 2);
-            // Get the correct timestamp for this sample index.
-            // The samples are interleaved, so we need to calculate the correct index.
             let timestamp_idx = i * num_channels;
             let sample_timestamp = packet.timestamps.get(timestamp_idx).cloned().unwrap_or(0);
             record.push(sample_timestamp.to_string());
             
-            // Add voltage values for each configured channel
             for channel_idx in 0..num_channels {
                 let sample_idx = i * num_channels + channel_idx;
-                if sample_idx < packet.voltage_samples.len() {
-                    record.push(packet.voltage_samples[sample_idx].to_string());
-                } else {
-                    record.push("0.0".to_string());
-                }
+                record.push(packet.voltage_samples.get(sample_idx).cloned().unwrap_or(0.0).to_string());
             }
             
-            // Add raw i32 values for each configured channel
             for channel_idx in 0..num_channels {
                 let sample_idx = i * num_channels + channel_idx;
-                if sample_idx < packet.raw_samples.len() {
-                    record.push(packet.raw_samples[sample_idx].to_string());
-                } else {
-                    record.push("0".to_string());
-                }
+                record.push(packet.raw_samples.get(sample_idx).cloned().unwrap_or(0).to_string());
             }
             
             writer.write_record(&record)?;
         }
         
-        // Check if it's time to flush (every 5 seconds)
         let now = Instant::now();
-        if now.duration_since(self.last_flush_time).as_secs() >= 5 {
+        if now.duration_since(state.last_flush_time).as_secs() >= 5 {
             writer.flush()?;
-            self.last_flush_time = now;
+            state.last_flush_time = now;
         }
         
-        // Check if we've exceeded the maximum recording length
-        if let Some(start_time) = self.recording_start_time {
+        if let Some(start_time) = state.recording_start_time {
             if now.duration_since(start_time).as_secs() >= (self.config.daemon_config.max_recording_length_minutes * 60) as u64 {
-                let old_file = self.stop_recording().await?;
-                let new_file = self.start_recording().await?;
+                let old_file = self.stop_recording(state).await?;
+                let new_file = self.start_recording(state).await?;
                 return Ok(format!("Maximum recording length reached. {} and {}", old_file, new_file));
             }
         }
@@ -297,8 +247,8 @@ impl EegPlugin for CsvRecorderPlugin {
     }
 
     async fn run(
-        &mut self,
-        _bus: Arc<dyn eeg_types::plugin::EventBus>,
+        &self,
+        _bus: Arc<EventBus>,
         mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
@@ -309,8 +259,9 @@ impl EegPlugin for CsvRecorderPlugin {
                 biased; // Prioritize shutdown
                 _ = shutdown_token.cancelled() => {
                     info!("[{}] Received shutdown signal", self.name());
-                    if self.is_recording {
-                        if let Err(e) = self.stop_recording().await {
+                    let mut state = self.state.lock().await;
+                    if state.is_recording {
+                        if let Err(e) = self.stop_recording(&mut state).await {
                             error!("[{}] Error stopping recording during shutdown: {}", self.name(), e);
                         }
                     }
@@ -331,27 +282,20 @@ impl EegPlugin for CsvRecorderPlugin {
                     match event {
                         SensorEvent::RawEeg(packet) => {
                             // Only record if recording is enabled
+                            let mut state = self.state.lock().await;
                             if self.config.is_recording_shared.load(Ordering::Relaxed) {
-                                if !self.is_recording {
-                                    if let Err(e) = self.start_recording().await {
+                                if !state.is_recording {
+                                    if let Err(e) = self.start_recording(&mut state).await {
                                         error!("[{}] Failed to start recording: {}", self.name(), e);
                                         continue;
                                     }
                                 }
 
-                                match self.write_eeg_packet(&packet).await {
-                                    Ok(msg) => {
-                                        if msg != "Data written successfully" && msg != "Not recording" {
-                                            info!("[{}] {}", self.name(), msg);
-                                        }
-                                    },
-                                    Err(e) => {
-                                        warn!("[{}] Failed to write data: {}", self.name(), e);
-                                    }
+                                if let Err(e) = self.write_eeg_packet(&mut state, &packet).await {
+                                    warn!("[{}] Failed to write data: {}", self.name(), e);
                                 }
-                            } else if self.is_recording {
-                                // Stop recording if it was disabled
-                                if let Err(e) = self.stop_recording().await {
+                            } else if state.is_recording {
+                                if let Err(e) = self.stop_recording(&mut state).await {
                                     error!("[{}] Error stopping recording: {}", self.name(), e);
                                 }
                             }

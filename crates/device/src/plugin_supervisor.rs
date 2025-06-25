@@ -10,8 +10,7 @@ use tokio_util::sync::CancellationToken;
 use log::{info, error};
 
 use crate::event_bus::EventBus;
-use crate::plugins;
-use eeg_types::EegPlugin;
+use crate::plugin::EegPlugin;
 
 /// Manages the lifecycle of all registered EEG plugins.
 pub struct PluginSupervisor {
@@ -30,28 +29,14 @@ impl PluginSupervisor {
         }
     }
 
-    /// Registers and initializes all known plugins.
-    pub async fn register_plugins(&mut self) {
-        info!("Registering plugins...");
+    /// Adds a plugin to the supervisor.
+    pub fn add_plugin(&mut self, plugin: Box<dyn EegPlugin>) {
+        self.plugins.push(plugin);
+    }
 
-        // --- Register all plugins here ---
-        // This list is now the single source of truth for which plugins are active.
-
-        // 1. Brain Waves (built-in)
-        let brain_waves_plugin = Box::new(plugins::BrainWavesPlugin::new());
-        self.plugins.push(brain_waves_plugin);
-
-        // 2. Basic Voltage Filter (external crate)
-        let voltage_filter_plugin = Box::new(plugins::BasicVoltageFilterPlugin::new());
-        self.plugins.push(voltage_filter_plugin);
-
-        // 3. CSV Recorder (external crate)
-        let csv_recorder_plugin = Box::new(plugins::CsvRecorderPlugin::new());
-        self.plugins.push(csv_recorder_plugin);
-        
-        // --- End of plugin registration ---
-
-        // Initialize all registered plugins
+    /// Initializes all registered plugins.
+    pub async fn initialize_plugins(&mut self) {
+        info!("Initializing plugins...");
         for plugin in &mut self.plugins {
             match plugin.initialize().await {
                 Ok(_) => info!("Plugin '{}' initialized.", plugin.name()),

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
@@ -25,6 +25,8 @@ pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {
 /// Core trait that all EEG processing plugins must implement
 #[async_trait]
 pub trait EegPlugin: Send + Sync {
+    /// Create a new boxed clone of this plugin.
+    fn clone_box(&self) -> Box<dyn EegPlugin>;
     /// Get the unique name of this plugin
     fn name(&self) -> &'static str;
     
@@ -54,7 +56,7 @@ pub trait EegPlugin: Send + Sync {
     async fn run(
         &self,
         bus: Arc<EventBus>,
-        mut receiver: mpsc::Receiver<SensorEvent>,
+        mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()>;
     
@@ -151,7 +153,7 @@ impl SupervisorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use eeg_types::{EegPacket, SensorEvent};
+    use eeg_types::{event::event_matches_filter, EegPacket, SensorEvent};
 
     #[test]
     fn test_supervisor_config_backoff() {
@@ -164,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_event_filter_matching() {
-        let eeg_packet = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
+        let eeg_packet = Arc::new(EegPacket::new(vec![1000], 1, vec![1], vec![1.0], 1, 250.0));
         let raw_event = SensorEvent::RawEeg(eeg_packet);
         
         assert!(event_matches_filter(&raw_event, &EventFilter::All));

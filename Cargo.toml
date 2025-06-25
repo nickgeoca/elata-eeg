@@ -4,6 +4,8 @@ members = [
     "crates/device",
     "crates/sensors",
     "crates/eeg_types",
+    "plugins/basic_voltage_filter",
+    "plugins/csv_recorder",
 ]
 
 [workspace.dependencies]
