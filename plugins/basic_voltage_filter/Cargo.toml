@@ -12,4 +12,4 @@ tracing = "0.1"
 
 # Local dependencies
 eeg_types = { path = "../../crates/eeg_types" }
-basic_voltage_filter = { path = "../basic_voltage_filter_lib" }
+eeg_sensor = { path = "../../crates/sensors" }

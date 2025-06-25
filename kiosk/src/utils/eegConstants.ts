@@ -25,5 +25,4 @@ export const TIME_TICKS = [0, 0.5, 1.0, 1.5, 2.0];
 
 // Display timing constants for smooth real-time visualization
 export const DISPLAY_FPS = 60; // Target display frame rate
-export const SAMPLES_PER_DISPLAY_FRAME = 5; // Number of samples to add per display frame for smooth scrolling
 export const DISPLAY_FRAME_INTERVAL_MS = 1000 / DISPLAY_FPS; // ~16.67ms between display frames

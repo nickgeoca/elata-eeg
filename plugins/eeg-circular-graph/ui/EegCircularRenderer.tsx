@@ -1,29 +1,29 @@
 'use client';
 
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useImperativeHandle } from 'react';
 import { getChannelColor } from '../utils/colorUtils';
 
 interface EegCircularRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement>;
-  dataRef: React.RefObject<Float32Array[]>;
   config: any;
-  latestTimestampRef: React.MutableRefObject<number>;
   numPoints: number; // Total points per channel (sampling_rate * display_seconds)
   targetFps?: number;
   containerWidth: number;
   containerHeight: number;
 }
 
-export const EegCircularRenderer = React.memo(function EegCircularRenderer({
+export interface EegCircularRendererRef {
+  addNewSample(channelIndex: number, value: number): void;
+}
+
+export const EegCircularRenderer = React.memo(React.forwardRef<EegCircularRendererRef, EegCircularRendererProps>(function EegCircularRenderer({
   canvasRef,
-  dataRef,
   config,
-  latestTimestampRef,
   numPoints,
   targetFps,
   containerWidth,
   containerHeight
-}: EegCircularRendererProps) {
+}, ref) {
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   const programRef = useRef<WebGLProgram | null>(null);
   const vbosRef = useRef<WebGLBuffer[]>([]);
@@ -108,7 +108,7 @@ export const EegCircularRenderer = React.memo(function EegCircularRenderer({
     
     const gl = glRef.current;
     const program = programRef.current;
-    if (!gl || !program || !dataRef.current || numChannels === 0) return;
+    if (!gl || !program || numChannels === 0) return;
     
     const now = performance.now();
     
@@ -135,10 +135,6 @@ export const EegCircularRenderer = React.memo(function EegCircularRenderer({
     
     // Render each channel
     for (let ch = 0; ch < numChannels; ch++) {
-      const channelData = dataRef.current[ch];
-      if (!channelData || channelData.length === 0) continue;
-      
-      // Update buffer if needed
       gl.bindBuffer(gl.ARRAY_BUFFER, vbosRef.current[ch]);
       
       // Set vertex attribute
@@ -159,7 +155,7 @@ export const EegCircularRenderer = React.memo(function EegCircularRenderer({
       // Draw the line
       gl.drawArrays(gl.LINE_STRIP, 0, numPoints);
     }
-  }, [dataRef, numChannels, numPoints, targetFps]);
+  }, [numChannels, numPoints, targetFps]);
 
   // Initialization effect
   useEffect(() => {
@@ -210,24 +206,24 @@ export const EegCircularRenderer = React.memo(function EegCircularRenderer({
   }, [canvasRef, containerWidth, containerHeight]);
 
   // Data update handler
-  const addNewSample = useCallback((channelIndex: number, value: number) => {
-    if (!glRef.current || channelIndex >= vbosRef.current.length) return;
-    
-    const gl = glRef.current;
-    gl.bindBuffer(gl.ARRAY_BUFFER, vbosRef.current[channelIndex]);
-    
-    // Update single point at current head position
-    const offset = headPositionRef.current * 4; // Float32 = 4 bytes
-    gl.bufferSubData(gl.ARRAY_BUFFER, offset, new Float32Array([value]));
-  }, []);
+  useImperativeHandle(ref, () => ({
+    addNewSample(channelIndex: number, value: number) {
+      if (!glRef.current || channelIndex >= vbosRef.current.length) return;
+      
+      const gl = glRef.current;
+      gl.bindBuffer(gl.ARRAY_BUFFER, vbosRef.current[channelIndex]);
+      
+      // Update single point at current head position
+      const offset = headPositionRef.current * 4; // Float32 = 4 bytes
+      gl.bufferSubData(gl.ARRAY_BUFFER, offset, new Float32Array([value]));
 
-  // Update head position when new data arrives
-  useEffect(() => {
-    if (!dataRef.current) return;
-    
-    // For simplicity, assume all channels update simultaneously
-    headPositionRef.current = (headPositionRef.current + 1) % numPoints;
-  }, [dataRef]);
+      // Move head position to the next spot for the next sample
+      // We only increment the head once per batch of samples (e.g., once for all channels)
+      if (channelIndex === numChannels - 1) {
+        headPositionRef.current = (headPositionRef.current + 1) % numPoints;
+      }
+    }
+  }), [numChannels, numPoints]);
 
   return null;
-});
+}));

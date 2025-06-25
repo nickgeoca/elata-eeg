@@ -59,34 +59,20 @@ pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> Vec<Ad
     trace!("Generating sample at t={} secs", t_secs);
 
     // Scale factor for converting sine wave (-1.0 to 1.0) to 24-bit range
-    // Using a sensible amplitude similar to what's used in generate_sample
     const AMPLITUDE: f32 = 2000.0 * 256.0; // Scale for 24-bit range
+    let timestamp = relative_micros;
 
-    // For each channel, generate a sine wave sample based on its unique frequency.
-    let voltage_samples: Vec<Vec<f32>> = config.channels.iter().enumerate().map(|(i, _)| {
+    config.channels.iter().enumerate().map(|(i, &channel)| {
         let freq = 2.0 + (i as f32) * 4.0; // 2 Hz for ch0, 6 Hz for ch1, etc.
         let angle = 2.0 * PI * freq * t_secs;
         let waveform = angle.sin();
-        trace!("Channel {}: freq={} Hz, angle={} rad, value={}", i, freq, angle, waveform);
-        vec![waveform]
-    }).collect();
-
-    // Convert the floating point samples to i32 format for raw_samples
-    let raw_samples: Vec<Vec<i32>> = voltage_samples.iter().map(|channel_samples| {
-        channel_samples.iter().map(|&sample| {
-            // Scale the sample to a sensible i32 range for 24-bit ADC
-            (sample * AMPLITUDE) as i32
-        }).collect()
-    }).collect();
-
-    // Create individual AdcData entries for each channel
-    let timestamp = relative_micros;
-    
-    config.channels.iter().enumerate().map(|(i, &channel)| {
-        let raw_value = raw_samples.get(i).and_then(|v| v.first()).copied().unwrap_or(0);
+        let raw_value = (waveform * AMPLITUDE) as i32;
+        let voltage = convert_sample_to_voltage(raw_value, config.gain as u8, (config.vref - 4.5).abs() < f32::EPSILON);
+        
         AdcData {
             channel,
-            value: raw_value,
+            raw_value,
+            voltage,
             timestamp,
         }
     }).collect()
@@ -130,21 +116,16 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<A
     }
     
     // Generate samples for each channel
-    let raw_samples: Vec<Vec<i32>> = config.channels.iter().enumerate().map(|(i, _)| {
-        vec![gen.generate_sample(i)]
-    }).collect();
-    let voltage_samples: Vec<Vec<f32>> = config.channels.iter().enumerate().map(|(i, _)| {
-        vec![convert_sample_to_voltage(gen.generate_sample(i), config.gain as u8, true)]
-    }).collect();
-    
-    // Create individual AdcData entries for each channel
     let timestamp = relative_micros;
     
     config.channels.iter().enumerate().map(|(i, &channel)| {
-        let raw_value = raw_samples.get(i).and_then(|v| v.first()).copied().unwrap_or(0);
+        let raw_value = gen.generate_sample(i);
+        let voltage = convert_sample_to_voltage(raw_value, config.gain as u8, (config.vref - 4.5).abs() < f32::EPSILON);
+        
         AdcData {
             channel,
-            value: raw_value,
+            raw_value,
+            voltage,
             timestamp,
         }
     }).collect()

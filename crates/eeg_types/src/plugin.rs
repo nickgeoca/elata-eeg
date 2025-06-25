@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
@@ -50,14 +50,14 @@ pub trait EegPlugin: Send + Sync {
     /// - Respect the shutdown signal from the cancellation token
     /// - Return Ok(()) on graceful shutdown or Err on failure
     async fn run(
-        &self,
-        bus: Arc<dyn std::any::Any + Send + Sync>,
-        mut receiver: mpsc::Receiver<SensorEvent>,
+        &mut self,
+        bus: Arc<dyn EventBus>,
+        receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()>;
     
     /// Optional initialization method called before run()
-    async fn initialize(&self) -> Result<()> {
+    async fn initialize(&mut self) -> Result<()> {
         Ok(())
     }
     
@@ -70,7 +70,11 @@ pub trait EegPlugin: Send + Sync {
     fn get_metrics(&self) -> Vec<PluginMetric> {
         vec![]
     }
+
+    /// Create a new, boxed clone of this plugin.
+    fn clone_box(&self) -> Box<dyn EegPlugin>;
 }
+
 
 /// Event bus trait for plugins to publish events
 #[async_trait]
@@ -169,8 +173,11 @@ mod tests {
 
     #[test]
     fn test_event_filter_matching() {
-        let eeg_packet = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
-        let raw_event = SensorEvent::RawEeg(eeg_packet);
+        let timestamps = vec![1000];
+        let raw_samples = vec![10];
+        let voltage_samples = vec![1.0];
+        let eeg_packet = Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0));
+        let raw_event = SensorEvent::RawEeg(eeg_packet.clone());
         
         assert!(event_matches_filter(&raw_event, &EventFilter::All));
         assert!(event_matches_filter(&raw_event, &EventFilter::RawEegOnly));

@@ -1,8 +1,13 @@
-//! Built-in plugins for the EEG daemon
+//! EEG Daemon Plugins
 //!
-//! This module contains plugins that are built into the daemon itself,
-//! as opposed to external plugin crates.
+//! This module serves as the central integration point for all EEG plugins,
+//! whether they are built-in or external crates.
 
+// Built-in plugins are declared as modules
 pub mod brain_waves;
 
+// Re-export all plugin types for easy access by the supervisor.
+// This abstracts away whether a plugin is built-in or external.
 pub use brain_waves::{BrainWavesPlugin, BrainWavesConfig};
+pub use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterConfig};
+pub use csv_recorder_plugin::{CsvRecorderPlugin, CsvRecorderConfig};

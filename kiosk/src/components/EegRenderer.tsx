@@ -7,6 +7,7 @@ import React, { useEffect, useRef, useCallback, useState } from 'react';
 import { WebglPlot, ColorRGBA, WebglStep } from 'webgl-plot';
 // Import getChannelColor for setting colors here
 import { getChannelColor } from '../utils/colorUtils';
+import { useDataBuffer } from '../hooks/useDataBuffer';
 
 interface EegRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
@@ -18,9 +19,8 @@ interface EegRendererProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
-  // containerRef is no longer needed here, dimensions are passed directly
   linesReady: boolean; // Add prop to signal when lines are ready
-  dataVersion: number; // Add prop to track data updates
+  dataBuffer: ReturnType<typeof useDataBuffer>; // Add the dataBuffer prop
   targetFps?: number; // Optional target FPS for rendering
   containerWidth: number; // New prop for container width
   containerHeight: number; // New prop for container height
@@ -32,9 +32,8 @@ export const EegRenderer = React.memo(function EegRenderer({
   config,
   latestTimestampRef,
   debugInfoRef,
-  // containerRef, // Removed
   linesReady, // Destructure linesReady
-  dataVersion, // Destructure dataVersion
+  dataBuffer, // Destructure dataBuffer
   targetFps,
   containerWidth, // Destructure new prop
   containerHeight // Destructure new prop
@@ -52,44 +51,65 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   const numChannels = config?.channels?.length ?? 8;
 
-  // Render loop using single WebglLineRoll with addPoints
+  // Render loop now pulls from the buffer and processes data asynchronously
   const renderLoop = useCallback(() => {
-    animationFrameRef.current = requestAnimationFrame(renderLoop); // Request next frame immediately
+    animationFrameRef.current = requestAnimationFrame(renderLoop);
 
-    if (!wglpRef.current || !dataRef.current || !isInitializedRef.current || numChannels === 0) { // Use dataRef
+    if (!wglpRef.current || !dataRef.current || !isInitializedRef.current || numChannels === 0) {
       return;
     }
-  
+
     const wglp = wglpRef.current;
-    const lines = dataRef.current; // Use dataRef
+    const lines = dataRef.current;
     const now = performance.now();
-  
-    // FPS Throttling Logic
+
+    // FPS Throttling
     if (targetFps && targetFps > 0) {
       const frameInterval = 1000 / targetFps;
       const elapsed = now - lastRenderTimeRef.current;
-
       if (elapsed < frameInterval) {
-        return; // Skip this frame
+        return;
       }
-      lastRenderTimeRef.current = now - (elapsed % frameInterval); // Adjust for consistent timing
+      lastRenderTimeRef.current = now - (elapsed % frameInterval);
     } else {
-      // No FPS target, or invalid target, render as fast as possible (synced with rAF)
       lastRenderTimeRef.current = now;
     }
 
-    // The following loop for offsetX is not strictly needed for wglp.update()
-    // but kept if any per-line logic might be re-introduced.
-    // If it's purely for wglp.update(), it can be removed.
-    for (let ch = 0; ch < numChannels; ch++) {
-      const line = lines[ch];
-      if (!line || line.numPoints === 0) continue; // Skip if line missing or has no points
-      // No need to set offsetX here anymore
+    // Get data from the buffer
+    const sampleChunks = dataBuffer.getAndClearData();
+
+    if (sampleChunks.length > 0) {
+      let dataWasAdded = false;
+      sampleChunks.forEach((sampleChunk: any) => {
+        const samples = sampleChunk.samples;
+        if (samples && samples.length > 0) {
+          const channelBatches: Record<number, number[]> = {};
+          const channelOrder: number[] = [];
+          
+          samples.forEach((sample: any) => {
+            const chIndex = sample.channelIndex;
+            if (chIndex < numChannels) {
+              if (!channelBatches[chIndex]) {
+                channelBatches[chIndex] = [];
+                channelOrder.push(chIndex);
+              }
+              channelBatches[chIndex].push(sample.value);
+            }
+          });
+          
+          channelOrder.forEach((chIndex) => {
+            if (lines[chIndex] && channelBatches[chIndex]) {
+              lines[chIndex].shiftAdd(new Float32Array(channelBatches[chIndex]));
+              dataWasAdded = true;
+            }
+          });
+        }
+      });
     }
-  
+
     wglp.update();
-  
-  }, [numChannels, config, targetFps, dataRef, isInitializedRef]);
+
+  }, [numChannels, config, targetFps, dataRef, isInitializedRef, dataBuffer]);
 
 
   // Effect 1: Initialize WebGL Plot when canvas is ready and sized
@@ -212,8 +232,8 @@ export const EegRenderer = React.memo(function EegRenderer({
     // No cleanup needed specifically for adding lines, Effect 1 handles plot cleanup.
 
   // Depend on plot initialization state, lines readiness state, and the actual dataRef content
-  // Check isInitializedRef.current inside, depend on linesReady and dataVersion
-  }, [linesReady]);
+  // Check isInitializedRef.current inside, depend on linesReady
+  }, [linesReady, dataRef, wglpRef, isInitializedRef]);
 
 
   // Resize Effect: Now depends on containerWidth and containerHeight props

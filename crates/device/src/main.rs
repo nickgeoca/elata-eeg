@@ -8,11 +8,10 @@ mod elata_emu_v1;
 mod plugin;
 mod event_bus;
 mod plugins;
+mod plugin_supervisor;
 
 // Import plugin implementations
-use csv_recorder_plugin::{CsvRecorderPlugin, CsvRecorderConfig};
-use basic_voltage_filter_plugin::{BasicVoltageFilterPlugin, BasicVoltageFilterConfig};
-use crate::plugins::{BrainWavesPlugin, BrainWavesConfig};
+use crate::plugin_supervisor::PluginSupervisor;
 
 use eeg_sensor::AdcConfig;
 use tokio::sync::{broadcast, Mutex, mpsc};
@@ -45,107 +44,6 @@ fn to_daemon_error<E: std::fmt::Display>(e: E) -> Box<dyn std::error::Error + Se
     Box::new(DaemonError(e.to_string()))
 }
 
-/// Plugin supervisor configuration
-#[derive(Debug, Clone)]
-struct SupervisorConfig {
-    max_retries: u8,
-    base_backoff_ms: u64,
-}
-
-impl Default for SupervisorConfig {
-    fn default() -> Self {
-        Self {
-            max_retries: 3,
-            base_backoff_ms: 1000,
-        }
-    }
-}
-
-/// Supervise a plugin with automatic restart on failure
-async fn supervise_plugin(
-    plugin: Arc<dyn EegPlugin>,
-    bus: Arc<EventBus>,
-    shutdown_token: CancellationToken,
-    config: SupervisorConfig,
-) {
-    let plugin_name = plugin.name();
-    let mut attempts = 0;
-    
-    tracing::info!(plugin = plugin_name, "Starting plugin supervision");
-    
-    loop {
-        if shutdown_token.is_cancelled() {
-            tracing::info!(plugin = plugin_name, "Shutdown requested, stopping supervision");
-            break;
-        }
-        
-        let receiver = bus.subscribe(
-            format!("{}-{}", plugin_name, attempts),
-            128, // Buffer size
-            plugin.event_filter(),
-        ).await;
-        
-        if let Err(e) = plugin.initialize().await {
-            tracing::error!(plugin = plugin_name, error = %e, "Plugin initialization failed");
-            attempts += 1;
-            if attempts > config.max_retries {
-                tracing::error!(plugin = plugin_name, "Giving up after {} attempts", config.max_retries);
-                break;
-            }
-            
-            let backoff_duration = tokio::time::Duration::from_millis(
-                config.base_backoff_ms * (2_u64.pow(attempts as u32 - 1))
-            );
-            tracing::warn!(plugin = plugin_name, "Retrying in {:?}", backoff_duration);
-            tokio::time::sleep(backoff_duration).await;
-            continue;
-        }
-        
-        let run_result = plugin.run(bus.clone(), receiver, shutdown_token.clone()).await;
-        
-        if let Err(e) = plugin.cleanup().await {
-            tracing::warn!(plugin = plugin_name, error = %e, "Plugin cleanup failed");
-        }
-        
-        match run_result {
-            Ok(()) => {
-                tracing::info!(plugin = plugin_name, "Plugin completed successfully");
-                break;
-            }
-            Err(e) => {
-                attempts += 1;
-                tracing::error!(
-                    plugin = plugin_name,
-                    error = %e,
-                    attempt = attempts,
-                    "Plugin crashed"
-                );
-                
-                if attempts > config.max_retries {
-                    tracing::error!(
-                        plugin = plugin_name,
-                        "Giving up after {} attempts",
-                        config.max_retries
-                    );
-                    break;
-                }
-                
-                let backoff_duration = tokio::time::Duration::from_millis(
-                    config.base_backoff_ms * (2_u64.pow(attempts as u32 - 1))
-                );
-                tracing::warn!(
-                    plugin = plugin_name,
-                    "Retrying in {:?}",
-                    backoff_duration
-                );
-                tokio::time::sleep(backoff_duration).await;
-            }
-        }
-    }
-    
-    tracing::info!(plugin = plugin_name, "Plugin supervision ended");
-}
-
 /// Data acquisition loop that converts raw ADC data to SensorEvents and broadcasts them
 async fn data_acquisition_loop(
     mut adc_rx: tokio::sync::mpsc::Receiver<AdcData>,
@@ -156,7 +54,7 @@ async fn data_acquisition_loop(
     use std::collections::HashMap;
 
     let mut frame_counter = 0u64;
-    let mut channel_buffers: HashMap<u8, Vec<(i32, u64)>> = HashMap::new();
+    let mut channel_buffers: HashMap<u8, Vec<(i32, f32, u64)>> = HashMap::new();
 
     tracing::info!("Starting data acquisition loop");
 
@@ -179,15 +77,16 @@ async fn data_acquisition_loop(
                 };
 
                 let buffer = channel_buffers.entry(adc_data.channel).or_insert_with(Vec::new);
-                buffer.push((adc_data.value, adc_data.timestamp));
+                buffer.push((adc_data.raw_value, adc_data.voltage, adc_data.timestamp));
 
                 let min_buffer_size = channel_buffers.values().map(|v| v.len()).min().unwrap_or(0);
                 if min_buffer_size >= batch_size {
-                    let mut flattened_samples = Vec::with_capacity(batch_size * num_channels);
+                    let mut flattened_raw_samples = Vec::with_capacity(batch_size * num_channels);
+                    let mut flattened_voltage_samples = Vec::with_capacity(batch_size * num_channels);
                     let mut sample_timestamps = Vec::with_capacity(batch_size * num_channels);
 
                     // Create a structure to hold all the batches
-                    let mut channel_batches: Vec<Vec<(i32, u64)>> = Vec::with_capacity(num_channels);
+                    let mut channel_batches: Vec<Vec<(i32, f32, u64)>> = Vec::with_capacity(num_channels);
                     for i in 0..num_channels {
                         if let Some(buffer) = channel_buffers.get_mut(&(i as u8)) {
                             channel_batches.push(buffer.drain(0..batch_size).collect());
@@ -200,17 +99,17 @@ async fn data_acquisition_loop(
                     // Interleave the data
                     for sample_idx in 0..batch_size {
                         for channel_idx in 0..num_channels {
-                            if let Some((raw_val, timestamp)) = channel_batches[channel_idx].get(sample_idx) {
-                                let vref_f32 = vref as f32;
-                                let voltage = (*raw_val as f32) * (vref_f32 / (1 << 24) as f32);
-                                flattened_samples.push(voltage);
+                            if let Some((raw_val, voltage, timestamp)) = channel_batches[channel_idx].get(sample_idx) {
+                                flattened_raw_samples.push(*raw_val);
+                                flattened_voltage_samples.push(*voltage);
                                 sample_timestamps.push(*timestamp);
                             } else {
                                 // Handle missing data for a channel gracefully
-                                flattened_samples.push(0.0);
+                                flattened_raw_samples.push(0);
+                                flattened_voltage_samples.push(0.0);
                                 // Attempt to use a timestamp from another channel for this sample index, or 0
                                 let fallback_ts = channel_batches.iter()
-                                    .find_map(|b| b.get(sample_idx).map(|(_, ts)| *ts))
+                                    .find_map(|b| b.get(sample_idx).map(|(_, _, ts)| *ts))
                                     .unwrap_or(0);
                                 sample_timestamps.push(fallback_ts);
                             }
@@ -220,7 +119,8 @@ async fn data_acquisition_loop(
                     let eeg_packet = EegPacket::new(
                         sample_timestamps,
                         frame_counter,
-                        flattened_samples,
+                        flattened_raw_samples,
+                        flattened_voltage_samples,
                         num_channels,
                         sample_rate.into(),
                     );
@@ -301,121 +201,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     });
     
-    // === PLUGIN INITIALIZATION ===
+    // === PLUGIN SUPERVISOR INITIALIZATION ===
     
-    let eeg_daemon_config = Arc::new(eeg_types::DaemonConfig {
-        max_recording_length_minutes: daemon_config.max_recording_length_minutes,
-        recordings_directory: daemon_config.recordings_directory.clone(),
-        session: daemon_config.session.clone(),
-        batch_size: daemon_config.batch_size,
-        driver_type: daemon_config.driver_type.clone(),
-        filter_config: eeg_types::FilterConfig {
-            dsp_high_pass_cutoff_hz: daemon_config.filter_config.dsp_high_pass_cutoff_hz,
-            dsp_low_pass_cutoff_hz: daemon_config.filter_config.dsp_low_pass_cutoff_hz,
-            powerline_filter_hz: daemon_config.filter_config.powerline_filter_hz.unwrap_or(0) as f32,
-        },
-    });
-
-    let csv_config = CsvRecorderConfig {
-        daemon_config: eeg_daemon_config.clone(),
-        adc_config: initial_config.clone(),
-        is_recording_shared: is_recording.clone(),
-    };
+    let mut plugin_supervisor = PluginSupervisor::new(event_bus.clone());
+    plugin_supervisor.register_plugins().await;
+    plugin_supervisor.start_all(shutdown_token.clone());
     
-    let filter_config = BasicVoltageFilterConfig {
-        daemon_config: eeg_daemon_config.clone(),
-        sample_rate: initial_config.sample_rate,
-        num_channels: initial_config.channels.len(),
-    };
-    
-    let brain_waves_config = BrainWavesConfig {
-        fft_size: 512,
-        sample_rate: initial_config.sample_rate as f32,
-        num_channels: initial_config.channels.len(),
-        window_function: "hanning".to_string(),
-    };
-    
-    let csv_plugin = Arc::new(CsvRecorderPlugin::new(csv_config)) as Arc<dyn EegPlugin>;
-    let filter_plugin = Arc::new(BasicVoltageFilterPlugin::new(filter_config)) as Arc<dyn EegPlugin>;
-    let brain_waves_plugin = Arc::new(BrainWavesPlugin::new(brain_waves_config)) as Arc<dyn EegPlugin>;
-    
-    let supervisor_config = SupervisorConfig::default();
-    
-    let csv_supervisor_bus = event_bus.clone();
-    let csv_supervisor_shutdown = shutdown_token.clone();
-    let csv_supervisor_config = supervisor_config.clone();
-    let mut csv_supervisor_handle = tokio::spawn(async move {
-        supervise_plugin(csv_plugin, csv_supervisor_bus, csv_supervisor_shutdown, csv_supervisor_config).await;
-    });
-    
-    let filter_supervisor_bus = event_bus.clone();
-    let filter_supervisor_shutdown = shutdown_token.clone();
-    let filter_supervisor_config = supervisor_config.clone();
-    let mut filter_supervisor_handle = tokio::spawn(async move {
-        supervise_plugin(filter_plugin, filter_supervisor_bus, filter_supervisor_shutdown, filter_supervisor_config).await;
-    });
-    
-    let brain_waves_supervisor_bus = event_bus.clone();
-    let brain_waves_supervisor_shutdown = shutdown_token.clone();
-    let brain_waves_supervisor_config = supervisor_config.clone();
-    let mut brain_waves_supervisor_handle = tokio::spawn(async move {
-        supervise_plugin(brain_waves_plugin, brain_waves_supervisor_bus, brain_waves_supervisor_shutdown, brain_waves_supervisor_config).await;
-    });
-    
-    tracing::info!("Event-driven plugins initialized and supervised");
+    tracing::info!("Plugin supervisor initialized and all plugins started.");
     
     // Create a broadcast channel for config updates
     let (config_applied_tx, _) = broadcast::channel::<AdcConfig>(16);
 
-    // Create a broadcast channel for raw EEG data to be sent to websockets
-    let (eeg_data_tx, _) = broadcast::channel::<Vec<u8>>(128);
-
-    // Task to forward both RawEeg and FilteredEeg events to the WebSocket data channel
-    // Priority: FilteredEeg first, then RawEeg as fallback
-    let mut eeg_data_subscriber = event_bus.subscribe(
-        "eeg_data_forwarder".to_string(),
-        128,
-        vec![EventFilter::FilteredEegOnly, EventFilter::RawEegOnly],
-    ).await;
-    let eeg_data_tx_clone = eeg_data_tx.clone();
-    let eeg_forwarder_shutdown = shutdown_token.clone();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = eeg_forwarder_shutdown.cancelled() => break,
-                event_result = eeg_data_subscriber.recv() => {
-                    match event_result {
-                        Some(SensorEvent::FilteredEeg(packet)) => {
-                            tracing::debug!("Forwarding FilteredEeg packet to WebSocket clients");
-                            let bytes = packet.to_binary();
-                            if eeg_data_tx_clone.send(bytes).is_err() {
-                                tracing::warn!("No active WebSocket clients to receive FilteredEeg data.");
-                            }
-                        }
-                        Some(SensorEvent::RawEeg(packet)) => {
-                            tracing::debug!("Forwarding RawEeg packet to WebSocket clients");
-                            let bytes = packet.to_binary();
-                            if eeg_data_tx_clone.send(bytes).is_err() {
-                                tracing::warn!("No active WebSocket clients to receive RawEeg data.");
-                            }
-                        }
-                        Some(_) => {}
-                        None => break,
-                    }
-                }
-            }
-        }
-        tracing::info!("EEG data forwarder task shut down.");
-    });
+    // The WebSocket server will now subscribe directly to the main event bus.
+    // This removes the need for a separate forwarding task and an intermediate channel.
 
     // === CONNECTION MANAGER SETUP ===
     let (connection_tx, connection_rx) = mpsc::channel(32);
 
-    let cm_event_subscriber = event_bus.subscribe(
-        "connection_manager".to_string(),
-        256,
-        vec![EventFilter::FftOnly],
-    ).await;
+    let cm_event_subscriber = event_bus.subscribe();
 
     let mut connection_manager = ConnectionManager::new(connection_rx, cm_event_subscriber);
     let cm_shutdown = shutdown_token.clone();
@@ -427,7 +230,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (ws_routes, mut config_update_rx) = server::setup_websocket_routes(
         config.clone(),
         config_applied_tx.clone(),
-        eeg_data_tx,
         connection_tx,
         is_recording.clone(),
     );
@@ -456,18 +258,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 break;
             },
             
-            result = &mut csv_supervisor_handle => {
-                tracing::warn!("CSV recorder plugin supervisor completed: {:?}", result);
-                break;
-            },
-            
-            result = &mut filter_supervisor_handle => {
-                tracing::warn!("Basic voltage filter plugin supervisor completed: {:?}", result);
-                break;
-            },
-            
-            result = &mut brain_waves_supervisor_handle => {
-                tracing::warn!("Brain waves FFT plugin supervisor completed: {:?}", result);
+            result = plugin_supervisor.join_all() => {
+                tracing::warn!("Plugin supervisor completed: {:?}", result);
                 break;
             },
             

@@ -420,10 +420,14 @@ fn spawn_interrupt_and_processing_tasks(
                         for i in 0..timestamps.len() {
                             let timestamp = timestamps[i];
                             for (channel_idx, &channel_num) in config.channels.iter().enumerate() {
-                                if let Some(raw_value) = raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)) {
+                                if let (Some(raw_value), Some(voltage)) = (
+                                    raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)),
+                                    voltage_sample_buffer.get(channel_idx).and_then(|q| q.get(i)),
+                                ) {
                                     data_vec.push(AdcData {
                                         channel: channel_num,
-                                        value: *raw_value,
+                                        raw_value: *raw_value,
+                                        voltage: *voltage,
                                         timestamp,
                                     });
                                 }
@@ -483,10 +487,14 @@ fn spawn_interrupt_and_processing_tasks(
             for i in 0..timestamps.len() {
                 let timestamp = timestamps[i];
                 for (channel_idx, &channel_num) in config.channels.iter().enumerate() {
-                    if let Some(raw_value) = raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)) {
+                    if let (Some(raw_value), Some(voltage)) = (
+                        raw_sample_buffer.get(channel_idx).and_then(|q| q.get(i)),
+                        voltage_sample_buffer.get(channel_idx).and_then(|q| q.get(i)),
+                    ) {
                         data_vec.push(AdcData {
                             channel: channel_num,
-                            value: *raw_value,
+                            raw_value: *raw_value,
+                            voltage: *voltage,
                             timestamp,
                         });
                     }

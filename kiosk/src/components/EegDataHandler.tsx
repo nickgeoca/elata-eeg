@@ -29,6 +29,7 @@ interface EegDataHandlerProps {
     samplesProcessed: number;
   }>; // Ref for debug information including packet count
   onFftData?: (channelIndex: number, fftOutput: number[]) => void; // New callback for FFT data
+  subscriptions: string[]; // <-- New prop for subscriptions
 }
 
 export function useEegDataHandler({
@@ -39,7 +40,8 @@ export function useEegDataHandler({
   lastDataChunkTimeRef,
   latestTimestampRef,
   debugInfoRef,
-  onFftData
+  onFftData,
+  subscriptions, // <-- New prop
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
   const wsRef = useRef<WebSocket | null>(null);
@@ -56,6 +58,7 @@ export function useEegDataHandler({
   const onErrorRef = useRef(onError);
   const onFftDataRef = useRef(onFftData);
   const onSamplesRef = useRef(onSamples);
+  const subscriptionsRef = useRef(subscriptions);
 
   // Update refs whenever props change
   useEffect(() => {
@@ -77,6 +80,28 @@ export function useEegDataHandler({
   useEffect(() => {
     onSamplesRef.current = onSamples;
   }, [onSamples]);
+
+  useEffect(() => {
+    // This effect handles sending subscription messages when the list changes.
+    const oldSubscriptions = new Set(subscriptionsRef.current);
+    const newSubscriptions = new Set(subscriptions);
+    const toSubscribe = [...newSubscriptions].filter(x => !oldSubscriptions.has(x));
+    const toUnsubscribe = [...oldSubscriptions].filter(x => !newSubscriptions.has(x));
+
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      if (toSubscribe.length > 0) {
+        console.log('[EegDataHandler] Subscribing to:', toSubscribe);
+        ws.send(JSON.stringify({ action: 'subscribe', topics: toSubscribe }));
+      }
+      if (toUnsubscribe.length > 0) {
+        console.log('[EegDataHandler] Unsubscribing from:', toUnsubscribe);
+        ws.send(JSON.stringify({ action: 'unsubscribe', topics: toUnsubscribe }));
+      }
+    }
+
+    subscriptionsRef.current = subscriptions;
+  }, [subscriptions]);
 
 
   // Enhanced debugging state
@@ -140,7 +165,7 @@ export function useEegDataHandler({
   
       const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
       const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${wsProtocol}://${wsHost}:8080/eeg`);
+      const ws = new WebSocket(`${wsProtocol}://${wsHost}:8080/ws/data`); // <-- Use the new endpoint
       wsRef.current = ws;
       
       ws.binaryType = 'arraybuffer';
@@ -156,6 +181,13 @@ export function useEegDataHandler({
           lastConnectionTime: now,
         }));
         console.log(`[EegDataHandler] WebSocket connection established.`);
+
+        // Send initial subscription message
+        const currentSubscriptions = subscriptionsRef.current;
+        if (ws.readyState === WebSocket.OPEN && currentSubscriptions.length > 0) {
+          console.log('[EegDataHandler] Sending initial subscriptions:', currentSubscriptions);
+          ws.send(JSON.stringify({ action: 'subscribe', topics: currentSubscriptions }));
+        }
       };
       
       ws.onmessage = (event: MessageEvent) => {
@@ -163,6 +195,18 @@ export function useEegDataHandler({
         
         try {
           const now = performance.now();
+          // --- This is the fix ---
+          // Acknowledge that data is flowing on ANY message, not just binary.
+          // This prevents the "no data" status if the first message is text (e.g., subscription confirmation).
+          onDataUpdateRef.current?.(true);
+          if (dataReceivedTimeoutRef.current) {
+            clearTimeout(dataReceivedTimeoutRef.current);
+          }
+          dataReceivedTimeoutRef.current = setTimeout(() => {
+            onDataUpdateRef.current?.(false);
+          }, 1000);
+          // --- End of fix ---
+
           setDebugInfo(prev => ({
             ...prev,
             messagesReceived: prev.messagesReceived + 1,
@@ -170,19 +214,16 @@ export function useEegDataHandler({
             lastMessageType: event.data instanceof ArrayBuffer ? 'binary' : typeof event.data,
           }));
 
-          if (!(event.data instanceof ArrayBuffer)) {
-            console.warn("[EegDataHandler] Received non-binary data:", event.data);
-            setDebugInfo(prev => ({ ...prev, textPacketsReceived: prev.textPacketsReceived + 1 }));
-            return;
-          }
+          // Handle both binary (EEG) and text (FFT) messages
+          if (event.data instanceof ArrayBuffer) {
+            // Existing binary processing logic...
+            setDebugInfo(prev => ({ ...prev, binaryPacketsReceived: prev.binaryPacketsReceived + 1 }));
 
-          setDebugInfo(prev => ({ ...prev, binaryPacketsReceived: prev.binaryPacketsReceived + 1 }));
-
-          const buffer = new Uint8Array(event.data);
-          if (buffer.length === 0) {
-            console.warn("[EegDataHandler] Received empty data packet");
-            return;
-          }
+            const buffer = new Uint8Array(event.data);
+            if (buffer.length === 0) {
+              console.warn("[EegDataHandler] Received empty data packet");
+              return;
+            }
 
           // Use latest config from ref
           const currentConfig = configRef.current;
@@ -270,22 +311,37 @@ export function useEegDataHandler({
             debugInfoRef.current.samplesProcessed += batchSize * configuredChannelCount;
           }
 
-          onDataUpdateRef.current?.(true);
-
-          if (dataReceivedTimeoutRef.current) {
-            clearTimeout(dataReceivedTimeoutRef.current);
+          } else if (typeof event.data === 'string') {
+            // New text message processing for FFT data
+            setDebugInfo(prev => ({ ...prev, textPacketsReceived: prev.textPacketsReceived + 1 }));
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === 'FftPacket' && onFftDataRef.current) {
+                // The backend now sends FFT data per-channel in a structured way.
+                // We assume the `data` field is an array of FFT results, one for each channel.
+                if (Array.isArray(message.data)) {
+                  message.data.forEach((channelFft: any, index: number) => {
+                    // Assuming channelFft has a 'power' property which is the array of numbers.
+                    if (channelFft && Array.isArray(channelFft.power)) {
+                       onFftDataRef.current?.(index, channelFft.power);
+                    }
+                  });
+                }
+              } else if (message.type === 'error') {
+                  console.error(`[EegDataHandler] Received error from backend: ${message.message}`);
+                  onErrorRef.current?.(message.message);
+              }
+            } catch (error) {
+              console.error("[EegDataHandler] Error parsing FFT JSON data:", error);
+            }
           }
-          dataReceivedTimeoutRef.current = setTimeout(() => {
-            onDataUpdateRef.current?.(false);
-          }, 1000);
-
         } catch (error) {
-          console.error("[EegDataHandler] Error parsing EEG binary data:", error);
+          console.error("[EegDataHandler] Error in onmessage handler:", error);
           setDebugInfo(prev => ({
             ...prev,
             lastError: error instanceof Error ? error.message : String(error),
           }));
-          onErrorRef.current?.(`Error parsing EEG data: ${error}`);
+          onErrorRef.current?.(`Error processing data: ${error}`);
         }
       };
       

@@ -1,16 +1,20 @@
 use std::sync::Arc;
+use tokio::sync::{broadcast, Mutex};
 use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
 use anyhow::Result;
-use tracing::{info, warn, error, debug};
+use tracing::{info, error, debug, warn};
 
 use eeg_types::{
     event::{SensorEvent, EegPacket, FilteredEegPacket},
-    plugin::{EegPlugin, PluginConfig},
+    plugin::{EegPlugin, PluginConfig, EventBus},
     event::EventFilter,
     config::DaemonConfig,
 };
-use basic_voltage_filter::SignalProcessor;
+
+mod dsp;
+use dsp::SignalProcessor;
+use eeg_sensor::ads1299::helpers::ch_raw_to_voltage;
 
 /// Configuration for the Basic Voltage Filter Plugin
 #[derive(Clone, Debug)]
@@ -18,6 +22,16 @@ pub struct BasicVoltageFilterConfig {
     pub daemon_config: Arc<DaemonConfig>,
     pub sample_rate: u32,
     pub num_channels: usize,
+}
+
+impl Default for BasicVoltageFilterConfig {
+    fn default() -> Self {
+        Self {
+            daemon_config: Arc::new(DaemonConfig::default()),
+            sample_rate: 500, // Default sample rate
+            num_channels: 8,   // Default channel count
+        }
+    }
 }
 
 impl PluginConfig for BasicVoltageFilterConfig {
@@ -39,11 +53,21 @@ impl PluginConfig for BasicVoltageFilterConfig {
 /// Basic Voltage Filter Plugin - applies DSP filtering to raw EEG data
 pub struct BasicVoltageFilterPlugin {
     config: BasicVoltageFilterConfig,
-    signal_processor: SignalProcessor,
+    signal_processor: Arc<Mutex<SignalProcessor>>,
+}
+
+impl Clone for BasicVoltageFilterPlugin {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            signal_processor: Arc::clone(&self.signal_processor),
+        }
+    }
 }
 
 impl BasicVoltageFilterPlugin {
-    pub fn new(config: BasicVoltageFilterConfig) -> Self {
+    pub fn new() -> Self {
+        let config = BasicVoltageFilterConfig::default();
         let signal_processor = SignalProcessor::new(
             config.sample_rate,
             config.num_channels,
@@ -54,65 +78,74 @@ impl BasicVoltageFilterPlugin {
 
         Self {
             config,
-            signal_processor,
+            signal_processor: Arc::new(Mutex::new(signal_processor)),
         }
     }
 
     /// Process EEG packet through the signal processor
     async fn process_eeg_packet(&mut self, packet: &EegPacket) -> Result<FilteredEegPacket> {
-        // Convert Arc<[f32]> to Vec<Vec<f32>> format expected by SignalProcessor
-        let samples_per_channel = packet.samples.len() / self.config.num_channels;
-        let mut channel_samples = vec![vec![0.0; samples_per_channel]; self.config.num_channels];
-        
-        // Reshape flat samples array into per-channel format
-        for (sample_idx, &sample) in packet.samples.iter().enumerate() {
-            let channel_idx = sample_idx / samples_per_channel;
-            let sample_in_channel = sample_idx % samples_per_channel;
-            if channel_idx < self.config.num_channels && sample_in_channel < samples_per_channel {
-                channel_samples[channel_idx][sample_in_channel] = sample;
-            }
+        let num_channels = self.config.num_channels;
+        if num_channels == 0 {
+            return Err(anyhow::anyhow!("Number of channels is zero"));
         }
 
-        // Process each channel through the signal processor
-        for (channel_idx, channel_data) in channel_samples.iter_mut().enumerate() {
-            if channel_idx < self.config.num_channels {
-                // Create a copy of input for processing
-                let input_samples = channel_data.clone();
-                match self.signal_processor.process_chunk(
-                    channel_idx, 
-                    &input_samples, 
-                    channel_data.as_mut_slice()
+        // Get VREF and Gain from the config for voltage conversion
+        // TODO: This is a temporary solution. The vref and gain values should be
+        // retrieved from the AdcConfig, not hardcoded.
+        let vref = 4.5;
+        let gain = 24.0;
+
+        // Convert raw i32 samples to f32 voltage
+        let voltage_samples: Vec<f32> = packet.raw_samples
+            .iter()
+            .map(|&raw_sample| ch_raw_to_voltage(raw_sample, vref, gain))
+            .collect();
+
+        let samples_per_channel = voltage_samples.len() / num_channels;
+        if samples_per_channel == 0 {
+            return Ok(FilteredEegPacket {
+                timestamps: packet.timestamps.clone(),
+                frame_id: packet.frame_id,
+                samples: voltage_samples.into(),
+                channel_count: num_channels,
+                sample_rate: packet.sample_rate,
+            });
+        }
+
+        // Create a mutable copy of the samples to be processed in-place
+        let mut processed_samples = voltage_samples;
+        let mut signal_processor = self.signal_processor.lock().await;
+
+        // Process each channel's data, which is stored contiguously
+        for channel_idx in 0..num_channels {
+            let start = channel_idx * samples_per_channel;
+            let end = start + samples_per_channel;
+            
+            if let Some(channel_chunk) = processed_samples.get_mut(start..end) {
+                // The `process_chunk` function now needs to handle a single slice.
+                // We pass the same slice as input and output for in-place processing.
+                let input_chunk = channel_chunk.to_vec(); // Create a temporary copy for the input parameter
+                match signal_processor.process_chunk(
+                    channel_idx,
+                    &input_chunk,
+                    channel_chunk, // This is the mutable slice for output
                 ) {
-                    Ok(_) => {
-                        debug!("[basic_voltage_filter] Successfully processed channel {}", channel_idx);
-                    }
+                    Ok(_) => debug!("[basic_voltage_filter] Successfully processed channel {}", channel_idx),
                     Err(e) => {
                         error!("[basic_voltage_filter] Error processing channel {}: {}", channel_idx, e);
-                        // Keep original data on error
-                        *channel_data = input_samples;
+                        // On error, we revert the chunk to its original state
+                        processed_samples[start..end].copy_from_slice(&input_chunk);
                     }
-                }
-            }
-        }
-
-        // Convert back to flat Arc<[f32]> format
-        let mut filtered_samples = Vec::with_capacity(packet.samples.len());
-        for sample_idx in 0..samples_per_channel {
-            for channel_idx in 0..self.config.num_channels {
-                if sample_idx < channel_samples[channel_idx].len() {
-                    filtered_samples.push(channel_samples[channel_idx][sample_idx]);
-                } else {
-                    filtered_samples.push(0.0);
                 }
             }
         }
 
         Ok(FilteredEegPacket {
-            timestamp: packet.timestamps.first().cloned().unwrap_or(0),
-            source_frame_id: packet.frame_id,
-            filtered_samples: filtered_samples.into(),
-            channel_count: self.config.num_channels,
-            filter_type: "basic_voltage".to_string(),
+            timestamps: packet.timestamps.clone(),
+            frame_id: packet.frame_id,
+            samples: processed_samples.into(),
+            channel_count: num_channels,
+            sample_rate: packet.sample_rate,
         })
     }
 }
@@ -121,6 +154,10 @@ impl BasicVoltageFilterPlugin {
 impl EegPlugin for BasicVoltageFilterPlugin {
     fn name(&self) -> &'static str {
         "basic_voltage_filter"
+    }
+
+    fn clone_box(&self) -> Box<dyn EegPlugin> {
+        Box::new(self.clone())
     }
     
     fn description(&self) -> &'static str {
@@ -131,16 +168,18 @@ impl EegPlugin for BasicVoltageFilterPlugin {
         vec![EventFilter::RawEegOnly]
     }
 
+    async fn initialize(&mut self) -> Result<()> {
+        info!("[{}] Initializing...", self.name());
+        self.config.validate()
+    }
+
     async fn run(
-        &self,
-        bus: Arc<dyn std::any::Any + Send + Sync>,
-        mut receiver: tokio::sync::mpsc::Receiver<SensorEvent>,
+        &mut self,
+        bus: Arc<dyn EventBus>,
+        mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
-        info!("[{}] Starting basic voltage filter plugin", self.name());
-        
-        // Create a mutable copy for processing state
-        let mut filter = BasicVoltageFilterPlugin::new(self.config.clone());
+        info!("[{}] Starting...", self.name());
         
         loop {
             tokio::select! {
@@ -149,29 +188,29 @@ impl EegPlugin for BasicVoltageFilterPlugin {
                     info!("[{}] Received shutdown signal", self.name());
                     break;
                 }
-                Some(event) = receiver.recv() => {
-                    match event {
-                        SensorEvent::RawEeg(packet) => {
-                            debug!("[{}] Processing raw EEG packet with frame_id: {}", 
+                event_result = receiver.recv() => {
+                    match event_result {
+                        Ok(SensorEvent::RawEeg(packet)) => {
+                            debug!("[{}] Processing raw EEG packet with frame_id: {}",
                                    self.name(), packet.frame_id);
                             
-                            match filter.process_eeg_packet(&packet).await {
+                            match self.process_eeg_packet(&packet).await {
                                 Ok(filtered_packet) => {
-                                    // Publish filtered data back to the event bus
                                     let filtered_event = SensorEvent::FilteredEeg(Arc::new(filtered_packet));
-                                    // TODO: Cast bus back to EventBus trait and broadcast
-                                    // For now, just log that we would publish
-                                    debug!("[{}] Successfully processed filtered EEG data (would publish to bus)",
-                                           self.name());
+                                    bus.broadcast(filtered_event).await;
                                 }
                                 Err(e) => {
                                     error!("[{}] Failed to process EEG packet: {}", self.name(), e);
                                 }
                             }
                         }
-                        _ => {
-                            // Ignore other event types
-                            debug!("[{}] Ignoring non-RawEeg event", self.name());
+                        Ok(_) => {} // Ignore other event types
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("[{}] Lagged by {} messages", self.name(), n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("[{}] Receiver channel closed.", self.name());
+                            break;
                         }
                     }
                 }

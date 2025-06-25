@@ -250,7 +250,7 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
     }
     setFftLinesReady(true);
 
-  }, [config, containerWidth, plotWidth, fftData]);
+  }, [config, containerWidth, plotWidth]);
 
   // Animation loop to update FFT lines with new data
   useEffect(() => {
@@ -271,8 +271,9 @@ export function AppletFftRenderer({ // Renamed from FftRenderer
       const sampleRate = config.sample_rate;
       const firstChannelData = Object.values(fftData)[0];
       const numFreqBins = firstChannelData ? firstChannelData.length : 0;
+      if (numFreqBins === 0) return;
+
       const freqStep = sampleRate / (2 * (numFreqBins - 1));
-      
       const relevantFreqIndices: number[] = [];
       for (let i = 0; i < numFreqBins; i++) {
         const freq = i * freqStep;

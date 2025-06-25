@@ -1,158 +1,232 @@
 //! Manages WebSocket connections for streaming data to UI clients.
 use anyhow::Result;
 use futures_util::{stream::SplitSink, SinkExt, StreamExt};
-use std::collections::HashMap;
-use tokio::sync::mpsc;
+use std::collections::{HashMap, HashSet};
+use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn, error, debug};
 use uuid::Uuid;
 use warp::ws::{Message, WebSocket};
 use eeg_types::SensorEvent;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
 
 type ClientId = String;
 
-/// Represents a connected WebSocket client.
+/// Defines the structure for messages sent from the client to the server.
+#[derive(Deserialize, Debug)]
+struct ClientMessage {
+    action: String,
+    topics: Vec<String>,
+}
+
+/// Represents a connected WebSocket client with its subscriptions.
 struct Client {
     /// The sending half of the WebSocket connection.
     sender: SplitSink<WebSocket, Message>,
+    /// The set of topics the client is subscribed to.
+    subscriptions: HashSet<String>,
 }
 
-/// Manages all WebSocket client connections.
-///
-/// This struct is responsible for:
-/// - Accepting new WebSocket connections.
-/// - Subscribing to the main `EventBus`.
-/// - Forwarding relevant events to the appropriate clients.
-/// - Handling client disconnections gracefully.
+/// Manages all WebSocket client connections and their subscriptions.
 pub struct ConnectionManager {
-    /// Receives new WebSocket connections from the server routes.
     connection_rx: mpsc::Receiver<WebSocket>,
-    /// Receives sensor events from the main event bus.
-    event_rx: mpsc::Receiver<SensorEvent>,
-    /// Stores all active client connections.
-    clients: HashMap<ClientId, Client>,
+    event_rx: broadcast::Receiver<SensorEvent>,
+    clients: Arc<Mutex<HashMap<ClientId, Client>>>,
 }
 
 impl ConnectionManager {
-    /// Creates a new `ConnectionManager`.
     pub fn new(
         connection_rx: mpsc::Receiver<WebSocket>,
-        event_rx: mpsc::Receiver<SensorEvent>,
+        event_rx: broadcast::Receiver<SensorEvent>,
     ) -> Self {
         Self {
             connection_rx,
             event_rx,
-            clients: HashMap::new(),
+            clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// The main run loop for the manager.
-    ///
-    /// This should be spawned as a long-running, supervised task.
     pub async fn run(&mut self, shutdown_token: CancellationToken) {
         info!("ConnectionManager is running.");
         loop {
             tokio::select! {
-                biased; // Prioritize shutdown
+                biased;
                 _ = shutdown_token.cancelled() => {
                     info!("ConnectionManager received shutdown signal.");
                     break;
                 }
-
-                // Handle new incoming WebSocket connections
                 Some(websocket) = self.connection_rx.recv() => {
                     self.add_client(websocket);
                 }
-
-                // Handle new events from the event bus
-                Some(event) = self.event_rx.recv() => {
-                    if let SensorEvent::Fft(fft_packet) = event {
-                        // For now, we broadcast to all clients.
-                        // A future improvement would be topic-based subscriptions.
-                        let json_message = match parse_fft_binary_data(&fft_packet.to_binary()) {
-                            Ok(fft_results) => {
-                                let response = json!({
-                                    "timestamp": chrono::Utc::now().timestamp_millis(),
-                                    "fft_results": fft_results
-                                });
-                                response.to_string()
-                            }
-                            Err(e) => {
-                                error!("Failed to parse FFT data for client: {}", e);
-                                let error_response = json!({
-                                    "timestamp": chrono::Utc::now().timestamp_millis(),
-                                    "error": format!("Failed to parse FFT data: {}", e)
-                                });
-                                error_response.to_string()
-                            }
-                        };
-
-                        // Broadcast the JSON message to all connected clients
-                        self.broadcast_message(Message::text(json_message)).await;
-                    }
+                Ok(event) = self.event_rx.recv() => {
+                    self.dispatch_event(event).await;
                 }
             }
         }
         info!("ConnectionManager has shut down.");
     }
 
-    /// Adds a new client to the manager.
+    /// Adds a new client and spawns a task to handle its messages.
     fn add_client(&mut self, websocket: WebSocket) {
         let client_id = Uuid::new_v4().to_string();
         let (sender, mut receiver) = websocket.split();
+        let clients_arc = self.clients.clone();
 
         info!(client_id = %client_id, "New WebSocket client connected.");
 
-        let client = Client { sender };
-        self.clients.insert(client_id.clone(), client);
-
-        // Spawn a task to handle incoming messages from this specific client
-        // (mostly for handling disconnection).
+        // Initial client state with no subscriptions
+        let client = Client {
+            sender,
+            subscriptions: HashSet::new(),
+        };
+        
+        // Spawn a task to manage this specific client's lifecycle
         let client_id_clone = client_id.clone();
         tokio::spawn(async move {
-            while let Some(result) = receiver.next().await {
-                match result {
-                    Ok(msg) => {
+            // Insert the client into the shared map
+            clients_arc.lock().await.insert(client_id_clone.clone(), client);
+
+            loop {
+                match receiver.next().await {
+                    Some(Ok(msg)) => {
                         if msg.is_close() {
                             debug!(client_id = %client_id_clone, "Client sent close frame.");
                             break;
                         }
-                        // We don't expect any other messages from the client for now.
+                        if let Ok(text) = msg.to_str() {
+                            if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(text) {
+                                let mut clients_guard = clients_arc.lock().await;
+                                if let Some(client) = clients_guard.get_mut(&client_id_clone) {
+                                    match client_msg.action.as_str() {
+                                        "subscribe" => {
+                                            info!(client_id = %client_id_clone, "Subscribing to topics: {:?}", client_msg.topics);
+                                            client.subscriptions.extend(client_msg.topics);
+                                        }
+                                        "unsubscribe" => {
+                                            info!(client_id = %client_id_clone, "Unsubscribing from topics: {:?}", client_msg.topics);
+                                            for topic in client_msg.topics {
+                                                client.subscriptions.remove(&topic);
+                                            }
+                                        }
+                                        _ => warn!("Unknown client message action: {}", client_msg.action),
+                                    }
+                                }
+                            }
+                        }
                     }
-                    Err(e) => {
+                    Some(Err(e)) => {
                         warn!(client_id = %client_id_clone, "Error receiving from client: {}", e);
+                        break;
+                    }
+                    None => {
+                        // Stream has ended
                         break;
                     }
                 }
             }
-            // When the loop breaks, the client has disconnected.
-            // The ConnectionManager will handle the cleanup when it tries to send.
+            // Cleanup: Remove the client from the map upon disconnection
+            info!(client_id = %client_id_clone, "Client disconnected. Removing.");
+            clients_arc.lock().await.remove(&client_id_clone);
         });
     }
 
-    /// Sends a message to all connected clients.
-    async fn broadcast_message(&mut self, message: Message) {
-        if self.clients.is_empty() {
+    /// Dispatches an event to all clients subscribed to its topic.
+    async fn dispatch_event(&self, event: SensorEvent) {
+        let (topic, message) = match self.create_message_from_event(event) {
+            Some(result) => result,
+            None => return, // Event is not for UI clients
+        };
+
+        let mut clients_guard = self.clients.lock().await;
+        if clients_guard.is_empty() {
             return;
         }
 
         let mut disconnected_clients = Vec::new();
 
-        for (id, client) in self.clients.iter_mut() {
-            if let Err(e) = client.sender.send(message.clone()).await {
-                warn!(client_id = %id, "Failed to send message, client disconnected: {}", e);
-                disconnected_clients.push(id.clone());
+        for (id, client) in clients_guard.iter_mut() {
+            if client.subscriptions.contains(&topic) {
+                if let Err(e) = client.sender.send(message.clone()).await {
+                    warn!(client_id = %id, "Failed to send message, client disconnected: {}", e);
+                    disconnected_clients.push(id.clone());
+                }
             }
         }
 
         // Clean up disconnected clients
         for id in disconnected_clients {
-            self.clients.remove(&id);
+            clients_guard.remove(&id);
             info!(client_id = %id, "Removed disconnected client.");
         }
     }
+
+    /// Creates a topic and a WebSocket message from a SensorEvent.
+    fn create_message_from_event(&self, event: SensorEvent) -> Option<(String, Message)> {
+        match event {
+            SensorEvent::FilteredEeg(packet) => {
+                let binary_data = eeg_packet_to_binary(&packet);
+                Some(("FilteredEeg".to_string(), Message::binary(binary_data)))
+            }
+            SensorEvent::Fft(fft_packet) => {
+                let json_message = match parse_fft_binary_data(&fft_packet.to_binary()) {
+                    Ok(fft_results) => json!({
+                        "type": "FftPacket",
+                        "timestamp": chrono::Utc::now().timestamp_millis(),
+                        "data": fft_results
+                    }).to_string(),
+                    Err(e) => {
+                        error!("Failed to parse FFT data for client: {}", e);
+                        json!({
+                            "type": "error",
+                            "message": format!("Failed to parse FFT data: {}", e)
+                        }).to_string()
+                    }
+                };
+                Some(("FftPacket".to_string(), Message::text(json_message)))
+            }
+            _ => None, // Ignore RawEeg, System events, etc.
+        }
+    }
 }
+
+/// Serializes a `FilteredEegPacket` into a binary format for WebSocket transmission.
+///
+/// The binary format is designed to be easily parsed by the frontend `EegDataHandler`.
+///
+/// # Binary Format Layout:
+///
+/// | Part          | Type        | Size (bytes)                | Description                                     |
+/// |---------------|-------------|-----------------------------|-------------------------------------------------|
+/// | Total Samples | `u32`       | 4                           | Total number of sample points in the packet.    |
+/// | Timestamps    | `u64[]`     | `total_samples * 8`         | Array of timestamps (little-endian).            |
+/// | Sample Values | `f32[]`     | `total_samples * 4`         | Array of EEG voltage values (little-endian).    |
+///
+fn eeg_packet_to_binary(packet: &eeg_types::FilteredEegPacket) -> Vec<u8> {
+    let total_samples = packet.samples.len();
+    let timestamp_bytes = total_samples * 8;
+    let sample_bytes = total_samples * 4;
+    let total_capacity = 4 + timestamp_bytes + sample_bytes;
+
+    let mut buffer = Vec::with_capacity(total_capacity);
+
+    // 1. Write total number of samples (u32)
+    buffer.extend_from_slice(&(total_samples as u32).to_le_bytes());
+
+    // 2. Write all timestamps (u64)
+    for &timestamp in packet.timestamps.iter() {
+        buffer.extend_from_slice(&timestamp.to_le_bytes());
+    }
+
+    // 3. Write all sample values (f32)
+    for &sample in packet.samples.iter() {
+        buffer.extend_from_slice(&sample.to_le_bytes());
+    }
+
+    buffer
+}
+
 
 /// Parse binary FFT data into the JSON format expected by the kiosk.
 /// This function is moved from `server.rs` to centralize logic here.

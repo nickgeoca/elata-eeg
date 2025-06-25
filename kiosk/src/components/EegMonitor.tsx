@@ -8,7 +8,7 @@ import { useEegConfig } from './EegConfig';
 import { EegRenderer } from './EegRenderer';
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 // import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
-import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS, DISPLAY_FPS, SAMPLES_PER_DISPLAY_FRAME } from '../utils/eegConstants';
+import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS, DISPLAY_FPS } from '../utils/eegConstants';
 import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
@@ -17,6 +17,7 @@ import { getChannelColor } from '../utils/colorUtils';
 import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWavesDisplay';
 import { CircularGraphWrapper } from './CircularGraphWrapper';
 import { useEegData } from '../context/EegDataContext';
+import { useDataBuffer } from '../hooks/useDataBuffer'; // Import the new hook
 
 export default function EegMonitorWebGL() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -42,7 +43,9 @@ export default function EegMonitorWebGL() {
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
-  const [circularGraphData, setCircularGraphData] = useState<number[][]>([]); // State for circular graph data
+  const circularGraphBuffer = useDataBuffer<any>(); // Use the new buffer hook
+  const signalGraphBuffer = useDataBuffer<any>(); // Buffer for the main signal graph
+  const circularGraphLastProcessedLengthRef = useRef<number>(0);
   
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
@@ -53,7 +56,7 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get all data and config from the new central context
-  const { rawSamples, fftData, config, dataStatus } = useEegData();
+  const { dataVersion: eegDataVersion, getRawSamples, subscribeRaw, fftData, config, dataStatus, subscribe, unsubscribe } = useEegData();
   const { dataReceived, driverError, wsStatus } = dataStatus;
   const { status: configStatus, refreshConfig } = useEegConfig(); // Keep for settings UI
 
@@ -76,96 +79,52 @@ export default function EegMonitorWebGL() {
     }
   }, [config]);
 
-  // Effect to manage the /config WebSocket connection (Restored)
+  // Effect to manage data subscriptions based on the active view
   useEffect(() => {
-    if (activeView === 'settings') {
-      console.log('Attempting to connect to /config WebSocket for EegMonitor');
-      const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
-      const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const newConfigWs = new WebSocket(`${wsProtocol}://${wsHost}:8080/config`);
-      setConfigWebSocket(newConfigWs);
-      setIsConfigWsOpen(false); // Initially false until onopen
-      setConfigUpdateStatus('Connecting to config service...');
+    const isSignalGraphView = activeView === 'signalGraph';
+    const isCircularGraphView = activeView === 'circularGraph';
+    const isFftView = activeView === 'appletBrainWaves';
 
-      const connectionTimeout = setTimeout(() => {
-        if (newConfigWs.readyState !== WebSocket.OPEN) {
-          console.warn('/config WebSocket connection timed out for EegMonitor.');
-          setConfigUpdateStatus('Connection to config service timed out. Please check daemon.');
-          setIsConfigWsOpen(false);
-          if (newConfigWs.readyState === WebSocket.CONNECTING) {
-            newConfigWs.close();
-          }
+    let unsubSignal: (() => void) | null = null;
+    if (isSignalGraphView) {
+      console.log('[EegMonitor] Subscribing to raw data for Signal Graph.');
+      unsubSignal = subscribeRaw((newSampleChunks) => {
+        if (newSampleChunks.length > 0) {
+          signalGraphBuffer.addData(newSampleChunks);
         }
-      }, 5000);
-
-      newConfigWs.onopen = () => {
-        clearTimeout(connectionTimeout);
-        console.log('/config WebSocket connected for EegMonitor');
-        setIsConfigWsOpen(true);
-        setConfigUpdateStatus('Connected to config service. Ready to send updates.');
-      };
-
-      newConfigWs.onmessage = (event) => {
-        console.log('/config WebSocket message (EegMonitor):', event.data);
-        try {
-          const response = JSON.parse(event.data as string);
-          if (response.status && response.message) { // This is a CommandResponse
-            if (response.status === 'ok') {
-              setConfigUpdateStatus(`Config update request successful: ${response.message}. Waiting for applied config from EegConfigProvider.`);
-            } else {
-              setConfigUpdateStatus(`Config update error: ${response.message}`);
-            }
-          } else {
-            // This is likely a full config broadcast, which EegConfigProvider handles.
-            // EegMonitor's direct /config WS is primarily for sending updates.
-            console.log('EegMonitor received a full config object via its /config WS, EegConfigProvider should handle this state update.');
-          }
-        } catch (e) {
-          console.error('Error parsing /config WebSocket message in EegMonitor:', e);
-          setConfigUpdateStatus('Error processing message from config service.');
-        }
-      };
-
-      newConfigWs.onclose = () => {
-        clearTimeout(connectionTimeout);
-        console.log('/config WebSocket disconnected for EegMonitor');
-        setConfigWebSocket(null);
-        setIsConfigWsOpen(false);
-        setConfigUpdateStatus(prevStatus =>
-          prevStatus && (prevStatus.includes('Error') || prevStatus.includes('timed out'))
-          ? prevStatus
-          : 'Disconnected from config service.'
-        );
-      };
-
-      newConfigWs.onerror = (error) => {
-        clearTimeout(connectionTimeout);
-        console.error('/config WebSocket error for EegMonitor:', error);
-        setConfigWebSocket(null);
-        setIsConfigWsOpen(false);
-        setConfigUpdateStatus('Error connecting to config service.');
-      };
-
-      return () => {
-        clearTimeout(connectionTimeout);
-        console.log('Closing /config WebSocket for EegMonitor');
-        if (newConfigWs.readyState === WebSocket.OPEN || newConfigWs.readyState === WebSocket.CONNECTING) {
-          newConfigWs.close();
-        }
-        setConfigWebSocket(null);
-        setIsConfigWsOpen(false);
-        setConfigUpdateStatus(null); // Clear status when settings view is left
-      };
-    } else {
-      if (configWebSocket) {
-        console.log('Closing /config WebSocket for EegMonitor because settings are hidden');
-        configWebSocket.close();
-        setConfigWebSocket(null);
-        setIsConfigWsOpen(false);
-      }
-      setConfigUpdateStatus(null); // Clear status when settings view is left
+      });
     }
-  }, [activeView]);
+
+    let unsubCircular: (() => void) | null = null;
+    if (isCircularGraphView) {
+      console.log('[EegMonitor] Subscribing to raw data for Circular Graph.');
+      unsubCircular = subscribeRaw((newSampleChunks) => {
+        if (newSampleChunks.length > 0) {
+          circularGraphBuffer.addData(newSampleChunks);
+        }
+      });
+    }
+    
+    if (isFftView) {
+      console.log('[EegMonitor] Subscribing to FftPacket');
+      subscribe(['FftPacket']);
+    }
+
+    return () => {
+      if (unsubSignal) {
+        console.log('[EegMonitor] Unsubscribing from raw data for Signal Graph.');
+        unsubSignal();
+      }
+      if (unsubCircular) {
+        console.log('[EegMonitor] Unsubscribing from raw data for Circular Graph.');
+        unsubCircular();
+      }
+      if (isFftView) {
+        console.log('[EegMonitor] Unsubscribing from FftPacket');
+        unsubscribe(['FftPacket']);
+      }
+    };
+  }, [activeView, subscribe, unsubscribe, subscribeRaw, signalGraphBuffer, circularGraphBuffer]);
 
 
   const { sendPowerlineFilterCommand } = useCommandWebSocket(); // Keep for potential direct use if needed
@@ -339,107 +298,14 @@ export default function EegMonitorWebGL() {
     }
   }, [config?.channels?.length, config?.sample_rate, containerSize.width, uiVoltageScaleFactor]);
 
-  // Ref to track the length of rawSamples from the last run to process only new data
-  const lastProcessedLengthRef = useRef<number>(0);
+  // This entire synchronous data processing block is now handled by the EegRenderer's async loop.
+  // It is safe to remove.
 
-  // Effect for processing new data and updating the graph
-  useEffect(() => {
-    if (activeViewRef.current !== 'signalGraph' || !linesReady || rawSamples.length === 0) {
-      return;
-    }
-
-    const lines = dataRef.current;
-    const numChannels = lines.length;
-    if (numChannels === 0) return;
-
-    const currentSamplesLength = rawSamples.length;
-    let previousSamplesLength = lastProcessedLengthRef.current;
-
-    // If the buffer has been cleared/shrunk, reset our position
-    if (currentSamplesLength < previousSamplesLength) {
-      previousSamplesLength = 0;
-    }
-
-    // Get only the new chunks that haven't been processed yet
-    const newSampleChunks = rawSamples.slice(previousSamplesLength);
-
-    if (newSampleChunks.length > 0) {
-      let dataWasAdded = false;
-      let totalSamplesProcessed = 0;
-      let totalChunksProcessed = 0;
-      
-      newSampleChunks.forEach((sampleChunk) => {
-        const chunkChannelCount = sampleChunk.config.channelCount;
-        const samples = sampleChunk.samples;
-        
-        if (samples && samples.length > 0) {
-          totalChunksProcessed++;
-          totalSamplesProcessed += samples.length;
-          
-          // Group samples by channel for efficient batch processing
-          const channelBatches: Record<number, number[]> = {};
-          
-          samples.forEach((sample, sampleIndex) => {
-            const chIndex = sampleIndex % chunkChannelCount;
-            if (!channelBatches[chIndex]) {
-              channelBatches[chIndex] = [];
-            }
-            channelBatches[chIndex].push(sample.value);
-          });
-          
-          // Add batched samples to WebGL lines
-          Object.entries(channelBatches).forEach(([chIndexStr, values]) => {
-            const chIndex = parseInt(chIndexStr);
-            if (lines[chIndex]) {
-              lines[chIndex].shiftAdd(new Float32Array(values));
-              dataWasAdded = true;
-            }
-          });
-        }
-      });
-
-      if (dataWasAdded) {
-        setDataVersion(v => v + 1);
-        console.log(`Processed ${totalChunksProcessed} chunks with ${totalSamplesProcessed} samples`);
-      }
-    }
-
-    // Update the ref to the new length for the next run
-    lastProcessedLengthRef.current = currentSamplesLength;
-
-  }, [rawSamples, linesReady, activeView]); // Re-run when new rawSamples arrive or lines are ready
-
-  // Update circular graph data when rawSamples change
-  useEffect(() => {
-    if (activeView === 'circularGraph' && rawSamples.length > 0) {
-      // Convert SampleChunk[] to number[][] for circular graph
-      const channelData: number[][] = [];
-      const numChannels = config?.channels?.length || 0;
-      
-      // Initialize arrays for each channel
-      for (let i = 0; i < numChannels; i++) {
-        channelData[i] = [];
-      }
-      
-      // Process chunks and extract samples by channel
-      rawSamples.forEach((sampleChunk, chunkIndex) => {
-        const chunkChannelCount = sampleChunk.config.channelCount;
-        const chIndex = chunkIndex % chunkChannelCount;
-        
-        if (chIndex < numChannels && sampleChunk.samples) {
-          // Add all sample values from this chunk to the appropriate channel
-          const values = sampleChunk.samples.map(s => s.value);
-          channelData[chIndex].push(...values);
-        }
-      });
-      
-      setCircularGraphData(channelData);
-    }
-  }, [rawSamples, activeView, config?.channels?.length]);
+  // This useEffect is now handled by the consolidated subscription logic above.
 
   // Reset processed index when WebGL lines are recreated or view changes
   useEffect(() => {
-    lastProcessedLengthRef.current = 0;
+    // lastProcessedLengthRef is no longer needed
     console.log('[EegMonitor] Reset processed data index');
   }, [linesReady, activeView]);
   
@@ -827,7 +693,7 @@ export default function EegMonitorWebGL() {
                   containerWidth={containerSize.width}
                   containerHeight={containerSize.height}
                   linesReady={linesReady}
-                  dataVersion={dataVersion}
+                  dataBuffer={signalGraphBuffer} // Pass the new buffer
                   targetFps={displayFps}
                 />
                 </div>
@@ -843,7 +709,7 @@ export default function EegMonitorWebGL() {
                 config={config}
                 containerWidth={containerSize.width}
                 containerHeight={containerSize.height}
-                data={circularGraphData}
+                dataBuffer={circularGraphBuffer}
                 targetFps={60}
                 displaySeconds={10}
               />

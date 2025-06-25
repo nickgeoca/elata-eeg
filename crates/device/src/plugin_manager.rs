@@ -176,11 +176,11 @@ impl PluginManager {
         if let Some(active_plugin) = &self.active_plugin {
             // For now, just log the data reception
             // In a full implementation, this would send data via IPC to the plugin backend
-            debug!("Forwarding AdcData to plugin '{}': timestamp={}, channel={}, value={}",
+            debug!("Forwarding AdcData to plugin '{}': timestamp={}, channel={}, voltage={}",
                    active_plugin.info.manifest.name,
                    data.timestamp,
                    data.channel,
-                   data.value);
+                   data.voltage);
             
             // TODO: Implement actual IPC mechanism (WebSocket, named pipes, or shared memory)
             // For now, we'll just demonstrate the data flow

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, createContext, useContext, useRef, useCallback } from 'react';
+import { useEffect, useState, createContext, useContext, useRef, useCallback, useMemo } from 'react';
 
 // Define the EEG configuration interface
 export interface EegConfig {
@@ -198,8 +198,15 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  const contextValue = useMemo(() => ({
+    config,
+    status,
+    refreshConfig,
+    isConfigReady,
+  }), [config, status, refreshConfig, isConfigReady]);
+
   return (
-    <EegConfigContext.Provider value={{ config, status, refreshConfig, isConfigReady }}>
+    <EegConfigContext.Provider value={contextValue}>
       {children}
     </EegConfigContext.Provider>
   );

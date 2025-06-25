@@ -6,7 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use async_trait::async_trait;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 use tracing::{info, warn, debug};
@@ -61,15 +61,16 @@ impl PluginConfig for BrainWavesConfig {
 }
 
 /// Brain Waves FFT Analysis Plugin
+#[derive(Clone)]
 pub struct BrainWavesPlugin {
     config: BrainWavesConfig,
     analyzer: Option<BrainWaveAnalyzer>,
 }
 
 impl BrainWavesPlugin {
-    pub fn new(config: BrainWavesConfig) -> Self {
+    pub fn new() -> Self {
         Self {
-            config,
+            config: BrainWavesConfig::default(),
             analyzer: None,
         }
     }
@@ -79,6 +80,10 @@ impl BrainWavesPlugin {
 impl EegPlugin for BrainWavesPlugin {
     fn name(&self) -> &'static str {
         "brain_waves_fft"
+    }
+
+    fn clone_box(&self) -> Box<dyn EegPlugin> {
+        Box::new(self.clone())
     }
     
     fn version(&self) -> &'static str {
@@ -93,30 +98,27 @@ impl EegPlugin for BrainWavesPlugin {
         vec![EventFilter::RawEegOnly]
     }
     
-    async fn initialize(&self) -> Result<()> {
+    async fn initialize(&mut self) -> Result<()> {
         info!("Initializing Brain Waves FFT plugin");
         self.config.validate()?;
+        self.analyzer = Some(BrainWaveAnalyzer::new(
+            self.config.fft_size,
+            self.config.sample_rate,
+            self.config.num_channels,
+        ));
         Ok(())
     }
     
     async fn run(
-        &self,
-        bus: Arc<dyn std::any::Any + Send + Sync>,
-        mut receiver: mpsc::Receiver<SensorEvent>,
+        &mut self,
+        bus: Arc<dyn eeg_types::plugin::EventBus>,
+        mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
         info!("Brain Waves FFT plugin starting");
         
-        // Cast the bus back to EventBus using downcast
-        let event_bus = bus.downcast::<crate::event_bus::EventBus>()
-            .map_err(|_| anyhow::anyhow!("Failed to downcast bus to EventBus"))?;
-        
-        // Initialize the analyzer
-        let mut analyzer = BrainWaveAnalyzer::new(
-            self.config.fft_size,
-            self.config.sample_rate,
-            self.config.num_channels,
-        );
+        let analyzer = self.analyzer.as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Analyzer not initialized"))?;
         
         let mut events_processed = 0u64;
         
@@ -129,14 +131,14 @@ impl EegPlugin for BrainWavesPlugin {
                 }
                 event_result = receiver.recv() => {
                     match event_result {
-                        Some(SensorEvent::RawEeg(eeg_packet)) => {
+                        Ok(SensorEvent::RawEeg(eeg_packet)) => {
                             debug!("Processing EEG packet with frame_id: {}", eeg_packet.frame_id);
                             
                             // Process the EEG data through FFT analysis
                             if let Some(fft_result) = analyzer.process_eeg_packet(&eeg_packet).await {
                                 // Create FFT packet and broadcast it
                                 let fft_event = SensorEvent::Fft(Arc::new(fft_result));
-                                event_bus.broadcast(fft_event).await;
+                                bus.broadcast(fft_event).await;
                                 
                                 events_processed += 1;
                                 if events_processed % 100 == 0 {
@@ -144,10 +146,13 @@ impl EegPlugin for BrainWavesPlugin {
                                 }
                             }
                         }
-                        Some(_) => {
+                        Ok(_) => {
                             // Ignore other event types (shouldn't happen due to filter)
                         }
-                        None => {
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("Brain Waves FFT plugin lagged by {} messages", n);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
                             warn!("Brain Waves FFT plugin receiver channel closed");
                             break;
                         }
@@ -168,6 +173,18 @@ struct BrainWaveAnalyzer {
     channel_buffers: Vec<VecDeque<f32>>,
     fft_planner: FftPlanner<f32>,
     fft_config: FftConfig,
+}
+
+impl Clone for BrainWaveAnalyzer {
+    fn clone(&self) -> Self {
+        Self {
+            fft_size: self.fft_size,
+            sample_rate: self.sample_rate,
+            channel_buffers: self.channel_buffers.clone(),
+            fft_planner: FftPlanner::new(),
+            fft_config: self.fft_config.clone(),
+        }
+    }
 }
 
 impl BrainWaveAnalyzer {
@@ -191,7 +208,7 @@ impl BrainWaveAnalyzer {
     /// Process new EEG data and return FFT analysis if enough data is available
     async fn process_eeg_packet(&mut self, eeg_packet: &EegPacket) -> Option<FftPacket> {
         // Extract samples per channel
-        let samples_per_channel = eeg_packet.samples.len() / eeg_packet.channel_count;
+        let samples_per_channel = eeg_packet.voltage_samples.len() / eeg_packet.channel_count;
         
         // Add new samples to channel buffers
         for channel_idx in 0..eeg_packet.channel_count.min(self.channel_buffers.len()) {
@@ -200,8 +217,8 @@ impl BrainWaveAnalyzer {
             // Extract samples for this channel
             for sample_idx in 0..samples_per_channel {
                 let data_idx = sample_idx * eeg_packet.channel_count + channel_idx;
-                if data_idx < eeg_packet.samples.len() {
-                    channel_buffer.push_back(eeg_packet.samples[data_idx]);
+                if data_idx < eeg_packet.voltage_samples.len() {
+                    channel_buffer.push_back(eeg_packet.voltage_samples[data_idx]);
                     
                     // Keep buffer size manageable
                     if channel_buffer.len() > self.fft_size * 2 {
@@ -320,8 +337,10 @@ mod tests {
         let mut analyzer = BrainWaveAnalyzer::new(256, 500.0, 2);
         
         // Create test EEG packet
-        let samples = vec![0.1, 0.2, 0.3, 0.4]; // 2 channels, 2 samples each
-        let eeg_packet = EegPacket::new(1000, 1, samples, 2, 500.0);
+        let raw_samples = vec![10, 20, 30, 40]; // 2 channels, 2 samples each
+        let voltage_samples: Vec<f32> = raw_samples.iter().map(|&s| s as f32 * 0.1).collect();
+        let timestamps = vec![1000, 1002, 1000, 1002];
+        let eeg_packet = EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 2, 500.0);
         
         // Should return None initially (not enough data)
         let result = analyzer.process_eeg_packet(&eeg_packet).await;

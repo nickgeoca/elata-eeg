@@ -5,7 +5,7 @@ use std::io;
 use chrono::{Local, DateTime};
 use csv::Writer;
 use std::time::Instant;
-use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use async_trait::async_trait;
 use anyhow::Result;
@@ -15,7 +15,7 @@ use eeg_types::{
     event::{SensorEvent, EegPacket},
     plugin::{EegPlugin, PluginConfig},
     event::EventFilter,
-    config::DaemonConfig,
+    config::{DaemonConfig, DriverType},
 };
 use eeg_sensor::AdcConfig;
 
@@ -25,6 +25,23 @@ pub struct CsvRecorderConfig {
     pub daemon_config: Arc<DaemonConfig>,
     pub adc_config: AdcConfig,
     pub is_recording_shared: Arc<AtomicBool>,
+}
+
+impl Default for CsvRecorderConfig {
+    fn default() -> Self {
+        Self {
+            daemon_config: Arc::new(DaemonConfig::default()),
+            adc_config: AdcConfig {
+                board_driver: DriverType::MockEeg,
+                channels: (0..8).collect(),
+                sample_rate: 250,
+                gain: 1.0,
+                vref: 4.5,
+                batch_size: 128,
+            },
+            is_recording_shared: Arc::new(AtomicBool::new(false)),
+        }
+    }
 }
 
 impl PluginConfig for CsvRecorderConfig {
@@ -54,10 +71,24 @@ pub struct CsvRecorderPlugin {
     recording_start_time: Option<Instant>,
 }
 
-impl CsvRecorderPlugin {
-    pub fn new(config: CsvRecorderConfig) -> Self {
+impl Clone for CsvRecorderPlugin {
+    fn clone(&self) -> Self {
         Self {
-            config,
+            config: self.config.clone(),
+            writer: None, // Do not clone the writer
+            file_path: None,
+            is_recording: false,
+            start_timestamp: None,
+            last_flush_time: Instant::now(),
+            recording_start_time: None,
+        }
+    }
+}
+
+impl CsvRecorderPlugin {
+    pub fn new() -> Self {
+        Self {
+            config: CsvRecorderConfig::default(),
             writer: None,
             file_path: None,
             is_recording: false,
@@ -196,7 +227,7 @@ impl CsvRecorderPlugin {
         if num_channels == 0 {
             return Ok("No channels configured".to_string());
         }
-        let samples_per_channel = packet.samples.len() / num_channels;
+        let samples_per_channel = packet.voltage_samples.len() / num_channels;
         
         // Write each sample as a row
         for i in 0..samples_per_channel {
@@ -211,21 +242,18 @@ impl CsvRecorderPlugin {
             // Add voltage values for each configured channel
             for channel_idx in 0..num_channels {
                 let sample_idx = i * num_channels + channel_idx;
-                if sample_idx < packet.samples.len() {
-                    record.push(packet.samples[sample_idx].to_string());
+                if sample_idx < packet.voltage_samples.len() {
+                    record.push(packet.voltage_samples[sample_idx].to_string());
                 } else {
                     record.push("0.0".to_string());
                 }
             }
             
-            // Add raw values (for now, convert voltage back to approximate raw)
-            // TODO: This should be actual raw samples when available in EegPacket
+            // Add raw i32 values for each configured channel
             for channel_idx in 0..num_channels {
                 let sample_idx = i * num_channels + channel_idx;
-                if sample_idx < packet.samples.len() {
-                    // Approximate raw value (this is a placeholder)
-                    let raw_approx = (packet.samples[sample_idx] * 1000.0) as i32;
-                    record.push(raw_approx.to_string());
+                if sample_idx < packet.raw_samples.len() {
+                    record.push(packet.raw_samples[sample_idx].to_string());
                 } else {
                     record.push("0".to_string());
                 }
@@ -269,41 +297,49 @@ impl EegPlugin for CsvRecorderPlugin {
     }
 
     async fn run(
-        &self,
-        _bus: Arc<dyn std::any::Any + Send + Sync>,
-        mut receiver: tokio::sync::mpsc::Receiver<SensorEvent>,
+        &mut self,
+        _bus: Arc<dyn eeg_types::plugin::EventBus>,
+        mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
         info!("[{}] Starting CSV recorder plugin", self.name());
-        
-        // Create a mutable copy of self for state management
-        let mut recorder = CsvRecorderPlugin::new(self.config.clone());
-        
+
         loop {
             tokio::select! {
                 biased; // Prioritize shutdown
                 _ = shutdown_token.cancelled() => {
                     info!("[{}] Received shutdown signal", self.name());
-                    if recorder.is_recording {
-                        if let Err(e) = recorder.stop_recording().await {
+                    if self.is_recording {
+                        if let Err(e) = self.stop_recording().await {
                             error!("[{}] Error stopping recording during shutdown: {}", self.name(), e);
                         }
                     }
                     break;
                 }
-                Some(event) = receiver.recv() => {
+                event = receiver.recv() => {
+                    let event = match event {
+                        Ok(event) => event,
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            warn!("[{}] Lagged by {} messages", self.name(), n);
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            info!("[{}] Receiver channel closed.", self.name());
+                            break;
+                        }
+                    };
                     match event {
                         SensorEvent::RawEeg(packet) => {
                             // Only record if recording is enabled
-                            if recorder.config.is_recording_shared.load(Ordering::Relaxed) {
-                                if !recorder.is_recording {
-                                    if let Err(e) = recorder.start_recording().await {
+                            if self.config.is_recording_shared.load(Ordering::Relaxed) {
+                                if !self.is_recording {
+                                    if let Err(e) = self.start_recording().await {
                                         error!("[{}] Failed to start recording: {}", self.name(), e);
                                         continue;
                                     }
                                 }
-                                
-                                match recorder.write_eeg_packet(&packet).await {
+
+                                match self.write_eeg_packet(&packet).await {
                                     Ok(msg) => {
                                         if msg != "Data written successfully" && msg != "Not recording" {
                                             info!("[{}] {}", self.name(), msg);
@@ -313,9 +349,9 @@ impl EegPlugin for CsvRecorderPlugin {
                                         warn!("[{}] Failed to write data: {}", self.name(), e);
                                     }
                                 }
-                            } else if recorder.is_recording {
+                            } else if self.is_recording {
                                 // Stop recording if it was disabled
-                                if let Err(e) = recorder.stop_recording().await {
+                                if let Err(e) = self.stop_recording().await {
                                     error!("[{}] Error stopping recording: {}", self.name(), e);
                                 }
                             }
@@ -327,8 +363,12 @@ impl EegPlugin for CsvRecorderPlugin {
                 }
             }
         }
-        
+
         info!("[{}] CSV recorder plugin stopped", self.name());
         Ok(())
+    }
+
+    fn clone_box(&self) -> Box<dyn EegPlugin> {
+        Box::new(self.clone())
     }
 }

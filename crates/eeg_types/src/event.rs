@@ -13,27 +13,30 @@ pub struct EegPacket {
     pub timestamps: Arc<[u64]>,
     /// Monotonic frame counter for detecting data gaps
     pub frame_id: u64,
-    /// EEG voltage samples for all channels - using Arc<[f32]> for zero-copy sharing
-    pub samples: Arc<[f32]>,
+    /// Raw ADC integer samples for all channels
+    pub raw_samples: Arc<[i32]>,
+    /// EEG voltage samples for all channels
+    pub voltage_samples: Arc<[f32]>,
     /// Number of channels in this packet
     pub channel_count: usize,
     /// Sample rate in Hz
     pub sample_rate: f32,
 }
 
-/// Filtered EEG data packet after processing
+/// Filtered EEG data packet after processing.
+/// This struct is designed to be wire-compatible with EegPacket.
 #[derive(Debug, Clone)]
 pub struct FilteredEegPacket {
-    /// Timestamp when the filtering was completed
-    pub timestamp: u64,
-    /// Reference to the original frame that was filtered
-    pub source_frame_id: u64,
-    /// Filtered voltage samples - using Arc<[f32]> for zero-copy sharing
-    pub filtered_samples: Arc<[f32]>,
+    /// Per-sample timestamps (microseconds since Unix epoch), preserved from the source packet
+    pub timestamps: Arc<[u64]>,
+    /// Monotonic frame counter, preserved from the source packet
+    pub frame_id: u64,
+    /// Filtered voltage samples for all channels
+    pub samples: Arc<[f32]>,
     /// Number of channels in this packet
     pub channel_count: usize,
-    /// Filter type applied (e.g., "basic_voltage", "bandpass_8_30hz")
-    pub filter_type: String,
+    /// Sample rate in Hz, preserved from the source packet
+    pub sample_rate: f32,
 }
 
 /// FFT analysis result packet containing brain wave frequency data
@@ -180,7 +183,7 @@ impl SensorEvent {
         match self {
             // Return the timestamp of the first sample in the packet
             SensorEvent::RawEeg(packet) => packet.timestamps.first().cloned().unwrap_or(0),
-            SensorEvent::FilteredEeg(packet) => packet.timestamp,
+            SensorEvent::FilteredEeg(packet) => packet.timestamps.first().cloned().unwrap_or(0),
             SensorEvent::Fft(packet) => packet.timestamp,
             SensorEvent::System(event) => event.timestamp,
         }
@@ -202,12 +205,90 @@ impl EegPacket {
     pub fn new(
         timestamps: Vec<u64>,
         frame_id: u64,
-        samples: Vec<f32>,
+        raw_samples: Vec<i32>,
+        voltage_samples: Vec<f32>,
         channel_count: usize,
         sample_rate: f32,
     ) -> Self {
         Self {
             timestamps: timestamps.into(),
+            frame_id,
+            raw_samples: raw_samples.into(),
+            voltage_samples: voltage_samples.into(),
+            channel_count,
+            sample_rate,
+        }
+    }
+
+    /// Get voltage samples for a specific channel
+    pub fn channel_voltage_samples(&self, channel: usize) -> Option<&[f32]> {
+        if channel >= self.channel_count {
+            return None;
+        }
+        
+        let samples_per_channel = self.voltage_samples.len() / self.channel_count;
+        let start = channel * samples_per_channel;
+        let end = start + samples_per_channel;
+        
+        self.voltage_samples.get(start..end)
+    }
+
+    /// Get raw samples for a specific channel
+    pub fn channel_raw_samples(&self, channel: usize) -> Option<&[i32]> {
+        if channel >= self.channel_count {
+            return None;
+        }
+        
+        let samples_per_channel = self.raw_samples.len() / self.channel_count;
+        let start = channel * samples_per_channel;
+        let end = start + samples_per_channel;
+        
+        self.raw_samples.get(start..end)
+    }
+
+    /// Converts the packet to a binary format for the frontend, sending only voltage data.
+    pub fn to_binary(&self) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        // Format: [total_samples_u32_le][timestamps_u64_le...][voltage_samples_f32_le...]
+        let total_samples = self.voltage_samples.len();
+        
+        // Ensure timestamps and samples have the same number of items.
+        let num_timestamps = self.timestamps.len();
+
+        if num_timestamps != total_samples {
+            let effective_len = std::cmp::min(num_timestamps, total_samples);
+            buffer.extend_from_slice(&(effective_len as u32).to_le_bytes());
+            
+            for &ts in self.timestamps.iter().take(effective_len) {
+                buffer.extend_from_slice(&ts.to_le_bytes());
+            }
+            for &sample in self.voltage_samples.iter().take(effective_len) {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
+        } else {
+            buffer.extend_from_slice(&(total_samples as u32).to_le_bytes());
+            for &ts in self.timestamps.iter() {
+                buffer.extend_from_slice(&ts.to_le_bytes());
+            }
+            for &sample in self.voltage_samples.iter() {
+                buffer.extend_from_slice(&sample.to_le_bytes());
+            }
+        }
+        buffer
+    }
+}
+
+impl FilteredEegPacket {
+    /// Create a new filtered EEG packet
+    pub fn new(
+        timestamps: Arc<[u64]>,
+        frame_id: u64,
+        samples: Vec<f32>,
+        channel_count: usize,
+        sample_rate: f32,
+    ) -> Self {
+        Self {
+            timestamps,
             frame_id,
             samples: samples.into(),
             channel_count,
@@ -215,7 +296,7 @@ impl EegPacket {
         }
     }
 
-    /// Get samples for a specific channel
+    /// Get filtered samples for a specific channel
     pub fn channel_samples(&self, channel: usize) -> Option<&[f32]> {
         if channel >= self.channel_count {
             return None;
@@ -228,16 +309,23 @@ impl EegPacket {
         self.samples.get(start..end)
     }
 
+    /// Converts the packet to a binary format compatible with the frontend's EegDataHandler.
+    /// The format is identical to EegPacket::to_binary.
     pub fn to_binary(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
-        // Format: [num_samples_u32_le][timestamps_u64_le...][samples_f32_le...]
-        // Ensure timestamps and samples have the same length
-        let num_samples = self.samples.len();
-        if self.timestamps.len() != num_samples {
-            // Handle error: lengths do not match. For now, we'll truncate to the shorter length.
-            // A more robust solution might return an error or log a warning.
-            let effective_len = std::cmp::min(self.timestamps.len(), num_samples);
+        // Format: [total_samples_u32_le][timestamps_u64_le...][samples_f32_le...]
+        let total_samples = self.samples.len();
+        
+        // Ensure timestamps and samples have the same number of items per channel.
+        // The number of timestamps should equal the total number of samples.
+        let num_timestamps = self.timestamps.len();
+
+        if num_timestamps != total_samples {
+            // This indicates a data inconsistency. We'll handle it gracefully by logging
+            // and sending a truncated packet, but this should ideally not happen.
+            let effective_len = std::cmp::min(num_timestamps, total_samples);
             buffer.extend_from_slice(&(effective_len as u32).to_le_bytes());
+            
             for &ts in self.timestamps.iter().take(effective_len) {
                 buffer.extend_from_slice(&ts.to_le_bytes());
             }
@@ -245,56 +333,13 @@ impl EegPacket {
                 buffer.extend_from_slice(&sample.to_le_bytes());
             }
         } else {
-            buffer.extend_from_slice(&(num_samples as u32).to_le_bytes());
+            buffer.extend_from_slice(&(total_samples as u32).to_le_bytes());
             for &ts in self.timestamps.iter() {
                 buffer.extend_from_slice(&ts.to_le_bytes());
             }
             for &sample in self.samples.iter() {
                 buffer.extend_from_slice(&sample.to_le_bytes());
             }
-        }
-        buffer
-    }
-}
-
-impl FilteredEegPacket {
-    /// Create a new filtered EEG packet
-    pub fn new(
-        timestamp: u64,
-        source_frame_id: u64,
-        filtered_samples: Vec<f32>,
-        channel_count: usize,
-        filter_type: String,
-    ) -> Self {
-        Self {
-            timestamp,
-            source_frame_id,
-            filtered_samples: filtered_samples.into(),
-            channel_count,
-            filter_type,
-        }
-    }
-
-    /// Get filtered samples for a specific channel
-    pub fn channel_samples(&self, channel: usize) -> Option<&[f32]> {
-        if channel >= self.channel_count {
-            return None;
-        }
-        
-        let samples_per_channel = self.filtered_samples.len() / self.channel_count;
-        let start = channel * samples_per_channel;
-        let end = start + samples_per_channel;
-        
-        self.filtered_samples.get(start..end)
-    }
-
-    pub fn to_binary(&self) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        // Simplified binary format: [timestamp_u64_le][error_flag_u8][data_payload]
-        buffer.extend_from_slice(&self.timestamp.to_le_bytes());
-        buffer.push(0); // No error
-        for &sample in self.filtered_samples.iter() {
-            buffer.extend_from_slice(&sample.to_le_bytes());
         }
         buffer
     }
@@ -395,33 +440,41 @@ mod tests {
 
     #[test]
     fn test_eeg_packet_creation() {
-        let samples = vec![1.0, 2.0, 3.0, 4.0]; // 2 channels, 2 samples each
+        let voltage_samples = vec![1.0, 2.0, 3.0, 4.0]; // 2 channels, 2 samples each
+        let raw_samples = vec![10, 20, 30, 40];
         let timestamps = vec![1000, 1002, 1000, 1002];
-        let packet = EegPacket::new(timestamps.clone(), 1, samples, 2, 250.0);
+        let packet = EegPacket::new(timestamps.clone(), 1, raw_samples.clone(), voltage_samples.clone(), 2, 250.0);
         
         assert_eq!(packet.timestamps.as_ref(), timestamps.as_slice());
         assert_eq!(packet.frame_id, 1);
         assert_eq!(packet.channel_count, 2);
         assert_eq!(packet.sample_rate, 250.0);
-        assert_eq!(packet.samples.len(), 4);
+        assert_eq!(packet.raw_samples.as_ref(), raw_samples.as_slice());
+        assert_eq!(packet.voltage_samples.as_ref(), voltage_samples.as_slice());
     }
 
     #[test]
     fn test_channel_samples() {
-        let samples = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 3 channels, 2 samples each
+        let voltage_samples = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 3 channels, 2 samples each
+        let raw_samples = vec![10, 20, 30, 40, 50, 60];
         let timestamps = vec![1000, 1002, 1000, 1002, 1000, 1002];
-        let packet = EegPacket::new(timestamps, 1, samples, 3, 250.0);
+        let packet = EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 3, 250.0);
         
-        assert_eq!(packet.channel_samples(0), Some([1.0, 2.0].as_slice()));
-        assert_eq!(packet.channel_samples(1), Some([3.0, 4.0].as_slice()));
-        assert_eq!(packet.channel_samples(2), Some([5.0, 6.0].as_slice()));
-        assert_eq!(packet.channel_samples(3), None);
+        assert_eq!(packet.channel_voltage_samples(0), Some([1.0, 2.0].as_slice()));
+        assert_eq!(packet.channel_voltage_samples(1), Some([3.0, 4.0].as_slice()));
+        assert_eq!(packet.channel_voltage_samples(2), Some([5.0, 6.0].as_slice()));
+        assert_eq!(packet.channel_voltage_samples(3), None);
+        
+        assert_eq!(packet.channel_raw_samples(0), Some([10, 20].as_slice()));
+        assert_eq!(packet.channel_raw_samples(1), Some([30, 40].as_slice()));
+        assert_eq!(packet.channel_raw_samples(2), Some([50, 60].as_slice()));
+        assert_eq!(packet.channel_raw_samples(3), None);
     }
 
     #[test]
     fn test_sensor_event_timestamp() {
         let timestamps = vec![1000, 1002];
-        let eeg_packet = Arc::new(EegPacket::new(timestamps, 1, vec![1.0, 2.0], 1, 250.0));
+        let eeg_packet = Arc::new(EegPacket::new(timestamps, 1, vec![10, 20], vec![1.0, 2.0], 1, 250.0));
         let event = SensorEvent::RawEeg(eeg_packet);
         
         assert_eq!(event.timestamp(), 1000); // Should return the first timestamp

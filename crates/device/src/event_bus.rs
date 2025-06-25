@@ -4,221 +4,60 @@
 //! that allows plugins to communicate through events while maintaining system stability
 //! through back-pressure handling.
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::broadcast;
 use tracing::{debug, warn};
 use async_trait::async_trait;
 
-use eeg_types::{SensorEvent, EventFilter, event_matches_filter};
+use eeg_types::SensorEvent;
 
-/// Subscriber information for the event bus
-#[derive(Debug)]
-struct Subscriber {
-    /// Channel sender for this subscriber
-    sender: mpsc::Sender<SensorEvent>,
-    /// Event filters for this subscriber
-    filters: Vec<EventFilter>,
-    /// Subscriber name for logging
-    name: String,
-}
+const EVENT_BUS_CAPACITY: usize = 256;
 
-/// High-performance event bus for distributing sensor events to plugins
-/// 
-/// The EventBus uses a non-blocking design with back-pressure handling:
-/// - Uses RwLock for concurrent read access during broadcast
-/// - Uses try_send to avoid blocking on slow consumers
-/// - Automatically removes dead subscribers
-/// - Tracks metrics for monitoring
+/// High-performance event bus for distributing sensor events to plugins.
+///
+/// This is a thin wrapper around Tokio's broadcast channel, which provides
+/// a multi-producer, multi-consumer, non-blocking channel suitable for
+/// high-throughput event distribution.
+#[derive(Debug, Clone)]
 pub struct EventBus {
-    /// List of active subscribers
-    subscribers: RwLock<Vec<Subscriber>>,
-    /// Metrics for monitoring
-    metrics: RwLock<EventBusMetrics>,
-}
-
-/// Event bus performance metrics
-#[derive(Debug, Default)]
-pub struct EventBusMetrics {
-    /// Total events broadcast
-    pub events_broadcast: u64,
-    /// Total events delivered successfully
-    pub events_delivered: u64,
-    /// Total events dropped due to full buffers
-    pub events_dropped: u64,
-    /// Number of dead subscribers removed
-    pub dead_subscribers_removed: u64,
-    /// Current number of active subscribers
-    pub active_subscribers: usize,
+    sender: broadcast::Sender<SensorEvent>,
 }
 
 impl EventBus {
-    /// Create a new event bus
+    /// Create a new event bus.
     pub fn new() -> Self {
-        Self {
-            subscribers: RwLock::new(Vec::new()),
-            metrics: RwLock::new(EventBusMetrics::default()),
-        }
+        let (sender, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        Self { sender }
     }
 
-    /// Subscribe to events with optional filters
-    /// 
-    /// Returns a receiver channel that will receive events matching the filters.
-    /// If no filters are provided, all events will be received.
-    pub async fn subscribe(
-        &self,
-        name: String,
-        buffer_size: usize,
-        filters: Vec<EventFilter>,
-    ) -> mpsc::Receiver<SensorEvent> {
-        let (sender, receiver) = mpsc::channel(buffer_size);
-        
-        let subscriber = Subscriber {
-            sender,
-            filters,
-            name: name.clone(),
-        };
-        
-        self.subscribers.write().await.push(subscriber);
-        
-        // Update metrics
-        {
-            let mut metrics = self.metrics.write().await;
-            metrics.active_subscribers = self.subscribers.read().await.len();
-        }
-        
-        debug!(subscriber = %name, buffer_size, "New subscriber registered");
-        receiver
+    /// Subscribe to the event bus.
+    ///
+    /// Returns a `Receiver` that will receive all events broadcast on the bus.
+    pub fn subscribe(&self) -> broadcast::Receiver<SensorEvent> {
+        self.sender.subscribe()
     }
 
-    /// Subscribe to all events (convenience method)
-    pub async fn subscribe_all(
-        &self,
-        name: String,
-        buffer_size: usize,
-    ) -> mpsc::Receiver<SensorEvent> {
-        self.subscribe(name, buffer_size, vec![EventFilter::All]).await
-    }
-
-    /// Broadcast an event to all matching subscribers
-    /// 
-    /// This method is non-blocking and uses back-pressure handling:
-    /// - Checks channel capacity before attempting to send
-    /// - Uses try_send to avoid blocking
-    /// - Removes dead subscribers automatically
-    /// - Logs warnings for dropped events
+    /// Broadcast an event to all subscribers.
+    ///
+    /// If there are no active subscribers, the event is dropped and a warning
+    /// is logged.
     pub async fn broadcast(&self, event: SensorEvent) {
-        let subscribers = self.subscribers.read().await;
-        let mut dead_indices = Vec::new();
-        let mut delivered_count = 0;
-        let mut dropped_count = 0;
-
-        debug!(
-            event_type = event.event_type_name(),
-            timestamp = event.timestamp(),
-            subscriber_count = subscribers.len(),
-            "Broadcasting event"
-        );
-
-        for (i, subscriber) in subscribers.iter().enumerate() {
-            // Check if this subscriber wants this event
-            let wants_event = subscriber.filters.is_empty() || 
-                subscriber.filters.iter().any(|filter| event_matches_filter(&event, filter));
-            
-            if !wants_event {
-                continue;
+        if self.sender.receiver_count() > 0 {
+            if let Err(e) = self.sender.send(event) {
+                warn!("Failed to broadcast event: {}", e);
             }
-
-            // Optimization: Check capacity first to avoid clone if channel is full
-            if subscriber.sender.capacity() == 0 {
-                warn!(
-                    subscriber = %subscriber.name,
-                    event_type = event.event_type_name(),
-                    "Subscriber buffer full, dropping event"
-                );
-                dropped_count += 1;
-                continue;
-            }
-
-            // try_send is instantaneous and will fail if channel is full or closed
-            match subscriber.sender.try_send(event.clone()) {
-                Ok(()) => {
-                    delivered_count += 1;
-                }
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    // This shouldn't happen due to capacity check above, but handle it
-                    warn!(
-                        subscriber = %subscriber.name,
-                        event_type = event.event_type_name(),
-                        "Subscriber buffer became full during send"
-                    );
-                    dropped_count += 1;
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {
-                    debug!(
-                        subscriber = %subscriber.name,
-                        "Subscriber channel closed, marking for removal"
-                    );
-                    dead_indices.push(i);
-                }
-            }
+        } else {
+            debug!("No subscribers, dropping event.");
         }
-
-        // Remove dead subscribers if any were found
-        if !dead_indices.is_empty() {
-            drop(subscribers); // Release read lock
-            let mut subscribers_write = self.subscribers.write().await;
-            
-            // Remove in reverse order to maintain indices
-            for &i in dead_indices.iter().rev() {
-                let removed = subscribers_write.remove(i);
-                debug!(subscriber = %removed.name, "Removed dead subscriber");
-            }
-            
-            // Update metrics
-            let mut metrics = self.metrics.write().await;
-            metrics.dead_subscribers_removed += dead_indices.len() as u64;
-            metrics.active_subscribers = subscribers_write.len();
-        }
-
-        // Update broadcast metrics
-        {
-            let mut metrics = self.metrics.write().await;
-            metrics.events_broadcast += 1;
-            metrics.events_delivered += delivered_count;
-            metrics.events_dropped += dropped_count;
-        }
-
-        debug!(
-            event_type = event.event_type_name(),
-            delivered = delivered_count,
-            dropped = dropped_count,
-            dead_removed = dead_indices.len(),
-            "Event broadcast complete"
-        );
     }
 
-    /// Get current metrics
-    pub async fn get_metrics(&self) -> EventBusMetrics {
-        self.metrics.read().await.clone()
+    /// Get the number of active subscribers.
+    pub fn subscriber_count(&self) -> usize {
+        self.sender.receiver_count()
     }
 
-    /// Reset metrics (useful for testing)
-    pub async fn reset_metrics(&self) {
-        let mut metrics = self.metrics.write().await;
-        *metrics = EventBusMetrics::default();
-        metrics.active_subscribers = self.subscribers.read().await.len();
-    }
-
-    /// Get current subscriber count
-    pub async fn subscriber_count(&self) -> usize {
-        self.subscribers.read().await.len()
-    }
-
-    /// Get subscriber names (for debugging)
-    pub async fn subscriber_names(&self) -> Vec<String> {
-        self.subscribers.read().await
-            .iter()
-            .map(|s| s.name.clone())
-            .collect()
+    /// Returns a clone of the broadcast sender.
+    pub fn sender(&self) -> broadcast::Sender<SensorEvent> {
+        self.sender.clone()
     }
 }
 
@@ -226,6 +65,16 @@ impl Default for EventBus {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Metrics for event bus performance monitoring
+#[derive(Debug)]
+pub struct EventBusMetrics {
+    pub events_broadcast: u64,
+    pub events_delivered: u64,
+    pub events_dropped: u64,
+    pub dead_subscribers_removed: u64,
+    pub active_subscribers: usize,
 }
 
 impl Clone for EventBusMetrics {
@@ -241,7 +90,7 @@ impl Clone for EventBusMetrics {
 }
 
 #[async_trait]
-impl eeg_types::EventBus for EventBus {
+impl eeg_types::plugin::EventBus for EventBus {
     async fn broadcast(&self, event: SensorEvent) {
         self.broadcast(event).await;
     }
@@ -252,7 +101,6 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use eeg_types::{EegPacket, SensorEvent};
-    use super::EventFilter;
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
@@ -260,10 +108,14 @@ mod tests {
         let bus = EventBus::new();
         
         // Subscribe to events
-        let mut receiver = bus.subscribe_all("test_plugin".to_string(), 10).await;
+        let mut receiver = bus.subscribe();
+        assert_eq!(bus.subscriber_count(), 1);
         
         // Create and broadcast an event
-        let packet = Arc::new(EegPacket::new(1000, 1, vec![1.0, 2.0], 1, 250.0));
+        let timestamps = vec![1000, 1002];
+        let raw_samples = vec![10, 20];
+        let voltage_samples = vec![1.0, 2.0];
+        let packet = Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0));
         let event = SensorEvent::RawEeg(packet);
         
         bus.broadcast(event.clone()).await;
@@ -274,62 +126,30 @@ mod tests {
             .expect("Should receive event within timeout")
             .expect("Should receive an event");
         
-        assert_eq!(received.timestamp(), event.timestamp());
+        // Compare the events (assuming they implement PartialEq or we can compare specific fields)
+        match (&received, &event) {
+            (SensorEvent::RawEeg(recv_packet), SensorEvent::RawEeg(orig_packet)) => {
+                assert_eq!(recv_packet.frame_id, orig_packet.frame_id);
+            }
+            _ => panic!("Event types don't match"),
+        }
     }
 
     #[tokio::test]
-    async fn test_event_filtering() {
+    async fn test_multiple_subscribers() {
         let bus = EventBus::new();
-        
-        // Subscribe only to raw EEG events
-        let mut raw_receiver = bus.subscribe(
-            "raw_only".to_string(),
-            10,
-            vec![EventFilter::RawEegOnly]
-        ).await;
-        
-        // Subscribe only to system events
-        let mut system_receiver = bus.subscribe(
-            "system_only".to_string(),
-            10,
-            vec![EventFilter::SystemOnly]
-        ).await;
-        
-        // Broadcast a raw EEG event
-        let packet = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
-        let raw_event = SensorEvent::RawEeg(packet);
-        bus.broadcast(raw_event).await;
-        
-        // Raw subscriber should receive it
-        assert!(timeout(Duration::from_millis(100), raw_receiver.recv()).await.is_ok());
-        
-        // System subscriber should not receive it
-        assert!(timeout(Duration::from_millis(100), system_receiver.recv()).await.is_err());
-    }
+        let mut rx1 = bus.subscribe();
+        let mut rx2 = bus.subscribe();
+        assert_eq!(bus.subscriber_count(), 2);
 
-    #[tokio::test]
-    async fn test_back_pressure_handling() {
-        let bus = EventBus::new();
-        
-        // Create a subscriber with a very small buffer
-        let mut receiver = bus.subscribe_all("small_buffer".to_string(), 1).await;
-        
-        // Fill the buffer
-        let packet1 = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
-        bus.broadcast(SensorEvent::RawEeg(packet1)).await;
-        
-        // Try to send another event (should be dropped due to full buffer)
-        let packet2 = Arc::new(EegPacket::new(2000, 2, vec![2.0], 1, 250.0));
-        bus.broadcast(SensorEvent::RawEeg(packet2)).await;
-        
-        // Check metrics
-        let metrics = bus.get_metrics().await;
-        assert_eq!(metrics.events_broadcast, 2);
-        assert_eq!(metrics.events_delivered, 1);
-        assert_eq!(metrics.events_dropped, 1);
-        
-        // Drain the receiver
-        let _ = receiver.recv().await;
+        let timestamps = vec![1000];
+        let raw_samples = vec![10];
+        let voltage_samples = vec![1.0];
+        let event = SensorEvent::RawEeg(Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0)));
+        bus.broadcast(event).await;
+
+        assert!(rx1.recv().await.is_ok());
+        assert!(rx2.recv().await.is_ok());
     }
 
     #[tokio::test]
@@ -338,18 +158,11 @@ mod tests {
         
         // Create a subscriber and then drop the receiver
         {
-            let _receiver = bus.subscribe_all("temp_plugin".to_string(), 10).await;
-            assert_eq!(bus.subscriber_count().await, 1);
+            let _receiver = bus.subscribe();
+            assert_eq!(bus.subscriber_count(), 1);
         } // receiver is dropped here
         
-        // Broadcast an event, which should trigger dead subscriber removal
-        let packet = Arc::new(EegPacket::new(1000, 1, vec![1.0], 1, 250.0));
-        bus.broadcast(SensorEvent::RawEeg(packet)).await;
-        
-        // Subscriber should be removed
-        assert_eq!(bus.subscriber_count().await, 0);
-        
-        let metrics = bus.get_metrics().await;
-        assert_eq!(metrics.dead_subscribers_removed, 1);
+        // The count should reflect the drop immediately
+        assert_eq!(bus.subscriber_count(), 0);
     }
 }

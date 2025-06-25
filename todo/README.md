@@ -9,6 +9,8 @@ This file tracks ongoing tasks, feature plans, and the status of major investiga
 
 ## Active Investigations
 
+*   **Circular Graph Freezing (Ongoing):** The Kiosk circular graph freezes, indicating a severed data stream. An initial attempt to fix this by refactoring to a pub/sub model was unsuccessful. The investigation is ongoing.
+    *   **Detailed Log:** [`./circular_graph_freeze_investigation.md`](./circular_graph_freeze_investigation.md:1)
 *   **EEG Data Rate Issue (Ongoing):** The backend is generating data at ~2Hz instead of the expected ~31.25Hz. The root cause has been identified as a computationally expensive `gen_realistic_eeg_data` function in the mock driver, which is unable to generate samples fast enough. The next step is to optimize this function, likely by pre-calculating a buffer of sine wave data.
     *   **Detailed Log:** [`./eeg_data_flow_debugging_log.md`](./eeg_data_flow_debugging_log.md:1)
 

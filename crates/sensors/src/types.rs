@@ -12,13 +12,13 @@ pub struct AdcConfig {
     /// List of active channels (0-indexed)
     pub channels: Vec<u8>,
     /// Gain setting for all channels
-    pub gain: f64,
+    pub gain: f32,
     /// Type of board driver to use
     pub board_driver: DriverType,
     /// Number of samples to batch together
     pub batch_size: usize,
     /// Reference voltage for ADC conversion
-    pub vref: f64,
+    pub vref: f32,
 }
 
 pub use eeg_types::DriverType;
@@ -55,7 +55,9 @@ pub struct AdcData {
     /// Channel number (0-indexed)
     pub channel: u8,
     /// Raw ADC value
-    pub value: i32,
+    pub raw_value: i32,
+    /// Voltage value (converted from raw)
+    pub voltage: f32,
     /// Timestamp in microseconds since epoch
     pub timestamp: u64,
 }
