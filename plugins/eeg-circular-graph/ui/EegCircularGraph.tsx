@@ -33,20 +33,22 @@ export const EegCircularGraph = ({
   const numChannels = config?.channels?.length || 8;
 
   // New render logic to pull data from the buffer asynchronously
-  const sampleChunks = dataBuffer.getAndClearData();
-      
-  if (sampleChunks.length > 0 && rendererRef.current) {
-    // The data from the buffer is now a flat array of SampleChunk objects.
-    // We can iterate through them directly.
-    sampleChunks.forEach((chunk: SampleChunk) => {
-      chunk.samples.forEach((sample) => {
-        const chIndex = sample.channelIndex;
-        if (chIndex < numChannels && rendererRef.current) {
-          rendererRef.current.addNewSample(chIndex, sample.value);
-        }
+  useEffect(() => {
+    const sampleChunks = dataBuffer.getAndClearData();
+        
+    if (sampleChunks.length > 0 && rendererRef.current) {
+      // The data from the buffer is now a flat array of SampleChunk objects.
+      // We can iterate through them directly.
+      sampleChunks.forEach((chunk: SampleChunk) => {
+        chunk.samples.forEach((sample) => {
+          const chIndex = sample.channelIndex;
+          if (chIndex < numChannels && rendererRef.current) {
+            rendererRef.current.addNewSample(chIndex, sample.value);
+          }
+        });
       });
-    });
-  }
+    }
+  }, [dataVersion, dataBuffer, numChannels]);
 
   return (
     <div className="eeg-circular-graph" style={{ width: containerWidth, height: containerHeight }}>

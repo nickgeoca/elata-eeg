@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { calculateFft } from '../utils/fftUtils';
 import {
     DEFAULT_SAMPLE_RATE,
     DEFAULT_BATCH_SIZE,
@@ -292,6 +293,14 @@ export function useEegDataHandler({
 
           if (allChannelSamples.length > 0) {
             onSamplesRef.current?.(allChannelSamples);
+
+            // If there's a subscription for FFT data, calculate and send it
+            if (subscriptionsRef.current.includes('FftPacket') && onFftDataRef.current) {
+              allChannelSamples.forEach((channelData, index) => {
+                const fftOutput = calculateFft(channelData.values);
+                onFftDataRef.current?.(index, fftOutput);
+              });
+            }
 
             // Log a sample of the data every 100 packets
             logCounterRef.current++;
