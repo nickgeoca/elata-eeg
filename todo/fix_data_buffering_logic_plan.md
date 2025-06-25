@@ -36,3 +36,22 @@ The solution is to correct the `useDataBuffer` hook and simplify the rendering c
 - The data buffer will have a simple, flat structure (`SampleChunk[]`).
 - The rendering components will correctly and efficiently process the data from the buffer.
 - The EEG graphs will finally render the data as it is received.
+
+## 5. Follow-up Investigation (2025-06-24)
+
+**Status:** In Progress
+
+### 5.1. Initial Fix Implementation
+
+The following changes were implemented based on the plan:
+1.  **`kiosk/src/hooks/useDataBuffer.ts`:** Confirmed that `addData` correctly accepts `T[]` and uses the spread operator `...` to flatten the incoming data into the buffer.
+2.  **`kiosk/src/components/EegRenderer.tsx`:** Modified the `renderLoop` to iterate through the `sampleChunks` from the buffer and then iterate through the `samples` within each chunk, batching them by channel.
+3.  **`plugins/eeg-circular-graph/ui/EegCircularGraph.tsx`:** Applied the same nested loop correction to its `useEffect` hook to process the flattened data structure.
+
+### 5.2. Outcome
+
+The problem persists. The graphs are still not rendering data, indicating that the root cause was not just the nested array structure in the buffer. The issue lies deeper in the data consumption or rendering logic.
+
+### 5.3. Next Steps
+
+The investigation needs to continue. The data flow from the `EegDataContext` to the rendering components (`EegRenderer`, `EegCircularGraph`) appears to be the source of the issue. The next step is to re-examine how the data is structured and processed at each step of the pipeline.

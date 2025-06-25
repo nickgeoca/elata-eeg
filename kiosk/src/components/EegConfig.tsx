@@ -114,24 +114,24 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         }
 
         // Assume it's a full config object (variable 'data' holds the parsed new server data)
-        const configsEqual = areConfigsEqual(configRef.current, data);
-        
-        if (configsEqual) {
-          if (!isProduction) {
-            console.log('Config WebSocket (EegConfigProvider): Received identical configuration. No update needed.');
+        // Only update if the new config is actually different from the current one.
+        if (!areConfigsEqual(configRef.current, data)) {
+          console.log('Config WebSocket (EegConfigProvider): Received new configuration, applying update.');
+          const FPS = 60.0;
+          // Create a new config object with the server data and client-side FPS
+          const newConfig = { ...data, fps: FPS };
+          setConfig(newConfig); // This will trigger a re-render for consumers
+          
+          if (!isConfigReady) {
+            setIsConfigReady(true);
           }
-          return; // Configs are the same, do nothing further.
+        } else {
+            if (!isProduction) {
+                console.log('Config WebSocket (EegConfigProvider): Received identical configuration. No update needed.');
+            }
         }
-
-        // If we're here, it's either the first config or a new one.
-        console.log('Config WebSocket (EegConfigProvider): Received new configuration, applying update.');
-        const FPS = 60.0;
-        const configWithFps = { ...data, fps: FPS };
-        setConfig(configWithFps);
+        // Always ensure status is 'Connected' after a message, as it confirms the link is alive.
         setStatus('Connected');
-        if (!isConfigReady) {
-          setIsConfigReady(true);
-        }
       } catch (error) {
         console.error('Config WebSocket (EegConfigProvider): Error parsing config data:', error);
         setStatus('Error parsing data');

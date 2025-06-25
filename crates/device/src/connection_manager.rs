@@ -34,6 +34,7 @@ pub struct ConnectionManager {
     connection_rx: mpsc::Receiver<WebSocket>,
     event_rx: broadcast::Receiver<SensorEvent>,
     clients: Arc<Mutex<HashMap<ClientId, Client>>>,
+    pending_clients: Arc<Mutex<HashMap<ClientId, SplitSink<WebSocket, Message>>>>,
 }
 
 impl ConnectionManager {
@@ -45,6 +46,7 @@ impl ConnectionManager {
             connection_rx,
             event_rx,
             clients: Arc::new(Mutex::new(HashMap::new())),
+            pending_clients: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -73,20 +75,18 @@ impl ConnectionManager {
         let client_id = Uuid::new_v4().to_string();
         let (sender, mut receiver) = websocket.split();
         let clients_arc = self.clients.clone();
+        let pending_clients_arc = self.pending_clients.clone();
 
-        info!(client_id = %client_id, "New WebSocket client connected.");
+        info!(client_id = %client_id, "New WebSocket client connected, holding in pending.");
 
-        // Initial client state with no subscriptions
-        let client = Client {
-            sender,
-            subscriptions: HashSet::new(),
-        };
-        
         // Spawn a task to manage this specific client's lifecycle
         let client_id_clone = client_id.clone();
         tokio::spawn(async move {
-            // Insert the client into the shared map
-            clients_arc.lock().await.insert(client_id_clone.clone(), client);
+            // Initially, the client is pending and has no subscriptions.
+            // We only store the sender part until the first subscription is received.
+            pending_clients_arc.lock().await.insert(client_id_clone.clone(), sender);
+
+            let mut is_activated = false;
 
             loop {
                 match receiver.next().await {
@@ -97,20 +97,52 @@ impl ConnectionManager {
                         }
                         if let Ok(text) = msg.to_str() {
                             if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(text) {
-                                let mut clients_guard = clients_arc.lock().await;
-                                if let Some(client) = clients_guard.get_mut(&client_id_clone) {
-                                    match client_msg.action.as_str() {
-                                        "subscribe" => {
-                                            info!(client_id = %client_id_clone, "Subscribing to topics: {:?}", client_msg.topics);
-                                            client.subscriptions.extend(client_msg.topics);
-                                        }
-                                        "unsubscribe" => {
-                                            info!(client_id = %client_id_clone, "Unsubscribing from topics: {:?}", client_msg.topics);
-                                            for topic in client_msg.topics {
-                                                client.subscriptions.remove(&topic);
+                                if !is_activated {
+                                    // First valid message must be a subscription
+                                    if client_msg.action == "subscribe" {
+                                        info!(client_id = %client_id_clone, "Received first subscription. Activating client.");
+                                        if let Some(mut sender) = pending_clients_arc.lock().await.remove(&client_id_clone) {
+                                            // Send confirmation message
+                                            let confirmation = json!({
+                                                "type": "status",
+                                                "status": "subscription_ok"
+                                            }).to_string();
+                                            
+                                            if sender.send(Message::text(confirmation)).await.is_ok() {
+                                                let mut clients_guard = clients_arc.lock().await;
+                                                let new_client = Client {
+                                                    sender,
+                                                    subscriptions: client_msg.topics.into_iter().collect(),
+                                                };
+                                                clients_guard.insert(client_id_clone.clone(), new_client);
+                                                is_activated = true;
+                                            } else {
+                                                warn!(client_id = %client_id_clone, "Failed to send subscription confirmation. Closing connection.");
+                                                break; // Break the loop to disconnect the client
                                             }
                                         }
-                                        _ => warn!("Unknown client message action: {}", client_msg.action),
+                                    } else {
+                                        warn!(client_id = %client_id_clone, "First message was not 'subscribe'. Closing connection.");
+                                        // Optionally send an error message before closing
+                                        break;
+                                    }
+                                } else {
+                                    // Client is already active, handle other messages
+                                    let mut clients_guard = clients_arc.lock().await;
+                                    if let Some(client) = clients_guard.get_mut(&client_id_clone) {
+                                        match client_msg.action.as_str() {
+                                            "subscribe" => {
+                                                info!(client_id = %client_id_clone, "Subscribing to additional topics: {:?}", client_msg.topics);
+                                                client.subscriptions.extend(client_msg.topics);
+                                            }
+                                            "unsubscribe" => {
+                                                info!(client_id = %client_id_clone, "Unsubscribing from topics: {:?}", client_msg.topics);
+                                                for topic in client_msg.topics {
+                                                    client.subscriptions.remove(&topic);
+                                                }
+                                            }
+                                            _ => warn!("Unknown client message action: {}", client_msg.action),
+                                        }
                                     }
                                 }
                             }
@@ -126,8 +158,9 @@ impl ConnectionManager {
                     }
                 }
             }
-            // Cleanup: Remove the client from the map upon disconnection
+            // Cleanup: Remove the client from both maps upon disconnection
             info!(client_id = %client_id_clone, "Client disconnected. Removing.");
+            pending_clients_arc.lock().await.remove(&client_id_clone);
             clients_arc.lock().await.remove(&client_id_clone);
         });
     }

@@ -7,25 +7,12 @@ import { useEegConfig } from '../components/EegConfig';
 // Constants for data management
 const MAX_SAMPLE_CHUNKS = 100;
 const RECONNECTION_DATA_RETENTION_MS = 5000; // Keep data for 5 seconds during reconnections
+import { EegSample, SampleChunk } from '../types/eeg'; // Import shared types
 
 // Callback type for live data subscribers
 type RawDataCallback = (data: SampleChunk[]) => void;
- 
+
  // Define the shape of the context data
- interface EegSample {
-  value: number;
-  timestamp: bigint;
-  channelIndex: number;
-}
-
-interface SampleChunk {
-  config: {
-    channelCount: number;
-    sampleRate: number;
-  };
-  samples: EegSample[];
-}
-
 interface EegDataContextType {
   dataVersion: number; // Increments on new data
   getRawSamples: () => SampleChunk[]; // Function to get the current samples
@@ -63,6 +50,14 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
   const rawDataSubscribersRef = useRef<Set<RawDataCallback>>(new Set());
+
+  useEffect(() => {
+    // Automatically subscribe to the raw EEG data topic when the provider mounts.
+    // This is the primary data stream for the main graphs.
+    subscribe(['FilteredEeg']);
+
+    // No cleanup needed, subscriptions are managed by the component lifecycle.
+  }, []); // Empty dependency array ensures this runs only once on mount.
   
   // Use refs to track data timestamps for cleanup
   const sampleTimestamps = useRef<number[]>([]);

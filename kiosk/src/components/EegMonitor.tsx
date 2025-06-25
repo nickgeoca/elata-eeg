@@ -18,6 +18,7 @@ import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWave
 import { CircularGraphWrapper } from './CircularGraphWrapper';
 import { useEegData } from '../context/EegDataContext';
 import { useDataBuffer } from '../hooks/useDataBuffer'; // Import the new hook
+import { SampleChunk } from '../types/eeg'; // Import the new type
 
 export default function EegMonitorWebGL() {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -43,8 +44,9 @@ export default function EegMonitorWebGL() {
   const [linesReady, setLinesReady] = useState(false); // State to track line readiness
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
   const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
-  const circularGraphBuffer = useDataBuffer<any>(); // Use the new buffer hook
-  const signalGraphBuffer = useDataBuffer<any>(); // Buffer for the main signal graph
+  const [localDataVersion, setLocalDataVersion] = useState(0);
+  const circularGraphBuffer = useDataBuffer<SampleChunk>(); // Use the new buffer hook
+  const signalGraphBuffer = useDataBuffer<SampleChunk>(); // Buffer for the main signal graph
   const circularGraphLastProcessedLengthRef = useRef<number>(0);
   
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
@@ -91,6 +93,7 @@ export default function EegMonitorWebGL() {
       unsubSignal = subscribeRaw((newSampleChunks) => {
         if (newSampleChunks.length > 0) {
           signalGraphBuffer.addData(newSampleChunks);
+          setLocalDataVersion(v => v + 1);
         }
       });
     }
@@ -101,6 +104,7 @@ export default function EegMonitorWebGL() {
       unsubCircular = subscribeRaw((newSampleChunks) => {
         if (newSampleChunks.length > 0) {
           circularGraphBuffer.addData(newSampleChunks);
+          setLocalDataVersion(v => v + 1);
         }
       });
     }
@@ -695,6 +699,7 @@ export default function EegMonitorWebGL() {
                   linesReady={linesReady}
                   dataBuffer={signalGraphBuffer} // Pass the new buffer
                   targetFps={displayFps}
+                  dataVersion={localDataVersion}
                 />
                 </div>
               </div>
@@ -712,6 +717,7 @@ export default function EegMonitorWebGL() {
                 dataBuffer={circularGraphBuffer}
                 targetFps={60}
                 displaySeconds={10}
+                dataVersion={localDataVersion}
               />
             ) : (
               <div className="flex items-center justify-center h-full text-white">

@@ -8,6 +8,7 @@ import { WebglPlot, ColorRGBA, WebglStep } from 'webgl-plot';
 // Import getChannelColor for setting colors here
 import { getChannelColor } from '../utils/colorUtils';
 import { useDataBuffer } from '../hooks/useDataBuffer';
+import { SampleChunk } from '../types/eeg';
 
 interface EegRendererProps {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
@@ -20,10 +21,11 @@ interface EegRendererProps {
     samplesProcessed: number;
   }>;
   linesReady: boolean; // Add prop to signal when lines are ready
-  dataBuffer: ReturnType<typeof useDataBuffer>; // Add the dataBuffer prop
+  dataBuffer: ReturnType<typeof useDataBuffer<SampleChunk>>; // Add the dataBuffer prop
   targetFps?: number; // Optional target FPS for rendering
   containerWidth: number; // New prop for container width
   containerHeight: number; // New prop for container height
+  dataVersion: number;
 }
 
 export const EegRenderer = React.memo(function EegRenderer({
@@ -36,7 +38,8 @@ export const EegRenderer = React.memo(function EegRenderer({
   dataBuffer, // Destructure dataBuffer
   targetFps,
   containerWidth, // Destructure new prop
-  containerHeight // Destructure new prop
+  containerHeight, // Destructure new prop
+  dataVersion
 }: EegRendererProps) {
   const wglpRef = useRef<WebglPlot | null>(null);
   // Array of WebglStep instances, one per channel
@@ -51,65 +54,42 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   const numChannels = config?.channels?.length ?? 8;
 
-  // Render loop now pulls from the buffer and processes data asynchronously
-  const renderLoop = useCallback(() => {
-    animationFrameRef.current = requestAnimationFrame(renderLoop);
-
-    if (!wglpRef.current || !dataRef.current || !isInitializedRef.current || numChannels === 0) {
-      return;
-    }
-
+  // Render logic now pulls from the buffer and processes data asynchronously
+  if (wglpRef.current && dataRef.current && isInitializedRef.current && numChannels > 0) {
     const wglp = wglpRef.current;
     const lines = dataRef.current;
-    const now = performance.now();
-
-    // FPS Throttling
-    if (targetFps && targetFps > 0) {
-      const frameInterval = 1000 / targetFps;
-      const elapsed = now - lastRenderTimeRef.current;
-      if (elapsed < frameInterval) {
-        return;
-      }
-      lastRenderTimeRef.current = now - (elapsed % frameInterval);
-    } else {
-      lastRenderTimeRef.current = now;
-    }
 
     // Get data from the buffer
     const sampleChunks = dataBuffer.getAndClearData();
 
     if (sampleChunks.length > 0) {
       let dataWasAdded = false;
-      sampleChunks.forEach((sampleChunk: any) => {
-        const samples = sampleChunk.samples;
-        if (samples && samples.length > 0) {
-          const channelBatches: Record<number, number[]> = {};
-          const channelOrder: number[] = [];
-          
-          samples.forEach((sample: any) => {
-            const chIndex = sample.channelIndex;
-            if (chIndex < numChannels) {
-              if (!channelBatches[chIndex]) {
-                channelBatches[chIndex] = [];
-                channelOrder.push(chIndex);
-              }
-              channelBatches[chIndex].push(sample.value);
+      const channelBatches: Record<number, number[]> = {};
+      const channelOrder: number[] = [];
+
+      sampleChunks.forEach((chunk: SampleChunk) => {
+        chunk.samples.forEach((sample) => {
+          const chIndex = sample.channelIndex;
+          if (chIndex < numChannels) {
+            if (!channelBatches[chIndex]) {
+              channelBatches[chIndex] = [];
+              channelOrder.push(chIndex);
             }
-          });
-          
-          channelOrder.forEach((chIndex) => {
-            if (lines[chIndex] && channelBatches[chIndex]) {
-              lines[chIndex].shiftAdd(new Float32Array(channelBatches[chIndex]));
-              dataWasAdded = true;
-            }
-          });
+            channelBatches[chIndex].push(sample.value);
+          }
+        });
+      });
+
+      channelOrder.forEach((chIndex) => {
+        if (lines[chIndex] && channelBatches[chIndex]) {
+          lines[chIndex].shiftAdd(new Float32Array(channelBatches[chIndex]));
+          dataWasAdded = true;
         }
       });
     }
 
     wglp.update();
-
-  }, [numChannels, config, targetFps, dataRef, isInitializedRef, dataBuffer]);
+  }
 
 
   // Effect 1: Initialize WebGL Plot when canvas is ready and sized
@@ -155,11 +135,7 @@ export const EegRenderer = React.memo(function EegRenderer({
       isInitializedRef.current = true; // Mark plot as initialized using ref
       console.log(`[EegRenderer InitEffect1] WebGL Plot initialized.`);
 
-      // Start render loop AFTER initialization
-      if (!animationFrameRef.current) {
-          animationFrameRef.current = requestAnimationFrame(renderLoop);
-          console.log(`[EegRenderer InitEffect1] Render loop started.`);
-      }
+      // Render loop is no longer started here
 
     } catch (error) {
       console.error("[EegRenderer InitEffect1] Error initializing WebGL Plot:", error);
@@ -178,8 +154,8 @@ export const EegRenderer = React.memo(function EegRenderer({
       isInitializedRef.current = false; // Reset ref on cleanup
       console.log("[EegRenderer InitEffect1] Plot instance cleanup complete.");
     };
-    // Depend on canvasRef, numChannels, containerWidth, containerHeight, and renderLoop
-  }, [canvasRef, numChannels, containerWidth, containerHeight, renderLoop]);
+    // Depend on canvasRef, numChannels, containerWidth, containerHeight
+  }, [canvasRef, numChannels, containerWidth, containerHeight]);
 
 
   // Effect 2: Add/Update lines when they are ready AND plot is initialized

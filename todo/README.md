@@ -9,6 +9,8 @@ This file tracks ongoing tasks, feature plans, and the status of major investiga
 
 ## Active Investigations
 
+*   **"No Data" Status in UI (Ongoing):** Despite several fixes, the UI still reports "no data". The underlying cause appears to be the data WebSocket closing unexpectedly. This note tracks the ongoing investigation.
+    *   **Detailed Log:** [`./revisit_eeg_no_data_issue.md`](./revisit_eeg_no_data_issue.md:1)
 *   **Circular Graph Freezing (Ongoing):** The Kiosk circular graph freezes, indicating a severed data stream. An initial attempt to fix this by refactoring to a pub/sub model was unsuccessful. The investigation is ongoing.
     *   **Detailed Log:** [`./circular_graph_freeze_investigation.md`](./circular_graph_freeze_investigation.md:1)
 *   **EEG Data Rate Issue (Ongoing):** The backend is generating data at ~2Hz instead of the expected ~31.25Hz. The root cause has been identified as a computationally expensive `gen_realistic_eeg_data` function in the mock driver, which is unable to generate samples fast enough. The next step is to optimize this function, likely by pre-calculating a buffer of sine wave data.
@@ -19,3 +21,4 @@ This file tracks ongoing tasks, feature plans, and the status of major investiga
 *   [Fix Kiosk Config Bug](./fix_kiosk_config_bug_plan.md)
 *   [Event-Driven Refactor Plan](./event_driven_refactor_plan.md)
 *   [Dynamic Plugin Loading Plan](./dynamic_plugin_loading_plan_v2.md)
+*   [Fix Data Disappearing Issue](./fix_data_disappearing_issue_plan.md)

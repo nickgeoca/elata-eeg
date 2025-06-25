@@ -316,7 +316,10 @@ export function useEegDataHandler({
             setDebugInfo(prev => ({ ...prev, textPacketsReceived: prev.textPacketsReceived + 1 }));
             try {
               const message = JSON.parse(event.data);
-              if (message.type === 'FftPacket' && onFftDataRef.current) {
+              if (message.type === 'status' && message.status === 'subscription_ok') {
+                console.log('[EegDataHandler] Subscription confirmed by backend.');
+                // Can set a specific state here if needed, e.g., setSubscriptionActive(true)
+              } else if (message.type === 'FftPacket' && onFftDataRef.current) {
                 // The backend now sends FFT data per-channel in a structured way.
                 // We assume the `data` field is an array of FFT results, one for each channel.
                 if (Array.isArray(message.data)) {
@@ -332,7 +335,7 @@ export function useEegDataHandler({
                   onErrorRef.current?.(message.message);
               }
             } catch (error) {
-              console.error("[EegDataHandler] Error parsing FFT JSON data:", error);
+              console.error("[EegDataHandler] Error parsing text message:", error);
             }
           }
         } catch (error) {
