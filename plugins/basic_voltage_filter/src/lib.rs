@@ -13,7 +13,6 @@ use eeg_types::plugin::{EegPlugin, PluginConfig, EventBus};
 
 mod dsp;
 use dsp::SignalProcessor;
-use eeg_sensor::ads1299::helpers::ch_raw_to_voltage;
 
 /// Configuration for the Basic Voltage Filter Plugin
 #[derive(Clone, Debug)]

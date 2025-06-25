@@ -1,11 +1,14 @@
 // Import plugin implementations
-use crate::plugin_supervisor::PluginSupervisor;
+use adc_daemon::plugin_supervisor::PluginSupervisor;
+use adc_daemon::elata_emu_v1::EegSystem;
+use adc_daemon::connection_manager::ConnectionManager;
+use adc_daemon::event_bus::EventBus;
+use adc_daemon::pid_manager::PidManager;
+use adc_daemon::{config, server};
 
 use eeg_sensor::AdcConfig;
 use tokio::sync::{broadcast, Mutex, mpsc};
-use crate::elata_emu_v1::EegSystem;
 use std::sync::Arc;
-use crate::connection_manager::ConnectionManager;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::fmt;
 use tokio_util::sync::CancellationToken;
@@ -13,7 +16,6 @@ use tokio_util::sync::CancellationToken;
 // Import event-driven types
 use eeg_types::{EegPacket, SensorEvent, EegPlugin, EventFilter, DriverType};
 use eeg_sensor::AdcData;
-use crate::event_bus::EventBus;
 
 // Define a custom error type that implements Send + Sync
 #[derive(Debug)]
@@ -138,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::init();
 
     let pid_file_path = "/tmp/eeg_daemon.pid";
-    let pid_manager = pid_manager::PidManager::new(pid_file_path);
+    let pid_manager = PidManager::new(pid_file_path);
     
     if let Err(e) = pid_manager.acquire_lock() {
         eprintln!("Failed to start daemon: {}", e);
@@ -193,6 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let mut plugin_supervisor = PluginSupervisor::new(event_bus.clone());
     // Register plugins
+    #[cfg(feature = "brain_waves_fft_feature")]
     plugin_supervisor.add_plugin(Box::new(brain_waves_fft_plugin::BrainWavesFftPlugin::new(
         initial_config.channels.len(),
         initial_config.sample_rate as f32,

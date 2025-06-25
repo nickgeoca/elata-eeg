@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 tokio = { workspace = true, features = ["sync"] }
+tokio-util = "0.7"
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

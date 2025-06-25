@@ -7,7 +7,7 @@ use apodize::hanning_iter;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use tokio::sync::CancellationToken;
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const FFT_SIZE: usize = 512;
