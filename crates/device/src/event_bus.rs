@@ -40,7 +40,7 @@ impl EventBus {
     ///
     /// If there are no active subscribers, the event is dropped and a warning
     /// is logged.
-    pub async fn broadcast(&self, event: SensorEvent) {
+    pub async fn broadcast_event(&self, event: SensorEvent) {
         if self.sender.receiver_count() > 0 {
             if let Err(e) = self.sender.send(event) {
                 warn!("Failed to broadcast event: {}", e);
@@ -92,7 +92,7 @@ impl Clone for EventBusMetrics {
 #[async_trait]
 impl eeg_types::plugin::EventBus for EventBus {
     async fn broadcast(&self, event: SensorEvent) {
-        self.broadcast(event).await;
+        self.broadcast_event(event).await;
     }
 }
 
@@ -118,7 +118,7 @@ mod tests {
         let packet = Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0));
         let event = SensorEvent::RawEeg(packet);
         
-        bus.broadcast(event.clone()).await;
+        bus.broadcast_event(event.clone()).await;
         
         // Receive the event
         let received = timeout(Duration::from_millis(100), receiver.recv())
@@ -146,7 +146,7 @@ mod tests {
         let raw_samples = vec![10];
         let voltage_samples = vec![1.0];
         let event = SensorEvent::RawEeg(Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0)));
-        bus.broadcast(event).await;
+        bus.broadcast_event(event).await;
 
         assert!(rx1.recv().await.is_ok());
         assert!(rx2.recv().await.is_ok());

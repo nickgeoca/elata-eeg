@@ -14,7 +14,7 @@ import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 // @ts-ignore: WebglStep might be missing from types but exists at runtime
 import { WebglStep, ColorRGBA } from 'webgl-plot';
 import { getChannelColor } from '../utils/colorUtils';
-import BrainWavesDisplay from '../../../plugins/brain-waves-display/ui/BrainWavesDisplay';
+import FftDisplay from '../../../plugins/brain_waves_fft/ui/FftDisplay';
 import { CircularGraphWrapper } from './CircularGraphWrapper';
 import { useEegData } from '../context/EegDataContext';
 import { useDataBuffer } from '../hooks/useDataBuffer'; // Import the new hook
@@ -729,9 +729,8 @@ export default function EegMonitorWebGL() {
           // Brain Waves Applet View
           <div className="relative h-full p-2" ref={containerRef}> {/* Added padding for aesthetics */}
             {config && containerSize.width > 0 && containerSize.height > 0 ? (
-              <BrainWavesDisplay
-                containerWidth={containerSize.width}
-                containerHeight={containerSize.height} // Use full container height
+              <FftDisplay
+                fftData={fftData}
               />
             ) : (
               <div className="flex items-center justify-center h-full text-white">

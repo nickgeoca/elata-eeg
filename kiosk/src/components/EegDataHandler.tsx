@@ -10,7 +10,6 @@
  */
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { calculateFft } from '../utils/fftUtils';
 import {
     DEFAULT_SAMPLE_RATE,
     DEFAULT_BATCH_SIZE,
@@ -29,8 +28,8 @@ interface EegDataHandlerProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>; // Ref for debug information including packet count
-  onFftData?: (channelIndex: number, fftOutput: number[]) => void; // New callback for FFT data
-  subscriptions: string[]; // <-- New prop for subscriptions
+  onFftData?: (data: any) => void; // Updated callback for structured FFT data
+  subscriptions: string[];
 }
 
 export function useEegDataHandler({
@@ -42,7 +41,7 @@ export function useEegDataHandler({
   latestTimestampRef,
   debugInfoRef,
   onFftData,
-  subscriptions, // <-- New prop
+  subscriptions,
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
   const wsRef = useRef<WebSocket | null>(null);
@@ -294,13 +293,8 @@ export function useEegDataHandler({
           if (allChannelSamples.length > 0) {
             onSamplesRef.current?.(allChannelSamples);
 
-            // If there's a subscription for FFT data, calculate and send it
-            if (subscriptionsRef.current.includes('FftPacket') && onFftDataRef.current) {
-              allChannelSamples.forEach((channelData, index) => {
-                const fftOutput = calculateFft(channelData.values);
-                onFftDataRef.current?.(index, fftOutput);
-              });
-            }
+            // The FFT calculation is now handled by the Rust plugin.
+            // The frontend will receive FftPacket events via WebSocket.
 
             // Log a sample of the data every 100 packets
             logCounterRef.current++;
@@ -328,17 +322,9 @@ export function useEegDataHandler({
               if (message.type === 'status' && message.status === 'subscription_ok') {
                 console.log('[EegDataHandler] Subscription confirmed by backend.');
                 // Can set a specific state here if needed, e.g., setSubscriptionActive(true)
-              } else if (message.type === 'FftPacket' && onFftDataRef.current) {
-                // The backend now sends FFT data per-channel in a structured way.
-                // We assume the `data` field is an array of FFT results, one for each channel.
-                if (Array.isArray(message.data)) {
-                  message.data.forEach((channelFft: any, index: number) => {
-                    // Assuming channelFft has a 'power' property which is the array of numbers.
-                    if (channelFft && Array.isArray(channelFft.power)) {
-                       onFftDataRef.current?.(index, channelFft.power);
-                    }
-                  });
-                }
+              } else if (message.type === 'Fft' && onFftDataRef.current) {
+                // Pass the entire FftPacket to the callback
+                onFftDataRef.current?.(message.data);
               } else if (message.type === 'error') {
                   console.error(`[EegDataHandler] Received error from backend: ${message.message}`);
                   onErrorRef.current?.(message.message);

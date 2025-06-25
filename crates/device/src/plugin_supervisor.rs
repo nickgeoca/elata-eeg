@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use log::{info, error};
 
 use crate::event_bus::EventBus;
-use crate::plugin::EegPlugin;
+use eeg_types::plugin::EegPlugin;
 
 /// Manages the lifecycle of all registered EEG plugins.
 pub struct PluginSupervisor {

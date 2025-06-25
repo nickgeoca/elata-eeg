@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-brain_waves_fft_feature = []
+brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
@@ -16,6 +16,7 @@ eeg_sensor = { path = "../sensors" }
 eeg_types = { path = "../eeg_types" }
 csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
 basic_voltage_filter_plugin = { path = "../../plugins/basic_voltage_filter" }
+brain_waves_fft_plugin = { path = "../../plugins/brain_waves_fft", optional = true }
 warp = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

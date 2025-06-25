@@ -1,15 +1,3 @@
-mod config;
-mod server;
-mod pid_manager;
-mod connection_manager;
-mod elata_emu_v1;
-
-// New event-driven modules
-mod plugin;
-mod event_bus;
-mod plugins;
-mod plugin_supervisor;
-
 // Import plugin implementations
 use crate::plugin_supervisor::PluginSupervisor;
 
@@ -126,7 +114,7 @@ async fn data_acquisition_loop(
                     );
 
                     let event = SensorEvent::RawEeg(Arc::new(eeg_packet));
-                    bus.broadcast(event).await;
+                    bus.broadcast_event(event).await;
                     frame_counter += 1;
 
                     if frame_counter % 100 == 0 {
@@ -205,7 +193,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     
     let mut plugin_supervisor = PluginSupervisor::new(event_bus.clone());
     // Register plugins
-    plugin_supervisor.add_plugin(Box::new(plugins::brain_waves::BrainWavesPlugin::new()));
+    plugin_supervisor.add_plugin(Box::new(brain_waves_fft_plugin::BrainWavesFftPlugin::new(
+        initial_config.channels.len(),
+        initial_config.sample_rate as f32,
+    )));
     plugin_supervisor.add_plugin(Box::new(basic_voltage_filter_plugin::BasicVoltageFilterPlugin::new()));
     plugin_supervisor.add_plugin(Box::new(csv_recorder_plugin::CsvRecorderPlugin::new()));
 

@@ -9,8 +9,7 @@ use eeg_types::{
     event::{SensorEvent, FilteredEegPacket, EventFilter},
     config::DaemonConfig,
 };
-use device::plugin::{EegPlugin, PluginConfig};
-use device::event_bus::EventBus;
+use eeg_types::plugin::{EegPlugin, PluginConfig, EventBus};
 
 mod dsp;
 use dsp::SignalProcessor;
@@ -102,14 +101,14 @@ impl EegPlugin for BasicVoltageFilterPlugin {
         vec![EventFilter::RawEegOnly]
     }
 
-    async fn initialize(&self) -> Result<()> {
+    async fn initialize(&mut self) -> Result<()> {
         info!("[{}] Initializing...", self.name());
         self.config.validate()
     }
 
     async fn run(
-        &self,
-        bus: Arc<EventBus>,
+        &mut self,
+        bus: Arc<dyn EventBus>,
         mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
@@ -141,7 +140,7 @@ impl EegPlugin for BasicVoltageFilterPlugin {
 
                             let voltage_samples: Vec<f32> = packet.raw_samples
                                 .iter()
-                                .map(|&raw_sample| ch_raw_to_voltage(raw_sample, vref, gain))
+                                .map(|&raw_sample| eeg_sensor::ads1299::helpers::ch_raw_to_voltage(raw_sample, vref, gain))
                                 .collect();
 
                             let samples_per_channel = voltage_samples.len() / num_channels;

@@ -13,4 +13,3 @@ tracing = "0.1"
 # Local dependencies
 eeg_types = { path = "../../crates/eeg_types" }
 eeg_sensor = { path = "../../crates/sensors" }
-device = { path = "../../crates/device", package = "adc_daemon" }

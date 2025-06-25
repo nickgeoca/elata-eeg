@@ -8,8 +8,7 @@ use anyhow::Result;
 use rustfft::{Fft, FftPlanner};
 use num_complex::Complex;
 
-use crate::event_bus::EventBus;
-use crate::plugin::EegPlugin;
+use eeg_types::plugin::{EegPlugin, EventBus};
 use eeg_types::event::{EventFilter, SensorEvent, FftPacket, PsdPacket, FftConfig};
 
 const FFT_SIZE: usize = 512;
@@ -125,8 +124,8 @@ impl EegPlugin for BrainWavesPlugin {
     fn event_filter(&self) -> Vec<EventFilter> { vec![EventFilter::FilteredEegOnly] }
 
     async fn run(
-        &self,
-        bus: Arc<EventBus>,
+        &mut self,
+        bus: Arc<dyn EventBus>,
         mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {

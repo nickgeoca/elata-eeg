@@ -15,8 +15,7 @@ use eeg_types::{
     event::{SensorEvent, EegPacket, EventFilter},
     config::{DaemonConfig, DriverType},
 };
-use device::plugin::{EegPlugin, PluginConfig};
-use device::event_bus::EventBus;
+use eeg_types::plugin::{EegPlugin, PluginConfig, EventBus};
 use eeg_sensor::AdcConfig;
 
 /// Configuration for the CSV Recorder Plugin
@@ -188,6 +187,9 @@ impl CsvRecorderPlugin {
             state.start_timestamp = packet.timestamps.first().cloned();
         }
         
+        let now = Instant::now();
+        let should_flush = now.duration_since(state.last_flush_time).as_secs() >= 5;
+
         let writer = state.writer.as_mut().unwrap();
         let num_channels = self.config.adc_config.channels.len();
         if num_channels == 0 {
@@ -214,8 +216,7 @@ impl CsvRecorderPlugin {
             writer.write_record(&record)?;
         }
         
-        let now = Instant::now();
-        if now.duration_since(state.last_flush_time).as_secs() >= 5 {
+        if should_flush {
             writer.flush()?;
             state.last_flush_time = now;
         }
@@ -241,14 +242,18 @@ impl EegPlugin for CsvRecorderPlugin {
     fn description(&self) -> &'static str {
         "Records EEG data to CSV files with automatic rotation"
     }
+
+    fn clone_box(&self) -> Box<dyn EegPlugin> {
+        Box::new(self.clone())
+    }
     
     fn event_filter(&self) -> Vec<EventFilter> {
         vec![EventFilter::RawEegOnly]
     }
 
     async fn run(
-        &self,
-        _bus: Arc<EventBus>,
+        &mut self,
+        _bus: Arc<dyn EventBus>,
         mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
@@ -310,9 +315,5 @@ impl EegPlugin for CsvRecorderPlugin {
 
         info!("[{}] CSV recorder plugin stopped", self.name());
         Ok(())
-    }
-
-    fn clone_box(&self) -> Box<dyn EegPlugin> {
-        Box::new(self.clone())
     }
 }
