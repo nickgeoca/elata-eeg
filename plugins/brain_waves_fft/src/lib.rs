@@ -116,7 +116,7 @@ impl EegPlugin for BrainWavesFftPlugin {
                                     let scaling_factor = 2.0 / (self.sample_rate * s2);
 
                                     let psd: Vec<f32> = buffer.iter().take(FFT_SIZE / 2)
-                                        .map(|c| c.norm_sqr() * scaling_factor)
+                                        .map(|c| (c.norm_sqr() * scaling_factor).log10())
                                         .collect();
 
                                     psd_packets.push(PsdPacket { channel: ch, psd });

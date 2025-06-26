@@ -9,7 +9,7 @@ import { useEegData } from '../context/EegDataContext';
 import EegDataVisualizer from './EegDataVisualizer';
 
 export default function EegMonitorWebGL() {
-  type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph';
+  type DataView = 'signalGraph' | 'appletBrainWaves';
   type ActiveView = DataView | 'settings';
  
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
@@ -145,18 +145,15 @@ export default function EegMonitorWebGL() {
   const getViewName = (view: DataView | 'settings'): string => {
     switch (view) {
         case 'signalGraph': return 'Signal Graph';
-        case 'circularGraph': return 'Circular Graph';
         case 'appletBrainWaves': return 'Brain Waves (FFT)'; // Updated name
         case 'settings': return 'Settings';
         default: return '';
     }
   };
 
-  // Handler for cycling between Signal Graph, Circular Graph, and FFT Applet
+  // Handler for cycling between Signal Graph, and FFT Applet
   const handleToggleSignalFftView = () => {
     if (activeView === 'signalGraph') {
-      setActiveView('circularGraph');
-    } else if (activeView === 'circularGraph') {
       setActiveView('appletBrainWaves');
     } else if (activeView === 'appletBrainWaves') {
       setActiveView('signalGraph');
@@ -251,8 +248,7 @@ export default function EegMonitorWebGL() {
             className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
             disabled={activeView === 'settings'}
           >
-            {activeView === 'signalGraph' ? 'Show Circular' :
-             activeView === 'circularGraph' ? 'Show FFT' : 'Show Signal'}
+            {activeView === 'signalGraph' ?  'Show FFT' : 'Show Signal'}
           </button>
  
           <button

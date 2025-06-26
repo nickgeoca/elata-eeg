@@ -14,7 +14,8 @@ const MARGIN_BOTTOM = 40;
 const MARGIN_TOP = 20;
 const MARGIN_RIGHT = 20;
 
-const DATA_Y_MAX = 10.0;
+const DATA_Y_MIN = -4;
+const DATA_Y_MAX = 4.0;
 const FFT_MIN_FREQ_HZ = 1;
 const FFT_MAX_FREQ_HZ = 70;
 
@@ -91,9 +92,9 @@ export const FftRenderer: React.FC<FftRendererProps> = ({
       });
 
       // Y-axis grid
-      const yTicks = [0, 2.5, 5, 7.5, 10.0];
+      const yTicks = [DATA_Y_MIN, 0, 2, 4, 6, DATA_Y_MAX];
       yTicks.forEach(power => {
-        const y = MARGIN_TOP + plotHeight - (power / DATA_Y_MAX) * plotHeight;
+        const y = MARGIN_TOP + plotHeight - ((power - DATA_Y_MIN) / (DATA_Y_MAX - DATA_Y_MIN)) * plotHeight;
         context.beginPath();
         context.moveTo(MARGIN_LEFT, y);
         context.lineTo(MARGIN_LEFT + plotWidth, y);
@@ -118,9 +119,9 @@ export const FftRenderer: React.FC<FftRendererProps> = ({
       });
 
       // Y-axis labels
-      const yTicks = [0, 2.5, 5, 7.5, 10.0];
+      const yTicks = [DATA_Y_MIN, 0, 2, 4, 6, DATA_Y_MAX];
       yTicks.forEach(power => {
-        const y = MARGIN_TOP + plotHeight - (power / DATA_Y_MAX) * plotHeight;
+        const y = MARGIN_TOP + plotHeight - ((power - DATA_Y_MIN) / (DATA_Y_MAX - DATA_Y_MIN)) * plotHeight;
         context.textAlign = 'right';
         context.textBaseline = 'middle';
         context.fillText(power.toString(), MARGIN_LEFT - 10, y);
@@ -137,7 +138,7 @@ export const FftRenderer: React.FC<FftRendererProps> = ({
 
         context.translate(15, MARGIN_TOP + plotHeight / 2);
         context.rotate(-Math.PI / 2);
-        context.fillText('Power (µV²/Hz)', 0, 0);
+        context.fillText('log₁₀ Power (µV²/Hz)', 0, 0);
         context.restore();
     };
 
@@ -170,10 +171,9 @@ export const FftRenderer: React.FC<FftRendererProps> = ({
           for (let j = 0; j < numPoints; j++) {
             const freq = (j * maxFreq) / (numPoints > 1 ? numPoints - 1 : 1);
             if (freq >= FFT_MIN_FREQ_HZ && freq <= FFT_MAX_FREQ_HZ) {
-              const psdVal = Math.min(packet.psd[j], DATA_Y_MAX);
+              const psdVal = Math.min(Math.max(packet.psd[j], DATA_Y_MIN), DATA_Y_MAX);
               const x = MARGIN_LEFT + ((freq - FFT_MIN_FREQ_HZ) / (FFT_MAX_FREQ_HZ - FFT_MIN_FREQ_HZ)) * plotWidth;
-              const y = MARGIN_TOP + plotHeight - (psdVal / DATA_Y_MAX) * plotHeight;
-
+              const y = MARGIN_TOP + plotHeight - ((psdVal - DATA_Y_MIN) / (DATA_Y_MAX - DATA_Y_MIN)) * plotHeight;
               if (j === 0 || ( ( (j-1) * maxFreq) / (numPoints > 1 ? numPoints - 1 : 1) < FFT_MIN_FREQ_HZ) ) {
                 context.moveTo(x, y);
               } else {

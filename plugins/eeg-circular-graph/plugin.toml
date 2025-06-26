@@ -1,7 +1,0 @@
-[metadata]
-name = "eeg-circular-graph"
-version = "0.1.0"
-description = "EEG visualization with circular buffer rendering"
-
-[ui]
-entry = "./ui/EegCircularGraph.tsx"

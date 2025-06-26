@@ -1,13 +1,12 @@
 'use client';
 import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { EegRenderer } from './EegRenderer';
-import { CircularGraphWrapper } from './CircularGraphWrapper';
 import { FftRenderer } from '../../../plugins/brain_waves_fft/ui/FftRenderer';
 import { useEegData } from '../context/EegDataContext';
 import { useDataBuffer } from '../hooks/useDataBuffer';
 import { SampleChunk } from '../types/eeg';
 
-type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph';
+type DataView = 'signalGraph' | 'appletBrainWaves';
 
 interface EegDataVisualizerProps {
   activeView: DataView;
@@ -17,11 +16,10 @@ interface EegDataVisualizerProps {
 
 export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFactor }: EegDataVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, circularGraph: false, appletBrainWaves: false });
+  const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, appletBrainWaves: false });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [localDataVersion, setLocalDataVersion] = useState(0);
 
-    const circularGraphBuffer = useDataBuffer<SampleChunk>();
     const signalGraphBuffer = useDataBuffer<SampleChunk>();
 
   const { subscribeRaw, subscribe, unsubscribe, fftData, fullFftPacket } = useEegData();
@@ -32,8 +30,8 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
     let unsubRaw: (() => void) | null = null;
     let isSubscribedToFft = false;
 
-    if (activeView === 'signalGraph' || activeView === 'circularGraph') {
-      const targetBuffer = activeView === 'signalGraph' ? signalGraphBuffer : circularGraphBuffer;
+    if (activeView === 'signalGraph') {
+      const targetBuffer = signalGraphBuffer;
       console.log(`[Visualizer] Subscribing to raw data for ${activeView}.`);
       targetBuffer.clear();
       unsubRaw = subscribeRaw((newSampleChunks) => {
@@ -60,7 +58,7 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
         unsubscribe(['Fft']);
       }
     };
-  }, [activeView, subscribeRaw, unsubscribe, subscribe, signalGraphBuffer, circularGraphBuffer]);
+  }, [activeView, subscribeRaw, unsubscribe, subscribe, signalGraphBuffer]);
 
   // Effect to setup ResizeObserver
   useLayoutEffect(() => {
@@ -106,16 +104,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
                 />
               </div>
             )
-          )}
-
-          {activeView === 'circularGraph' && (
-            <CircularGraphWrapper
-                isActive={activeView === 'circularGraph'}
-                config={config}
-                containerWidth={containerSize.width}
-                containerHeight={containerSize.height}
-                dataBuffer={circularGraphBuffer}
-            />
           )}
 
           {activeView === 'appletBrainWaves' && (
