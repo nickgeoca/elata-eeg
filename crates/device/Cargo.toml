@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
+default = ["brain_waves_fft_feature"]
 brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 
 [dependencies]
@@ -28,6 +29,7 @@ env_logger = "0.10" # Added logger
 log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
+bytes = "1.0"
 # FFT and signal processing
 rustfft = "6.0"
 num-complex = "0.4"

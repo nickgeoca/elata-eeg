@@ -12,11 +12,12 @@ interface FftData {
 }
 
 interface FftDisplayProps {
+  isActive: boolean;
   data: FftData | null;
 }
 
-const FftDisplay: React.FC<FftDisplayProps> = ({ data }) => {
-  if (!data) {
+const FftDisplay: React.FC<FftDisplayProps> = ({ isActive, data }) => {
+  if (!isActive || !data) {
     return <div>No FFT data available</div>;
   }
 

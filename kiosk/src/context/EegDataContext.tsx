@@ -12,12 +12,25 @@ import { EegSample, SampleChunk } from '../types/eeg'; // Import shared types
 // Callback type for live data subscribers
 type RawDataCallback = (data: SampleChunk[]) => void;
 
+// Type for the full FFT data packet, matching the backend and FftDisplay component
+export interface FftPacket {
+  psd_packets: { channel: number; psd: number[] }[];
+  fft_config: {
+    fft_size: number;
+    sample_rate: number;
+    window_function: string;
+  };
+  timestamp: number;
+  source_frame_id: number;
+}
+
  // Define the shape of the context data
 interface EegDataContextType {
   dataVersion: number; // Increments on new data
   getRawSamples: () => SampleChunk[]; // Function to get the current samples
   subscribeRaw: (callback: RawDataCallback) => () => void; // Returns an unsubscribe function
   fftData: Record<number, number[]>; // Latest FFT data per channel
+  fullFftPacket: FftPacket | null; // The complete, most recent FFT packet
   config: any;
   dataStatus: {
     dataReceived: boolean;
@@ -45,6 +58,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const rawSamplesRef = useRef<SampleChunk[]>([]);
   const [dataVersion, setDataVersion] = useState(0);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
+  const [fullFftPacket, setFullFftPacket] = useState<FftPacket | null>(null);
   const [dataReceived, setDataReceived] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -135,11 +149,20 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, [config]);
 
-  const handleFftData = useCallback((channelIndex: number, fftOutput: number[]) => {
-    setFftData(prevFftData => ({
-      ...prevFftData,
-      [channelIndex]: fftOutput,
-    }));
+  const handleFftData = useCallback((data: FftPacket) => {
+    setFullFftPacket(data); // Store the full packet
+
+    // Also update the simplified fftData for compatibility if needed elsewhere
+    if (data && Array.isArray(data.psd_packets)) {
+      const newFftData: Record<number, number[]> = {};
+      for (const packet of data.psd_packets) {
+        newFftData[packet.channel] = packet.psd;
+      }
+      setFftData(prevFftData => ({
+        ...prevFftData,
+        ...newFftData,
+      }));
+    }
   }, []);
 
   const cleanupOldData = useCallback(() => {
@@ -239,6 +262,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     getRawSamples,
     subscribeRaw,
     fftData,
+    fullFftPacket,
     config,
     dataStatus: {
       dataReceived,
@@ -249,7 +273,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     clearOldData,
     subscribe,
     unsubscribe,
-  }), [dataVersion, getRawSamples, subscribeRaw, fftData, config, dataReceived, driverError, wsStatus, isReconnecting, clearOldData, subscribe, unsubscribe]);
+  }), [dataVersion, fftData, fullFftPacket, config, dataReceived, driverError, wsStatus, isReconnecting, getRawSamples, subscribeRaw, clearOldData, subscribe, unsubscribe]);
 
   return (
     <EegDataContext.Provider value={value}>

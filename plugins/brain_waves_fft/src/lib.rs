@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use eeg_types::{
-    event::{EventFilter, FftConfig, FftPacket, PsdPacket, SensorEvent},
+    event::{EventFilter, FftConfig, FftPacket, PsdPacket, SensorEvent, WebSocketTopic},
     plugin::{EegPlugin, EventBus},
 };
+use bytes::Bytes;
 use apodize::hanning_iter;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
@@ -88,7 +89,7 @@ impl EegPlugin for BrainWavesFftPlugin {
                                 }
                             }
 
-                            while self.channel_buffers.iter().all(|b| b.len() >= FFT_SIZE) {
+                            while self.channel_buffers.iter().any(|b| b.len() >= FFT_SIZE) {
                                 let mut psd_packets = Vec::with_capacity(self.num_channels);
 
                                 for ch in 0..self.num_channels {
@@ -135,7 +136,18 @@ impl EegPlugin for BrainWavesFftPlugin {
                                     },
                                 };
 
+                                // Serialize the packet to JSON for the WebSocket
+                               let payload_bytes = Bytes::from(serde_json::to_vec(&fft_packet)?);
+
+                                // Broadcast the raw FFT packet for other internal plugins
                                 bus.broadcast(SensorEvent::Fft(Arc::new(fft_packet))).await;
+
+                                // Broadcast the event for the WebSocket
+                                let ws_event = SensorEvent::WebSocketBroadcast {
+                                    topic: WebSocketTopic::Fft,
+                                    payload: payload_bytes,
+                                };
+                                bus.broadcast(ws_event).await;
                             }
                         }
                         Ok(_) => {} // Ignore other event types

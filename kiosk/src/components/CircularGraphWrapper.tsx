@@ -6,6 +6,7 @@ import { useDataBuffer } from '../hooks/useDataBuffer';
 import { SampleChunk } from '../types/eeg';
 
 interface CircularGraphWrapperProps {
+  isActive: boolean;
   config: any;
   containerWidth: number;
   containerHeight: number;
@@ -16,6 +17,7 @@ interface CircularGraphWrapperProps {
 }
 
 export const CircularGraphWrapper = ({
+  isActive,
   config,
   containerWidth,
   containerHeight,
@@ -28,6 +30,7 @@ export const CircularGraphWrapper = ({
   // The wrapper now directly uses the EegCircularGraph and passes the buffer.
   return (
     <EegCircularGraph
+      isActive={isActive}
       config={config}
       containerWidth={containerWidth}
       containerHeight={containerHeight}

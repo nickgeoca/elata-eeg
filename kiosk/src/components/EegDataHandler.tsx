@@ -29,7 +29,7 @@ interface EegDataHandlerProps {
     samplesProcessed: number;
   }>; // Ref for debug information including packet count
   onFftData?: (data: any) => void; // Updated callback for structured FFT data
-  subscriptions: string[];
+  subscriptions?: string[]; // Made optional as it's no longer used for data handling
 }
 
 export function useEegDataHandler({
@@ -41,7 +41,8 @@ export function useEegDataHandler({
   latestTimestampRef,
   debugInfoRef,
   onFftData,
-  subscriptions,
+  // subscriptions now has a default value as it's optional
+  subscriptions = [],
 }: EegDataHandlerProps) {
   const [status, setStatus] = useState('Connecting...');
   const wsRef = useRef<WebSocket | null>(null);
@@ -81,26 +82,10 @@ export function useEegDataHandler({
     onSamplesRef.current = onSamples;
   }, [onSamples]);
 
+  // The subscription logic is no longer needed, as the new protocol sends all data
+  // over a single binary WebSocket connection. The client will parse topics locally.
   useEffect(() => {
-    // This effect handles sending subscription messages when the list changes.
-    const oldSubscriptions = new Set(subscriptionsRef.current);
-    const newSubscriptions = new Set(subscriptions);
-    const toSubscribe = [...newSubscriptions].filter(x => !oldSubscriptions.has(x));
-    const toUnsubscribe = [...oldSubscriptions].filter(x => !newSubscriptions.has(x));
-
-    const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      if (toSubscribe.length > 0) {
-        console.log('[EegDataHandler] Subscribing to:', toSubscribe);
-        ws.send(JSON.stringify({ action: 'subscribe', topics: toSubscribe }));
-      }
-      if (toUnsubscribe.length > 0) {
-        console.log('[EegDataHandler] Unsubscribing from:', toUnsubscribe);
-        ws.send(JSON.stringify({ action: 'unsubscribe', topics: toUnsubscribe }));
-      }
-    }
-
-    subscriptionsRef.current = subscriptions;
+   subscriptionsRef.current = subscriptions;
   }, [subscriptions]);
 
 
@@ -131,18 +116,20 @@ export function useEegDataHandler({
   }, [config]);
 
   useEffect(() => {
-    if (!configKey) {
-      console.log("[EegDataHandler] Waiting for config to be ready...");
-      return; // Don't connect until config is available
-    }
-    console.log(`[EegDataHandler] Effect running for configKey: ${configKey}`);
+    console.log(`[EegDataHandler] Effect running to establish WebSocket connection.`);
     let isMounted = true;
 
     const connectWebSocket = () => {
+      // Use the ref to get the latest config without adding it as a dependency
       const currentConfig = configRef.current;
+      
+      // If config isn't ready, wait and retry.
       if (!currentConfig) {
-        console.warn("[EegDataHandler] connectWebSocket called without config.");
-        return; // Should not happen if configKey is set, but as a safeguard.
+        console.warn("[EegDataHandler] Config not ready, scheduling reconnect.");
+        if (isMounted) {
+            reconnectTimeoutRef.current = setTimeout(connectWebSocket, 500);
+        }
+        return;
       }
 
       // Clear any existing reconnect timeout
@@ -182,156 +169,58 @@ export function useEegDataHandler({
         }));
         console.log(`[EegDataHandler] WebSocket connection established.`);
 
-        // Send initial subscription message
-        const currentSubscriptions = subscriptionsRef.current;
-        if (ws.readyState === WebSocket.OPEN && currentSubscriptions.length > 0) {
-          console.log('[EegDataHandler] Sending initial subscriptions:', currentSubscriptions);
-          ws.send(JSON.stringify({ action: 'subscribe', topics: currentSubscriptions }));
-        }
+        // No initial subscription message needed with the new protocol
       };
       
       ws.onmessage = (event: MessageEvent) => {
         if (!isMounted) return;
-        
+
         try {
           const now = performance.now();
-          // --- This is the fix ---
-          // Acknowledge that data is flowing on ANY message, not just binary.
-          // This prevents the "no data" status if the first message is text (e.g., subscription confirmation).
           onDataUpdateRef.current?.(true);
-          if (dataReceivedTimeoutRef.current) {
-            clearTimeout(dataReceivedTimeoutRef.current);
-          }
-          dataReceivedTimeoutRef.current = setTimeout(() => {
-            onDataUpdateRef.current?.(false);
-          }, 1000);
-          // --- End of fix ---
+          if (dataReceivedTimeoutRef.current) clearTimeout(dataReceivedTimeoutRef.current);
+          dataReceivedTimeoutRef.current = setTimeout(() => onDataUpdateRef.current?.(false), 1000);
 
           setDebugInfo(prev => ({
             ...prev,
             messagesReceived: prev.messagesReceived + 1,
             lastMessageTime: now,
-            lastMessageType: event.data instanceof ArrayBuffer ? 'binary' : typeof event.data,
+            lastMessageType: event.data instanceof ArrayBuffer ? 'binary' : 'string',
           }));
 
-          // Handle both binary (EEG) and text (FFT) messages
           if (event.data instanceof ArrayBuffer) {
-            // Existing binary processing logic...
             setDebugInfo(prev => ({ ...prev, binaryPacketsReceived: prev.binaryPacketsReceived + 1 }));
-
             const buffer = new Uint8Array(event.data);
-            if (buffer.length === 0) {
-              console.warn("[EegDataHandler] Received empty data packet");
+            if (buffer.length < 2) {
+              console.warn(`[EegDataHandler] Received packet too small for protocol header: ${buffer.length} bytes`);
               return;
             }
 
-          // Use latest config from ref
-          const currentConfig = configRef.current;
-          const configuredChannelCount = currentConfig?.channels?.length || 0;
-          
-          if (configuredChannelCount === 0) {
-            console.warn("[EegDataHandler] No channels configured, skipping packet");
-            return;
-          }
+            const version = buffer[0];
+            const topic = buffer[1];
+            const payload = buffer.slice(2); // Zero-copy view of the payload
 
-          const dataView = new DataView(event.data);
-          let offset = 0;
-
-          if (buffer.length < 4) {
-            console.warn(`[EegDataHandler] Data packet too small for header: ${buffer.length} bytes`);
-            return;
-          }
-
-          const totalSamples = dataView.getUint32(offset, true);
-          offset += 4;
-
-          const timestampBytes = totalSamples * 8;
-          const sampleBytes = totalSamples * 4;
-
-          if (buffer.length < offset + timestampBytes + sampleBytes) {
-            console.warn(`[EegDataHandler] Incomplete data packet. Expected ${offset + timestampBytes + sampleBytes}, got ${buffer.length}`);
-            return;
-          }
-
-          const timestamps = new BigUint64Array(totalSamples);
-          for (let i = 0; i < totalSamples; i++) {
-            timestamps[i] = dataView.getBigUint64(offset, true);
-            offset += 8;
-          }
-
-          const samples = new Float32Array(totalSamples);
-          for (let i = 0; i < totalSamples; i++) {
-            samples[i] = dataView.getFloat32(offset, true);
-            offset += 4;
-          }
-
-          const batchSize = totalSamples / configuredChannelCount;
-
-          if (batchSize === 0 || !Number.isInteger(batchSize)) {
-            console.warn(`[EegDataHandler] Invalid batch size: ${batchSize}`);
-            return;
-          }
-
-          // If channel count changes, create a new array of the correct size
-          if (sampleBuffersRef.current.length !== configuredChannelCount) {
-            sampleBuffersRef.current = new Array(configuredChannelCount).fill(null);
-          }
-
-          const allChannelSamples: { values: Float32Array; timestamps: BigUint64Array }[] = [];
-          for (let ch = 0; ch < configuredChannelCount; ch++) {
-            const channelValues = new Float32Array(batchSize);
-            const channelTimestamps = new BigUint64Array(batchSize);
-
-            for (let i = 0; i < batchSize; i++) {
-              const sampleIndex = i * configuredChannelCount + ch;
-              channelValues[i] = samples[sampleIndex];
-              channelTimestamps[i] = timestamps[sampleIndex];
+            if (version !== 1) {
+              console.error(`[EegDataHandler] Received unsupported protocol version: ${version}`);
+              return;
             }
-            allChannelSamples.push({ values: channelValues, timestamps: channelTimestamps });
-          }
 
-          if (allChannelSamples.length > 0) {
-            onSamplesRef.current?.(allChannelSamples);
-
-            // The FFT calculation is now handled by the Rust plugin.
-            // The frontend will receive FftPacket events via WebSocket.
-
-            // Log a sample of the data every 100 packets
-            logCounterRef.current++;
-            if (logCounterRef.current % 100 === 0) {
-              const sampleToShow = allChannelSamples[0]?.values.slice(0, 5);
-              console.log(`[EegDataHandler] Ch 0 Data Sample (packet #${debugInfoRef.current.packetsReceived}):`, sampleToShow);
+            switch (topic) {
+              case 0: // FilteredEeg
+                handleEegPayload(payload);
+                break;
+              case 1: // Fft
+                handleFftPayload(payload);
+                break;
+              case 255: // Log
+                handleLogPayload(payload);
+                break;
+              default:
+                console.warn(`[EegDataHandler] Received message with unknown topic ID: ${topic}`);
             }
-          }
-
-          if (latestTimestampRef) {
-            latestTimestampRef.current = performance.now();
-          }
-
-          if (debugInfoRef) {
-            debugInfoRef.current.packetsReceived++;
-            debugInfoRef.current.lastPacketTime = performance.now();
-            debugInfoRef.current.samplesProcessed += batchSize * configuredChannelCount;
-          }
-
-          } else if (typeof event.data === 'string') {
-            // New text message processing for FFT data
-            setDebugInfo(prev => ({ ...prev, textPacketsReceived: prev.textPacketsReceived + 1 }));
-            try {
-              const message = JSON.parse(event.data);
-              if (message.type === 'status' && message.status === 'subscription_ok') {
-                console.log('[EegDataHandler] Subscription confirmed by backend.');
-                // Can set a specific state here if needed, e.g., setSubscriptionActive(true)
-              } else if (message.type === 'Fft' && onFftDataRef.current) {
-                // Pass the entire FftPacket to the callback
-                onFftDataRef.current?.(message.data);
-              } else if (message.type === 'error') {
-                  console.error(`[EegDataHandler] Received error from backend: ${message.message}`);
-                  onErrorRef.current?.(message.message);
-              }
-            } catch (error) {
-              console.error("[EegDataHandler] Error parsing text message:", error);
-            }
+          } else {
+            // This path can be used for legacy text messages or control signals if needed.
+            console.log("[EegDataHandler] Received non-binary message:", event.data);
           }
         } catch (error) {
           console.error("[EegDataHandler] Error in onmessage handler:", error);
@@ -342,7 +231,92 @@ export function useEegDataHandler({
           onErrorRef.current?.(`Error processing data: ${error}`);
         }
       };
-      
+
+      const handleEegPayload = (payload: Uint8Array) => {
+        const currentConfig = configRef.current;
+        const configuredChannelCount = currentConfig?.channels?.length || 0;
+        if (configuredChannelCount === 0) return;
+
+        const dataView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        let offset = 0;
+
+        if (payload.length < 4) {
+          console.warn(`[EegDataHandler] EEG payload too small for header: ${payload.length} bytes`);
+          return;
+        }
+
+        const totalSamples = dataView.getUint32(offset, true);
+        offset += 4;
+
+        const timestampBytes = totalSamples * 8;
+        const sampleBytes = totalSamples * 4;
+
+        if (payload.length < offset + timestampBytes + sampleBytes) {
+          console.warn(`[EegDataHandler] Incomplete EEG payload. Expected ${offset + timestampBytes + sampleBytes}, got ${payload.length}`);
+          return;
+        }
+
+        const timestamps = new BigUint64Array(totalSamples);
+        for (let i = 0; i < totalSamples; i++) {
+          timestamps[i] = dataView.getBigUint64(offset, true);
+          offset += 8;
+        }
+
+        const samples = new Float32Array(totalSamples);
+        for (let i = 0; i < totalSamples; i++) {
+          samples[i] = dataView.getFloat32(offset, true);
+          offset += 4;
+        }
+
+        const batchSize = totalSamples / configuredChannelCount;
+        if (batchSize === 0 || !Number.isInteger(batchSize)) {
+          console.warn(`[EegDataHandler] Invalid batch size for EEG data: ${batchSize}`);
+          return;
+        }
+
+        const allChannelSamples: { values: Float32Array; timestamps: BigUint64Array }[] = [];
+        for (let ch = 0; ch < configuredChannelCount; ch++) {
+          const channelValues = new Float32Array(batchSize);
+          const channelTimestamps = new BigUint64Array(batchSize);
+          for (let i = 0; i < batchSize; i++) {
+            const sampleIndex = i * configuredChannelCount + ch;
+            channelValues[i] = samples[sampleIndex];
+            channelTimestamps[i] = timestamps[sampleIndex];
+          }
+          allChannelSamples.push({ values: channelValues, timestamps: channelTimestamps });
+        }
+
+        if (allChannelSamples.length > 0) {
+          onSamplesRef.current?.(allChannelSamples);
+        }
+
+        if (latestTimestampRef) latestTimestampRef.current = performance.now();
+        if (debugInfoRef) {
+          debugInfoRef.current.packetsReceived++;
+          debugInfoRef.current.lastPacketTime = performance.now();
+          debugInfoRef.current.samplesProcessed += batchSize * configuredChannelCount;
+        }
+      };
+
+      const handleFftPayload = (payload: Uint8Array) => {
+        try {
+          const text = new TextDecoder().decode(payload);
+          const fftData = JSON.parse(text);
+          onFftDataRef.current?.(fftData);
+        } catch (error) {
+          console.error("[EegDataHandler] Error parsing FFT payload:", error);
+        }
+      };
+
+      const handleLogPayload = (payload: Uint8Array) => {
+        try {
+          const text = new TextDecoder().decode(payload);
+          console.log(`[EEG-DEVICE-LOG] ${text}`);
+        } catch (error) {
+          console.error("[EegDataHandler] Error parsing log payload:", error);
+        }
+      };
+
       ws.onclose = (event) => {
         if (!isMounted) return;
         
@@ -397,7 +371,7 @@ export function useEegDataHandler({
 
     return () => {
       isMounted = false;
-      console.log(`[EegDataHandler] Cleaning up effect for configKey: ${configKey}`);
+      console.log(`[EegDataHandler] Cleaning up WebSocket effect.`);
 
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
@@ -412,7 +386,7 @@ export function useEegDataHandler({
         wsRef.current = null;
       }
     };
-  }, [configKey]); // Re-run effect only when the stable key changes
+  }, []); // Re-run effect only once on mount
   // Return status and debug info
   return {
     status,

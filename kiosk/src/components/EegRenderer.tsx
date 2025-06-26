@@ -11,6 +11,7 @@ import { useDataBuffer } from '../hooks/useDataBuffer';
 import { SampleChunk } from '../types/eeg';
 
 interface EegRendererProps {
+  isActive: boolean;
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   dataRef: React.RefObject<any>; // Re-added as required prop
   config: any;
@@ -20,7 +21,6 @@ interface EegRendererProps {
     packetsReceived: number;
     samplesProcessed: number;
   }>;
-  linesReady: boolean; // Add prop to signal when lines are ready
   dataBuffer: ReturnType<typeof useDataBuffer<SampleChunk>>; // Add the dataBuffer prop
   targetFps?: number; // Optional target FPS for rendering
   containerWidth: number; // New prop for container width
@@ -29,12 +29,12 @@ interface EegRendererProps {
 }
 
 export const EegRenderer = React.memo(function EegRenderer({
+  isActive,
   canvasRef,
   dataRef, // Add dataRef prop here
   config,
   latestTimestampRef,
   debugInfoRef,
-  linesReady, // Destructure linesReady
   dataBuffer, // Destructure dataBuffer
   targetFps,
   containerWidth, // Destructure new prop
@@ -55,7 +55,7 @@ export const EegRenderer = React.memo(function EegRenderer({
   const numChannels = config?.channels?.length ?? 8;
 
   // Render logic now pulls from the buffer and processes data asynchronously
-  if (wglpRef.current && dataRef.current && isInitializedRef.current && numChannels > 0) {
+  if (isActive && wglpRef.current && dataRef.current && isInitializedRef.current && numChannels > 0) {
     const wglp = wglpRef.current;
     const lines = dataRef.current;
 
@@ -96,8 +96,8 @@ export const EegRenderer = React.memo(function EegRenderer({
   useEffect(() => {
     // Skip if plot already exists, canvas missing, or container dimensions are not valid
     const validDimensions = containerWidth > 0 && containerHeight > 0;
-    if (wglpRef.current || !canvasRef.current || !validDimensions || numChannels === 0) {
-      console.log(`[EegRenderer InitEffect1] Skipping plot creation (Plot Exists: ${!!wglpRef.current}, Canvas: ${!!canvasRef.current}, ValidDimensions: ${validDimensions} [${containerWidth}x${containerHeight}], Channels: ${numChannels}).`);
+    if (!isActive || wglpRef.current || !canvasRef.current || !validDimensions || numChannels === 0) {
+      console.log(`[EegRenderer InitEffect1] Skipping plot creation (Active: ${isActive}, Plot Exists: ${!!wglpRef.current}, Canvas: ${!!canvasRef.current}, ValidDimensions: ${validDimensions} [${containerWidth}x${containerHeight}], Channels: ${numChannels}).`);
       return;
     }
 
@@ -150,12 +150,16 @@ export const EegRenderer = React.memo(function EegRenderer({
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
+      if (wglpRef.current) {
+        // @ts-ignore
+        wglpRef.current.removeAllLines();
+      }
       wglpRef.current = null; // Clear ref on cleanup
       isInitializedRef.current = false; // Reset ref on cleanup
       console.log("[EegRenderer InitEffect1] Plot instance cleanup complete.");
     };
     // Depend on canvasRef, numChannels, containerWidth, containerHeight
-  }, [canvasRef, numChannels, containerWidth, containerHeight]);
+  }, [isActive, canvasRef, numChannels, containerWidth, containerHeight]);
 
 
   // Effect 2: Add/Update lines when they are ready AND plot is initialized
@@ -163,9 +167,9 @@ export const EegRenderer = React.memo(function EegRenderer({
     // Use wglpRef
     const wglp = wglpRef.current;
 
-    // Only proceed if plot is initialized (via ref) AND plot exists AND lines are ready
-    if (!isInitializedRef.current || !wglp || !linesReady) {
-        // console.log(`[EegRenderer InitEffect2] Skipping line addition (Initialized: ${isInitializedRef.current}, Plot Exists: ${!!wglp}, LinesReady: ${linesReady})`);
+    // Only proceed if plot is initialized (via ref) AND plot exists
+    if (!isInitializedRef.current || !wglp) {
+        // console.log(`[EegRenderer InitEffect2] Skipping line addition (Initialized: ${isInitializedRef.current}, Plot Exists: ${!!wglp})`);
         return;
     }
 
@@ -208,8 +212,8 @@ export const EegRenderer = React.memo(function EegRenderer({
     // No cleanup needed specifically for adding lines, Effect 1 handles plot cleanup.
 
   // Depend on plot initialization state, lines readiness state, and the actual dataRef content
-  // Check isInitializedRef.current inside, depend on linesReady
-  }, [linesReady, dataRef, wglpRef, isInitializedRef]);
+  // Check isInitializedRef.current inside
+  }, [dataVersion, wglpRef, isInitializedRef]);
 
 
   // Resize Effect: Now depends on containerWidth and containerHeight props

@@ -5,6 +5,17 @@
 //! plugins while maintaining data integrity through frame IDs.
 
 use std::sync::Arc;
+use bytes::Bytes;
+
+pub const PROTOCOL_VERSION: u8 = 1;
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy)]
+pub enum WebSocketTopic {
+    FilteredEeg = 0,
+    Fft = 1,
+    Log = 255,
+}
 
 /// Raw EEG data packet from the sensor hardware
 #[derive(Debug, Clone)]
@@ -108,6 +119,12 @@ pub enum SensorEvent {
     Fft(Arc<FftPacket>),
     /// System status and control events
     System(Arc<SystemEvent>),
+
+    /// New variant for all data destined for the WebSocket
+    WebSocketBroadcast {
+        topic: WebSocketTopic,
+        payload: Bytes,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +172,15 @@ impl SensorEvent {
             SensorEvent::FilteredEeg(packet) => packet.timestamps.first().cloned().unwrap_or(0),
             SensorEvent::Fft(packet) => packet.timestamp,
             SensorEvent::System(event) => event.timestamp,
+            SensorEvent::WebSocketBroadcast { .. } => {
+                // This event is for outgoing data, timestamp is not applicable in the same way
+                // but we should return a value. Let's use the current time.
+                // Note: This may need refinement depending on how it's used.
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_micros() as u64
+            }
         }
     }
 
@@ -165,6 +191,7 @@ impl SensorEvent {
             SensorEvent::FilteredEeg(_) => "FilteredEeg",
             SensorEvent::Fft(_) => "Fft",
             SensorEvent::System(_) => "System",
+            SensorEvent::WebSocketBroadcast { .. } => "WebSocketBroadcast",
         }
     }
 }

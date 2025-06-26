@@ -6,9 +6,10 @@ use anyhow::Result;
 use tracing::{info, error, debug, warn};
 
 use eeg_types::{
-    event::{SensorEvent, FilteredEegPacket, EventFilter},
+    event::{SensorEvent, FilteredEegPacket, EventFilter, WebSocketTopic},
     config::DaemonConfig,
 };
+use bytes::Bytes;
 use eeg_types::plugin::{EegPlugin, PluginConfig, EventBus};
 
 mod dsp;
@@ -171,8 +172,19 @@ impl EegPlugin for BasicVoltageFilterPlugin {
                                 sample_rate: packet.sample_rate,
                             };
 
-                            let filtered_event = SensorEvent::FilteredEeg(Arc::new(filtered_packet));
-                            bus.broadcast(filtered_event).await;
+                            // Serialize the packet for the WebSocket
+                            let payload_bytes = Bytes::from(filtered_packet.to_binary());
+
+                            // Broadcast the raw filtered packet for other internal plugins
+                            let internal_event = SensorEvent::FilteredEeg(Arc::new(filtered_packet));
+                            bus.broadcast(internal_event).await;
+
+                            // Broadcast the event for the WebSocket
+                            let ws_event = SensorEvent::WebSocketBroadcast {
+                                topic: WebSocketTopic::FilteredEeg,
+                                payload: payload_bytes,
+                            };
+                            bus.broadcast(ws_event).await;
                         }
                         Ok(_) => {} // Ignore other event types
                         Err(broadcast::error::RecvError::Lagged(n)) => {

@@ -49,8 +49,7 @@ export const EegCircularRenderer = React.memo(React.forwardRef<EegCircularRender
     
     // Compile shaders
     const vertexShader = gl.createShader(gl.VERTEX_SHADER)!;
-    gl.shaderSource(vertexShader, `
-      #version 300 es
+    gl.shaderSource(vertexShader, `#version 300 es
       in float a_eegValue;
       uniform float u_headPosition;
       uniform float u_totalPoints;
@@ -71,8 +70,7 @@ export const EegCircularRenderer = React.memo(React.forwardRef<EegCircularRender
     gl.compileShader(vertexShader);
     
     const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER)!;
-    gl.shaderSource(fragmentShader, `
-      #version 300 es
+    gl.shaderSource(fragmentShader, `#version 300 es
       precision mediump float;
       uniform vec4 u_lineColor;
       out vec4 outColor;

@@ -6,6 +6,7 @@ import { useDataBuffer } from '../../../kiosk/src/hooks/useDataBuffer';
 import { SampleChunk } from '../../../kiosk/src/types/eeg';
 
 interface EegCircularGraphProps {
+  isActive: boolean;
   config: any;
   containerWidth: number;
   containerHeight: number;
@@ -16,6 +17,7 @@ interface EegCircularGraphProps {
 }
 
 export const EegCircularGraph = ({
+  isActive,
   config,
   containerWidth,
   containerHeight,
@@ -34,6 +36,7 @@ export const EegCircularGraph = ({
 
   // New render logic to pull data from the buffer asynchronously
   useEffect(() => {
+    if (!isActive) return;
     const sampleChunks = dataBuffer.getAndClearData();
         
     if (sampleChunks.length > 0 && rendererRef.current) {

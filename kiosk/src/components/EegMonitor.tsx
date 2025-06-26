@@ -1,53 +1,19 @@
 'use client';
 import React from 'react'; // Added to resolve React.Fragment error
 
-import { useRef, useState, useEffect, useLayoutEffect } from 'react';
+import { useRef, useState, useEffect } from 'react';
 import { useEegConfig } from './EegConfig';
-// EegConfigDisplay is removed as we are inlining and modifying its logic.
-// EegChannelConfig is also not used in the settings panel.
-import { EegRenderer } from './EegRenderer';
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
-// import { ScrollingBuffer } from '../utils/ScrollingBuffer'; // Removed - Unused and file doesn't exist
-import { GRAPH_HEIGHT, WINDOW_DURATION, TIME_TICKS, DISPLAY_FPS } from '../utils/eegConstants';
 import { useCommandWebSocket } from '../context/CommandWebSocketContext';
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-ignore: WebglStep might be missing from types but exists at runtime
-import { WebglStep, ColorRGBA } from 'webgl-plot';
-import { getChannelColor } from '../utils/colorUtils';
-import FftDisplay from '../../../plugins/brain_waves_fft/ui/FftDisplay';
-import { CircularGraphWrapper } from './CircularGraphWrapper';
 import { useEegData } from '../context/EegDataContext';
-import { useDataBuffer } from '../hooks/useDataBuffer'; // Import the new hook
-import { SampleChunk } from '../types/eeg'; // Import the new type
+import EegDataVisualizer from './EegDataVisualizer';
 
 export default function EegMonitorWebGL() {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const dataRef = useRef<any[]>([]); // Holds the WebGL line objects
-  const canvasRef = useRef<HTMLCanvasElement>(null); // Re-added for EegRenderer
-  const latestTimestampRef = useRef<number>(0); // Re-added for EegRenderer
-  const debugInfoRef = useRef({ // Re-added for EegRenderer
-    lastPacketTime: 0,
-    packetsReceived: 0,
-    samplesProcessed: 0,
-  });
-  // Removed canvasDimensions state, EegRenderer handles this
-
-  type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph'; // fftGraph removed
+  type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph';
   type ActiveView = DataView | 'settings';
  
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
-  const activeViewRef = useRef(activeView);
-  useEffect(() => {
-    activeViewRef.current = activeView;
-  }, [activeView]);
-  const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph'); // To store the last non-settings view
-  const [linesReady, setLinesReady] = useState(false); // State to track line readiness
-  const [containerSize, setContainerSize] = useState({ width: 0, height: 0 }); // State for container dimensions
-  const [dataVersion, setDataVersion] = useState(0); // Version counter for dataRef updates
-  const [localDataVersion, setLocalDataVersion] = useState(0);
-  const circularGraphBuffer = useDataBuffer<SampleChunk>(); // Use the new buffer hook
-  const signalGraphBuffer = useDataBuffer<SampleChunk>(); // Buffer for the main signal graph
-  const circularGraphLastProcessedLengthRef = useRef<number>(0);
+  const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph');
   
   const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
   const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
@@ -58,7 +24,7 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get all data and config from the new central context
-  const { dataVersion: eegDataVersion, getRawSamples, subscribeRaw, fftData, config, dataStatus, subscribe, unsubscribe } = useEegData();
+  const { config, dataStatus } = useEegData();
   const { dataReceived, driverError, wsStatus } = dataStatus;
   const { status: configStatus, refreshConfig } = useEegConfig(); // Keep for settings UI
 
@@ -80,56 +46,6 @@ export default function EegMonitorWebGL() {
       }
     }
   }, [config]);
-
-  // Effect to manage data subscriptions based on the active view
-  useEffect(() => {
-    const isSignalGraphView = activeView === 'signalGraph';
-    const isCircularGraphView = activeView === 'circularGraph';
-    const isFftView = activeView === 'appletBrainWaves';
-
-    let unsubSignal: (() => void) | null = null;
-    if (isSignalGraphView) {
-      console.log('[EegMonitor] Subscribing to raw data for Signal Graph.');
-      unsubSignal = subscribeRaw((newSampleChunks) => {
-        if (newSampleChunks.length > 0) {
-          signalGraphBuffer.addData(newSampleChunks);
-          setLocalDataVersion(v => v + 1);
-        }
-      });
-    }
-
-    let unsubCircular: (() => void) | null = null;
-    if (isCircularGraphView) {
-      console.log('[EegMonitor] Subscribing to raw data for Circular Graph.');
-      unsubCircular = subscribeRaw((newSampleChunks) => {
-        if (newSampleChunks.length > 0) {
-          circularGraphBuffer.addData(newSampleChunks);
-          setLocalDataVersion(v => v + 1);
-        }
-      });
-    }
-    
-    if (isFftView) {
-      console.log('[EegMonitor] Subscribing to FftPacket');
-      subscribe(['FftPacket']);
-    }
-
-    return () => {
-      if (unsubSignal) {
-        console.log('[EegMonitor] Unsubscribing from raw data for Signal Graph.');
-        unsubSignal();
-      }
-      if (unsubCircular) {
-        console.log('[EegMonitor] Unsubscribing from raw data for Circular Graph.');
-        unsubCircular();
-      }
-      if (isFftView) {
-        console.log('[EegMonitor] Unsubscribing from FftPacket');
-        unsubscribe(['FftPacket']);
-      }
-    };
-  }, [activeView, subscribe, unsubscribe, subscribeRaw, signalGraphBuffer, circularGraphBuffer]);
-
 
   const { sendPowerlineFilterCommand } = useCommandWebSocket(); // Keep for potential direct use if needed
 
@@ -213,12 +129,9 @@ export default function EegMonitorWebGL() {
     wsConnected,
     startRecording,
     stopRecording,
-    // sendPowerlineFilterCommand is now available here but used in handleUpdateConfig
     recordingStatus,
     recordingFilePath,
   } = useCommandWebSocket();
-
-  // Update canvas dimensions based on container size
  
   // Effect to update lastActiveDataView when activeView changes (and is not settings)
   useEffect(() => {
@@ -227,100 +140,12 @@ export default function EegMonitorWebGL() {
     }
   }, [activeView]);
 
-  // Effect to setup ResizeObserver to monitor container size
-  useLayoutEffect(() => {
-    const target = containerRef.current;
-    // Only run if the target element exists and we are in a view that shows the graph
-    if (!target || (activeView !== 'signalGraph' && activeView !== 'circularGraph')) {
-      return;
-    }
-
-    const resizeObserver = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        // Update state with the new dimensions
-        setContainerSize({ width, height });
-      }
-    });
-
-    resizeObserver.observe(target);
-
-    // Set initial size
-    setContainerSize({ width: target.offsetWidth, height: target.offsetHeight });
-
-    // Cleanup observer on unmount or when activeView changes
-    return () => {
-      resizeObserver.disconnect();
-    };
-  }, [activeView]); // Rerun when the active view changes
-
-  // Effect to create/update WebGL lines when config or container size changes
-  // Constants for scaling
-  const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const REFERENCE_UV_RANGE = 100.0; // The peak-to-peak microvolt range we want to fit in the channel's vertical space by default
-  const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8]; // Added UI Scale Factors
-
-  useEffect(() => {
-    const numChannels = config?.channels?.length || 0;
-    const sampleRate = config?.sample_rate;
-    const MIN_VALID_WIDTH = 50;
-
-    // Create or update lines only if necessary
-    if (config && sampleRate && numChannels > 0 && containerSize.width > MIN_VALID_WIDTH) {
-      const initialNumPoints = Math.ceil(sampleRate * (WINDOW_DURATION / 1000));
-      const ySpacing = 2.0 / numChannels;
-
-      // If number of lines has changed, recreate them
-      if (dataRef.current.length !== numChannels) {
-        console.log(`[EegMonitor] Creating ${numChannels} WebGL lines with ${initialNumPoints} points each.`);
-        const lines: WebglStep[] = [];
-        for (let i = 0; i < numChannels; i++) {
-          const line = new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
-          line.lineSpaceX(-1, 2 / initialNumPoints);
-          lines.push(line);
-        }
-        dataRef.current = lines;
-        setLinesReady(true);
-      }
-
-      // Always update scaling and positioning as it can change dynamically
-      dataRef.current.forEach((line, i) => {
-        line.lineWidth = 1;
-        const calculatedScaleY = ((ySpacing * MICROVOLT_CONVERSION_FACTOR) / REFERENCE_UV_RANGE) * uiVoltageScaleFactor;
-        line.scaleY = calculatedScaleY;
-        line.offsetY = 1 - (i + 0.5) * ySpacing;
-      });
-
-      setDataVersion(v => v + 1);
-    } else {
-      // If no channels or invalid config, clear the lines
-      if (dataRef.current.length > 0) {
-        dataRef.current = [];
-        setLinesReady(false);
-        setDataVersion(v => v + 1);
-      }
-    }
-  }, [config?.channels?.length, config?.sample_rate, containerSize.width, uiVoltageScaleFactor]);
-
-  // This entire synchronous data processing block is now handled by the EegRenderer's async loop.
-  // It is safe to remove.
-
-  // This useEffect is now handled by the consolidated subscription logic above.
-
-  // Reset processed index when WebGL lines are recreated or view changes
-  useEffect(() => {
-    // lastProcessedLengthRef is no longer needed
-    console.log('[EegMonitor] Reset processed data index');
-  }, [linesReady, activeView]);
-  
-  // Use the FPS from config with no fallback
-  const displayFps = config?.fps || 0;
+  const UI_SCALE_FACTORS = [0.125, 0.25, 0.5, 1, 2, 4, 8];
 
   const getViewName = (view: DataView | 'settings'): string => {
     switch (view) {
         case 'signalGraph': return 'Signal Graph';
         case 'circularGraph': return 'Circular Graph';
-        // case 'fftGraph': return 'FFT Graph'; // Removed
         case 'appletBrainWaves': return 'Brain Waves (FFT)'; // Updated name
         case 'settings': return 'Settings';
         default: return '';
@@ -335,10 +160,7 @@ export default function EegMonitorWebGL() {
       setActiveView('appletBrainWaves');
     } else if (activeView === 'appletBrainWaves') {
       setActiveView('signalGraph');
-    }
-    // If currently in settings, this function shouldn't be called, but handle gracefully
-    // by defaulting to signal graph
-    else if (activeView === 'settings') {
+    } else if (activeView === 'settings') {
       setActiveView('signalGraph');
     }
   };
@@ -346,15 +168,9 @@ export default function EegMonitorWebGL() {
   // Handler for the "Settings" / "Back to [View]" button
   const handleToggleSettingsView = () => {
     if (activeView !== 'settings') {
-        // lastActiveDataView is already updated by an effect
         setActiveView('settings');
     } else {
         setActiveView(lastActiveDataView);
-        // If switching from settings to a graph view, ensure container size is reset
-        if (lastActiveDataView === 'signalGraph' || lastActiveDataView === 'circularGraph') { // fftGraph condition removed
-            console.log("[EegMonitor handleToggleSettingsView] Switching from settings to graph view. Resetting containerSize.");
-            setContainerSize({ width: 0, height: 0 });
-        }
     }
   };
   
@@ -365,15 +181,12 @@ export default function EegMonitorWebGL() {
 
     const checkScroll = () => {
       if (scrollElement) {
-        // Check if there's enough content to scroll (scrollbar is visible)
         const hasScrollbar = scrollElement.scrollHeight > scrollElement.clientHeight;
-        // Check if scrolled to the bottom (with a small buffer for precision)
         const atBottom = scrollElement.scrollTop + scrollElement.clientHeight >= scrollElement.scrollHeight - 5;
         
-        setCanScrollSettings(hasScrollbar && !atBottom); // Only show arrow if scrollable and not at bottom
-        setIsAtSettingsBottom(hasScrollbar && atBottom); // Show end marker if scrollable and at bottom
+        setCanScrollSettings(hasScrollbar && !atBottom);
+        setIsAtSettingsBottom(hasScrollbar && atBottom);
         
-        // If no scrollbar, effectively at bottom for "end" marker logic if content fits perfectly
         if (!hasScrollbar) {
             setIsAtSettingsBottom(true);
         }
@@ -385,31 +198,24 @@ export default function EegMonitorWebGL() {
     };
 
     if (activeView === 'settings' && scrollElement) {
-      // Initial check
-      // Use a timeout to allow content to render fully before checking scroll height
       const timerId = setTimeout(checkScroll, 100);
 
-
-      // Listen for scroll events
       scrollElement.addEventListener('scroll', checkScroll);
-      // Also check on resize of the window or content (e.g. config load)
       const resizeObserver = new ResizeObserver(checkScroll);
       resizeObserver.observe(scrollElement);
-      // Observe children too, as their size changes can affect scrollHeight
       Array.from(scrollElement.children).forEach(child => resizeObserver.observe(child));
 
 
       return () => {
         clearTimeout(timerId);
         scrollElement.removeEventListener('scroll', checkScroll);
-        resizeObserver.disconnect(); // Disconnects from all observed elements
+        resizeObserver.disconnect();
       };
     } else {
-      // Reset when settings are hidden
       setCanScrollSettings(false);
       setIsAtSettingsBottom(false);
     }
-  }, [activeView, config, uiVoltageScaleFactor]); // Re-check when settings are shown, config (content height might change), or other UI elements change
+  }, [activeView, config, uiVoltageScaleFactor]);
 
 
   return (
@@ -428,10 +234,8 @@ export default function EegMonitorWebGL() {
           </div>
         </div>
         <div className="flex items-baseline space-x-2">
-          {/* Use the EegRecordingControls component */}
           <EegRecordingControls />
           
-          {/* Recordings button */}
           <a
             href="/recordings"
             className="px-4 py-1 rounded-md bg-purple-600 hover:bg-purple-700 text-white flex items-center"
@@ -442,7 +246,6 @@ export default function EegMonitorWebGL() {
             Recordings
           </a>
           
-          {/* Signal / Circular / FFT Graph toggle button */}
           <button
             onClick={handleToggleSignalFftView}
             className="px-4 py-1 rounded-md bg-teal-600 hover:bg-teal-700 text-white"
@@ -452,7 +255,6 @@ export default function EegMonitorWebGL() {
              activeView === 'circularGraph' ? 'Show FFT' : 'Show Signal'}
           </button>
  
-          {/* Settings button */}
           <button
             onClick={handleToggleSettingsView}
             className="px-4 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white"
@@ -464,7 +266,6 @@ export default function EegMonitorWebGL() {
         </div>
       </div>
       
-      {/* Recording status indicator */}
       {recordingStatus.startsWith('Currently recording') && (
         <div className="bg-red-900 text-white px-2 py-1 text-sm flex justify-between">
           <div className="flex items-center">
@@ -479,7 +280,6 @@ export default function EegMonitorWebGL() {
         </div>
       )}
       
-      {/* Driver error display */}
       {driverError && (
         <div className="bg-yellow-800 text-white px-2 py-1 text-sm flex items-center">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-yellow-300" viewBox="0 0 20 20" fill="currentColor">
@@ -490,264 +290,108 @@ export default function EegMonitorWebGL() {
       )}
       
       {/* Main content area */}
-      <div className="flex-grow overflow-hidden">
-        {activeView === 'settings' ? (
-          <div ref={settingsScrollRef} className="relative h-full p-4 overflow-auto"> {/* Settings Panel Component (Existing UI) */}
-            {/* Scroll Down Indicator */}
+      <main className="flex-grow relative bg-gray-950">
+        {activeView !== 'settings' ? (
+          <EegDataVisualizer
+            activeView={activeView}
+            config={config}
+            uiVoltageScaleFactor={uiVoltageScaleFactor}
+          />
+        ) : (
+          // Settings Panel
+          <div ref={settingsScrollRef} className="h-full overflow-y-auto bg-gray-800 text-white p-4 relative">
+            <h2 className="text-2xl font-bold mb-4 border-b border-gray-600 pb-2">Settings</h2>
+            
+            {/* Configuration Update Status */}
+            {configUpdateStatus && (
+              <div className={`p-2 mb-4 rounded text-sm ${configUpdateStatus.startsWith('Error') ? 'bg-red-800' : 'bg-blue-800'}`}>
+                {configUpdateStatus}
+              </div>
+            )}
+
+            {/* Channel Count */}
+            <div className="mb-4">
+              <label htmlFor="channel-count" className="block mb-1 font-semibold">Channels</label>
+              <select
+                id="channel-count"
+                value={selectedChannelCount ?? ''}
+                onChange={(e) => setSelectedChannelCount(e.target.value)}
+                className="w-full p-2 rounded bg-gray-700 border border-gray-600"
+                disabled={!config}
+              >
+                {[...Array(9).keys()].map(i => <option key={i} value={i}>{i === 0 ? 'All Off' : `${i} channel${i > 1 ? 's' : ''}`}</option>)}
+              </select>
+            </div>
+
+            {/* Sample Rate */}
+            <div className="mb-4">
+              <label htmlFor="sample-rate" className="block mb-1 font-semibold">Sample Rate (Hz)</label>
+              <select
+                id="sample-rate"
+                value={selectedSampleRate ?? ''}
+                onChange={(e) => setSelectedSampleRate(e.target.value)}
+                className="w-full p-2 rounded bg-gray-700 border border-gray-600"
+                disabled={!config}
+              >
+                {[250, 500, 1000, 2000].map(rate => <option key={rate} value={rate}>{rate}</option>)}
+              </select>
+            </div>
+
+            {/* Powerline Filter */}
+            <div className="mb-4">
+              <label htmlFor="powerline-filter" className="block mb-1 font-semibold">Powerline Filter</label>
+              <select
+                id="powerline-filter"
+                value={selectedPowerlineFilter ?? 'off'}
+                onChange={(e) => setSelectedPowerlineFilter(e.target.value)}
+                className="w-full p-2 rounded bg-gray-700 border border-gray-600"
+                disabled={!config}
+              >
+                <option value="off">Off</option>
+                <option value="50">50 Hz</option>
+                <option value="60">60 Hz</option>
+              </select>
+            </div>
+
+            {/* Voltage Scale */}
+            <div className="mb-4">
+                <label htmlFor="voltage-scale" className="block mb-1 font-semibold">Voltage Scale</label>
+                <div className="flex items-center">
+                    <input
+                        id="voltage-scale"
+                        type="range"
+                        min="0"
+                        max={UI_SCALE_FACTORS.length - 1}
+                        step="1"
+                        value={UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor)}
+                        onChange={(e) => setUiVoltageScaleFactor(UI_SCALE_FACTORS[parseInt(e.target.value, 10)])}
+                        className="w-full h-2 bg-gray-700 rounded-lg appearance-none cursor-pointer"
+                    />
+                    <span className="ml-4 text-sm w-12 text-right">{uiVoltageScaleFactor}x</span>
+                </div>
+            </div>
+
+            {/* Update Button */}
+            <button
+              onClick={handleUpdateConfig}
+              className="w-full px-4 py-2 rounded-md bg-green-600 hover:bg-green-700 text-white font-bold"
+              disabled={!wsConnected || !config}
+            >
+              Apply Changes
+            </button>
+
+            {/* Scroll indicators */}
             {canScrollSettings && (
-              <div className="absolute top-1/2 right-2 transform -translate-y-1/2 z-10 text-gray-400 animate-bounce pointer-events-none">
-                <span className="block text-2xl">↓</span>
-                <span className="block text-2xl -mt-4">↓</span>
-                <span className="block text-2xl -mt-4">↓</span>
-              </div>
+                <div className="absolute bottom-2 left-1/2 -translate-x-1/2 animate-bounce">
+                    <svg className="w-6 h-6 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7"></path></svg>
+                </div>
             )}
-            <div>
-              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">EEG Settings</h2>
-              <div className="mb-2 mt-4">
-                <span className="font-medium text-gray-400">Connection Status:</span>
-                <span className={`ml-2 px-2 py-0.5 rounded-full text-sm ${
-                  configStatus === 'Connected' ? 'bg-green-700 text-green-100' :
-                  configStatus === 'Connecting...' || configStatus === 'Initializing...' ? 'bg-yellow-700 text-yellow-100' :
-                  'bg-red-700 text-red-100'
-                }`}>
-                  {configStatus}
-                </span>
-              </div>
-
-              {config ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 mt-4 text-gray-300">
-                  {/* Sample Rate */}
-                  <div className="md:col-span-2 flex items-center space-x-4">
-                    <label htmlFor="sampleRate" className="block text-sm font-medium text-gray-400 w-48">Sample Rate (SPS):</label>
-                    <select
-                      id="sampleRate"
-                      name="sampleRate"
-                      value={selectedSampleRate || ''}
-                      onChange={(e) => setSelectedSampleRate(e.target.value)}
-                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
-                    >
-                      <option value="250">250 SPS</option>
-                      <option value="500">500 SPS</option>
-                    </select>
-                    <span className="text-sm text-gray-500">(Currently: {config.sample_rate} Hz)</span>
-                  </div>
-
-                  {/* Number of Active Channels */}
-                  <div className="md:col-span-2 flex items-center space-x-4">
-                    <label htmlFor="channelCount" className="block text-sm font-medium text-gray-400 w-48">Number of Active Channels:</label>
-                    <select
-                      id="channelCount"
-                      name="channelCount"
-                      value={selectedChannelCount || ''}
-                      onChange={(e) => setSelectedChannelCount(e.target.value)}
-                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
-                    >
-                      {[...Array(9).keys()].map(i => (
-                        <option key={i} value={String(i)}>{i} Channels</option>
-                      ))}
-                    </select>
-                    <span className="text-sm text-gray-500">(Currently: {config.channels?.length} channels - [{config.channels?.join(', ')}])</span>
-                  </div>
-                  
-                  {/* Powerline Filter */}
-                  <div className="md:col-span-2 flex items-center space-x-4">
-                    <label htmlFor="powerlineFilter" className="block text-sm font-medium text-gray-400 w-48">Powerline Filter:</label>
-                    <select
-                      id="powerlineFilter"
-                      name="powerlineFilter"
-                      value={selectedPowerlineFilter || ''}
-                      onChange={(e) => setSelectedPowerlineFilter(e.target.value)}
-                      className="block w-40 pl-3 pr-10 py-2 text-base bg-gray-700 border-gray-600 focus:outline-none focus:ring-blue-500 focus:border-blue-500 sm:text-sm rounded-md text-white"
-                    >
-                      <option value="off">Off</option>
-                      <option value="50">50 Hz</option>
-                      <option value="60">60 Hz</option>
-                    </select>
-                    <span className="text-sm text-gray-500">
-                      (Currently: {config.powerline_filter_hz === null ? 'Off' :
-                                  config.powerline_filter_hz ? `${config.powerline_filter_hz} Hz` : 'Not set'})
-                    </span>
-                  </div>
-                  
-                  {/* Other Config Items - Display Only */}
-                  <div className="text-sm"><span className="font-medium text-gray-400">Gain:</span> {config.gain}</div>
-                  <div className="text-sm"><span className="font-medium text-gray-400">Board Driver:</span> {config.board_driver}</div>
-
-                  {/* Update Config Button */}
-                  <div className="md:col-span-2 mt-6">
-                    <button
-                      onClick={handleUpdateConfig}
-                      disabled={!isConfigWsOpen || recordingStatus.startsWith('Currently recording')}
-                      className={`px-6 py-2 rounded-md text-white focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-opacity-50 ${
-                        (!isConfigWsOpen || recordingStatus.startsWith('Currently recording'))
-                          ? 'bg-gray-500 cursor-not-allowed'
-                          : 'bg-blue-600 hover:bg-blue-700'
-                      }`}
-                    >
-                      Update Config
-                    </button>
-                    {configUpdateStatus && (
-                      <p className={`mt-2 text-xs ${configUpdateStatus.includes('Error') || configUpdateStatus.includes('error') || configUpdateStatus.includes('Invalid') || configUpdateStatus.includes('timed out') ? 'text-red-400' : 'text-gray-400'}`}>
-                        {configUpdateStatus}
-                      </p>
-                    )}
-                    <p className="mt-2 text-xs text-gray-500">Note: Updating configuration may restart the data stream if successful.</p>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-gray-500 mt-4">Waiting for configuration data...</p>
-              )}
-            </div>
-
-            {/* UI Settings Section */}
-            <div className="mt-8"> {/* Add some margin-top */}
-              <h2 className="text-xl font-semibold mb-4 text-gray-200 border-b border-gray-700 pb-2">UI Settings</h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4 mt-4 text-gray-300">
-                {/* Moved Batch Size and Effective FPS */}
-                {config && (
-                  <>
-                    <div className="text-sm"><span className="font-medium text-gray-400">Batch Size:</span> {config.batch_size} samples</div>
-                    <div className="text-sm"><span className="font-medium text-gray-400">Effective FPS:</span> {config.fps?.toFixed(2)} frames/sec</div>
-                  </>
-                )}
-
-                {/* UI Voltage Scaling Control */}
-                <div className="md:col-span-2 flex items-center space-x-3">
-                  <label className="block text-sm font-medium text-gray-400 w-48">UI Voltage Scaling:</label>
-                  <button
-                    onClick={() => {
-                      const currentIndex = UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor);
-                      if (currentIndex > 0) {
-                        setUiVoltageScaleFactor(UI_SCALE_FACTORS[currentIndex - 1]);
-                      }
-                    }}
-                    disabled={UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor) === 0}
-                    className="px-3 py-1 rounded-md bg-gray-600 hover:bg-gray-500 text-white disabled:opacity-50"
-                  >
-                    Zoom Out
-                  </button>
-                  <span className="text-sm w-16 text-center">{uiVoltageScaleFactor}x</span>
-                  <button
-                    onClick={() => {
-                      const currentIndex = UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor);
-                      if (currentIndex < UI_SCALE_FACTORS.length - 1) {
-                        setUiVoltageScaleFactor(UI_SCALE_FACTORS[currentIndex + 1]);
-                      }
-                    }}
-                    disabled={UI_SCALE_FACTORS.indexOf(uiVoltageScaleFactor) === UI_SCALE_FACTORS.length - 1}
-                    className="px-3 py-1 rounded-md bg-gray-600 hover:bg-gray-500 text-white disabled:opacity-50"
-                  >
-                    Zoom In
-                  </button>
-                </div>
-              </div>
-            </div>
-            {/* EegChannelConfig (Per-Channel Settings) section remains removed */}
-          </div>
-        ) : activeView === 'signalGraph' ? (
-          <div className="h-full p-4"> {/* This outer div might be slightly different from original, ensure it matches structure */}
-            {/* Show loading state if config is not ready */}
-            {!config || !config.channels || !Array.isArray(config.channels) || config.channels.length === 0 ? (
-              <div className="h-full flex items-center justify-center">
-                <div className="text-center">
-                  <div className="text-gray-400 text-lg mb-2">Loading EEG Configuration...</div>
-                  <div className="text-gray-500 text-sm">
-                    Status: {configStatus}
-                  </div>
-                  {config && (
-                    <div className="text-gray-600 text-xs mt-2">
-                      Config loaded but channels: {config.channels ? `${config.channels.length} channels` : 'not available'}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ) : (
-              <>
-                {/* Time markers */}
-                <div className="relative h-full"> {/* This div is important for positioning */}
-                  <div className="absolute w-full flex justify-between px-2 -top-6 text-gray-400 text-sm">
-                    {[...TIME_TICKS].reverse().map(time => (
-                      <div key={time}>{time}s</div>
-                    ))}
-                  </div>
-                  
-                  <div className="relative h-full min-h-[300px]" ref={containerRef}> {/* EegRenderer and related elements - added min-height */}
-                {/* Channel labels */}
-                <div className="absolute -left-8 h-full flex flex-col justify-between">
-                  {config?.channels && config.channels.length > 0 ? (
-                    config.channels.map((chIdx: number) => (
-                      <div key={chIdx} className="text-gray-400 font-medium">Ch{chIdx}</div>
-                    ))
-                  ) : (
-                    <div className="text-gray-400 font-medium">No channel info</div>
-                  )}
-                </div>
-                
-                <canvas
-                  ref={canvasRef}
-                  className="w-full h-full border border-gray-700 rounded-lg"
-                />
-                
-                <EegRenderer
-                  canvasRef={canvasRef}
-                  dataRef={dataRef}
-                  config={config}
-                  latestTimestampRef={latestTimestampRef}
-                  debugInfoRef={debugInfoRef}
-                  containerWidth={containerSize.width}
-                  containerHeight={containerSize.height}
-                  linesReady={linesReady}
-                  dataBuffer={signalGraphBuffer} // Pass the new buffer
-                  targetFps={displayFps}
-                  dataVersion={localDataVersion}
-                />
-                </div>
-              </div>
-            </>
+            {isAtSettingsBottom && (
+                <div className="text-center text-gray-500 text-xs mt-4 border-t border-gray-700 pt-2">End of settings</div>
             )}
           </div>
-        ) : activeView === 'circularGraph' ? (
-          // Circular Graph View
-          <div className="relative h-full p-4" ref={containerRef}>
-            {config && containerSize.width > 0 && containerSize.height > 0 ? (
-              <CircularGraphWrapper
-                config={config}
-                containerWidth={containerSize.width}
-                containerHeight={containerSize.height}
-                dataBuffer={circularGraphBuffer}
-                targetFps={60}
-                displaySeconds={10}
-                dataVersion={localDataVersion}
-              />
-            ) : (
-              <div className="flex items-center justify-center h-full text-white">
-                <p>Loading Circular Graph or waiting for configuration/size...</p>
-              </div>
-            )}
-          </div>
-        ) : activeView === 'appletBrainWaves' ? (
-          // Brain Waves Applet View
-          <div className="relative h-full p-2" ref={containerRef}> {/* Added padding for aesthetics */}
-            {config && containerSize.width > 0 && containerSize.height > 0 ? (
-              <FftDisplay
-                fftData={fftData}
-              />
-            ) : (
-              <div className="flex items-center justify-center h-full text-white">
-                <p>Loading Brain Waves Applet or waiting for configuration/size...</p>
-              </div>
-            )}
-            {/* Optional: Keep a minimal status bar if desired, or let the applet handle its own status */}
-            {/* <EegStatusBar
-              status={status} // This status is for the main /eeg/data WebSocket
-              fps={displayFps}
-              config={config}
-              latestTimestampRef={latestTimestampRef} // This is for the main /eeg/data WebSocket
-              debugInfoRef={debugInfoRef}
-            /> */}
-          </div>
-       ) : null}
-     </div>
+        )}
+      </main>
    </div>
   );
 }

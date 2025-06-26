@@ -9,6 +9,7 @@ tokio-util = "0.7"
 async-trait = "0.1"
 anyhow = "1.0"
 tracing = "0.1"
+bytes = "1.0"
 
 # Local dependencies
 eeg_types = { path = "../../crates/eeg_types" }
