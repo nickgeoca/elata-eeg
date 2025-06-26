@@ -21,7 +21,7 @@ interface EegDataVisualizerProps {
 
 export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFactor }: EegDataVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const dataRef = useRef<any[]>([]);
+  const [lines, setLines] = useState<WebglStep[]>([]);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const latestTimestampRef = useRef<number>(0);
   const debugInfoRef = useRef({
@@ -31,7 +31,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
   });
   const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, circularGraph: false, appletBrainWaves: false });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-  const [dataVersion, setDataVersion] = useState(0);
   const [localDataVersion, setLocalDataVersion] = useState(0);
 
   const circularGraphBuffer = useDataBuffer<SampleChunk>();
@@ -115,44 +114,20 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
   useEffect(() => {
     const numChannels = config?.channels?.length || 0;
     const sampleRate = config?.sample_rate;
-    const MIN_VALID_WIDTH = 50;
 
-    if (config && sampleRate && numChannels > 0 && containerSize.width > MIN_VALID_WIDTH) {
-// Constants for scaling
-  const MICROVOLT_CONVERSION_FACTOR = 1e6; // V to uV
-  const REFERENCE_UV_RANGE = 100.0;
+    if (sampleRate && numChannels > 0) {
       const initialNumPoints = Math.ceil(sampleRate * (WINDOW_DURATION / 1000));
-      const ySpacing = 2.0 / numChannels;
-
-      if (dataRef.current.length !== numChannels) {
-        console.log(`[Visualizer] Creating ${numChannels} WebGL lines.`);
-        const lines: WebglStep[] = [];
-        for (let i = 0; i < numChannels; i++) {
-          const line = new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
-          line.lineSpaceX(-1, 2 / initialNumPoints);
-          lines.push(line);
-        }
-        dataRef.current = lines;
-        if (activeView === 'signalGraph') {
-          setViewReadyState(s => ({ ...s, signalGraph: true }));
-        }
+      const newLines: WebglStep[] = [];
+      for (let i = 0; i < numChannels; i++) {
+        const line = new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
+        line.lineSpaceX(-1, 2 / initialNumPoints);
+        newLines.push(line);
       }
-
-      dataRef.current.forEach((line, i) => {
-        line.lineWidth = 1;
-        const calculatedScaleY = ((ySpacing * MICROVOLT_CONVERSION_FACTOR) / REFERENCE_UV_RANGE) * uiVoltageScaleFactor;
-        line.scaleY = calculatedScaleY;
-        line.offsetY = 1 - (i + 0.5) * ySpacing;
-      });
-
-      setDataVersion(v => v + 1);
+      setLines(newLines);
     } else {
-      if (dataRef.current.length > 0) {
-        dataRef.current = [];
-        setDataVersion(v => v + 1);
-      }
+      setLines([]);
     }
-  }, [config?.channels?.length, config?.sample_rate, containerSize.width, uiVoltageScaleFactor, activeView]);
+  }, [config?.channels?.length, config?.sample_rate]);
 
   return (
     <div ref={containerRef} className="w-full h-full relative bg-gray-950">
@@ -165,19 +140,18 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
               </div>
             ) : (
               <div className="relative h-full min-h-[300px]">
-                <EegRenderer
-                  isActive={activeView === 'signalGraph'}
-                  canvasRef={canvasRef}
-                  dataRef={dataRef}
-                  config={config}
-                  latestTimestampRef={latestTimestampRef}
-                  debugInfoRef={debugInfoRef}
-                  dataBuffer={signalGraphBuffer}
-                  containerWidth={containerSize.width}
-                  containerHeight={containerSize.height}
-                  dataVersion={dataVersion}
-                />
-                <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full" />
+                {lines.length > 0 && (
+                  <EegRenderer
+                    isActive={activeView === 'signalGraph'}
+                    lines={lines}
+                    config={config}
+                    latestTimestampRef={latestTimestampRef}
+                    debugInfoRef={debugInfoRef}
+                    dataBuffer={signalGraphBuffer}
+                    containerWidth={containerSize.width}
+                    containerHeight={containerSize.height}
+                  />
+                )}
               </div>
             )
           )}
@@ -189,7 +163,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
                 containerWidth={containerSize.width}
                 containerHeight={containerSize.height}
                 dataBuffer={circularGraphBuffer}
-                dataVersion={dataVersion}
             />
           )}
 

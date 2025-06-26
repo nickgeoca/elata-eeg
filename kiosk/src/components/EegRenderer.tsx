@@ -12,8 +12,7 @@ import { SampleChunk } from '../types/eeg';
 
 interface EegRendererProps {
   isActive: boolean;
-  canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  dataRef: React.RefObject<any>; // Re-added as required prop
+  lines: WebglStep[];
   config: any;
   latestTimestampRef: React.MutableRefObject<number>;
   debugInfoRef: React.MutableRefObject<{
@@ -25,13 +24,11 @@ interface EegRendererProps {
   targetFps?: number; // Optional target FPS for rendering
   containerWidth: number; // New prop for container width
   containerHeight: number; // New prop for container height
-  dataVersion: number;
 }
 
 export const EegRenderer = React.memo(function EegRenderer({
   isActive,
-  canvasRef,
-  dataRef, // Add dataRef prop here
+  lines,
   config,
   latestTimestampRef,
   debugInfoRef,
@@ -39,11 +36,9 @@ export const EegRenderer = React.memo(function EegRenderer({
   targetFps,
   containerWidth, // Destructure new prop
   containerHeight, // Destructure new prop
-  dataVersion
 }: EegRendererProps) {
   const wglpRef = useRef<WebglPlot | null>(null);
-  // Array of WebglStep instances, one per channel
-  // const linesRef = useRef<WebglStep[] | null>(null); // Removed - Use dataRef prop instead
+  const canvasRef = useRef<HTMLCanvasElement>(null);
   const animationFrameRef = useRef<number | null>(null);
   const isInitializedRef = useRef<boolean>(false);
   // const [canvasSized, setCanvasSized] = useState<boolean>(false); // Removed - use containerWidth/Height props
@@ -54,166 +49,62 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   const numChannels = config?.channels?.length ?? 8;
 
-  // Render logic now pulls from the buffer and processes data asynchronously
-  if (isActive && wglpRef.current && dataRef.current && isInitializedRef.current && numChannels > 0) {
-    const wglp = wglpRef.current;
-    const lines = dataRef.current;
-
-    // Get data from the buffer
-    const sampleChunks = dataBuffer.getAndClearData();
-
-    if (sampleChunks.length > 0) {
-      let dataWasAdded = false;
-      const channelBatches: Record<number, number[]> = {};
-      const channelOrder: number[] = [];
-
-      sampleChunks.forEach((chunk: SampleChunk) => {
-        chunk.samples.forEach((sample) => {
-          const chIndex = sample.channelIndex;
-          if (chIndex < numChannels) {
-            if (!channelBatches[chIndex]) {
-              channelBatches[chIndex] = [];
-              channelOrder.push(chIndex);
-            }
-            channelBatches[chIndex].push(sample.value);
-          }
-        });
-      });
-
-      channelOrder.forEach((chIndex) => {
-        if (lines[chIndex] && channelBatches[chIndex]) {
-          lines[chIndex].shiftAdd(new Float32Array(channelBatches[chIndex]));
-          dataWasAdded = true;
-        }
-      });
-    }
-
-    wglp.update();
-  }
+  // This space is intentionally left blank. The render loop is now managed by `useAnimationFrame` below.
 
 
-  // Effect 1: Initialize WebGL Plot when canvas is ready and sized
+  // Effect 1: Initialize and clean up WebGL Plot
   useEffect(() => {
-    // Skip if plot already exists, canvas missing, or container dimensions are not valid
-    const validDimensions = containerWidth > 0 && containerHeight > 0;
-    if (!isActive || wglpRef.current || !canvasRef.current || !validDimensions || numChannels === 0) {
-      console.log(`[EegRenderer InitEffect1] Skipping plot creation (Active: ${isActive}, Plot Exists: ${!!wglpRef.current}, Canvas: ${!!canvasRef.current}, ValidDimensions: ${validDimensions} [${containerWidth}x${containerHeight}], Channels: ${numChannels}).`);
+    if (!isActive || !canvasRef.current) {
       return;
     }
 
+    console.log("[EegRenderer] Initializing WebGL Plot instance...");
     const canvas = canvasRef.current;
-    // Explicitly size the canvas using current props BEFORE initializing WebglPlot
-    const dpr = window.devicePixelRatio || 1;
-    const cssWidth = containerWidth;
-    const cssHeight = containerHeight; // Or a fraction if EegMonitor calculates it for aspect ratio
+    const wglp = new WebglPlot(canvas);
+    wglpRef.current = wglp;
+    isInitializedRef.current = true;
 
-    const physicalWidth = Math.round(cssWidth * dpr);
-    const physicalHeight = Math.round(cssHeight * dpr);
-
-    // Check if canvas actually needs resizing before applying.
-    // This ensures that if the effect re-runs due to other dependency changes
-    // but the size is already correct, we don't unnecessarily manipulate the DOM.
-    if (canvas.width !== physicalWidth || canvas.height !== physicalHeight) {
-      console.log(`[EegRenderer InitEffect1] Sizing canvas for initialization: ${cssWidth}x${cssHeight} (CSS), ${physicalWidth}x${physicalHeight} (Physical), DPR: ${dpr}`);
-      canvas.width = physicalWidth;
-      canvas.height = physicalHeight;
-      canvas.style.width = `${cssWidth}px`;
-      canvas.style.height = `${cssHeight}px`;
-    } else {
-      console.log(`[EegRenderer InitEffect1] Canvas already correctly sized for initialization: ${cssWidth}x${cssHeight} (CSS), ${physicalWidth}x${physicalHeight} (Physical), DPR: ${dpr}`);
-    }
-    
-    console.log("[EegRenderer InitEffect1] Initializing WebGL Plot instance (after explicit sizing)...");
-
-    try {
-      const wglp = new WebglPlot(canvas);
-      wglpRef.current = wglp; // Store in ref
-
-      wglp.gScaleX = 1;
-      wglp.gScaleY = 1;
-
-      isInitializedRef.current = true; // Mark plot as initialized using ref
-      console.log(`[EegRenderer InitEffect1] WebGL Plot initialized.`);
-
-      // Render loop is no longer started here
-
-    } catch (error) {
-      console.error("[EegRenderer InitEffect1] Error initializing WebGL Plot:", error);
-      wglpRef.current = null;
-      isInitializedRef.current = false; // Reset ref on error
-    }
-
-    // Cleanup for THIS effect (plot creation)
+    // Cleanup function
     return () => {
-      console.log("[EegRenderer InitEffect1] Cleaning up WebGL Plot instance...");
+      console.log("[EegRenderer] Cleaning up WebGL Plot instance...");
       if (animationFrameRef.current) {
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
-      if (wglpRef.current) {
-        // @ts-ignore
-        wglpRef.current.removeAllLines();
-      }
-      wglpRef.current = null; // Clear ref on cleanup
-      isInitializedRef.current = false; // Reset ref on cleanup
-      console.log("[EegRenderer InitEffect1] Plot instance cleanup complete.");
+      // @ts-ignore
+      wglp.removeAllLines();
+      wglpRef.current = null;
+      isInitializedRef.current = false;
+      console.log("[EegRenderer] Plot instance cleanup complete.");
     };
-    // Depend on canvasRef, numChannels, containerWidth, containerHeight
-  }, [isActive, canvasRef, numChannels, containerWidth, containerHeight]);
-
+  }, [isActive]); // Only depends on isActive
 
   // Effect 2: Add/Update lines when they are ready AND plot is initialized
   useEffect(() => {
-    // Use wglpRef
     const wglp = wglpRef.current;
-
-    // Only proceed if plot is initialized (via ref) AND plot exists
-    if (!isInitializedRef.current || !wglp) {
-        // console.log(`[EegRenderer InitEffect2] Skipping line addition (Initialized: ${isInitializedRef.current}, Plot Exists: ${!!wglp})`);
-        return;
+    if (!wglp || !isInitializedRef.current || lines.length === 0) {
+      return;
     }
 
-    // Check if dataRef has lines
-    const lines = dataRef.current;
-    if (!lines || lines.length === 0) {
-        console.warn("[EegRenderer InitEffect2] Lines are ready, but dataRef is empty. Cannot add lines.");
-        return;
-    }
+    console.log(`[EegRenderer] Adding/Updating ${lines.length} lines.`);
+    
+    // @ts-ignore
+    wglp.removeAllLines(); // Clear previous lines to prevent duplicates
 
-    console.log(`[EegRenderer InitEffect2] Adding/Updating ${lines.length} lines.`);
-
-    // Clear existing lines before adding new ones - IMPORTANT
-    // Assuming webgl-plot doesn't have a dedicated clear, we might need to remove lines individually
-    // or manage the lines array internally. For now, let's re-add, assuming addLine handles it.
-    // A better approach might involve checking if a line instance is already added.
-
-    lines.forEach((line: WebglStep, i: number) => {
+    lines.forEach((line, i) => {
       if (line) {
         try {
           const colorTuple = getChannelColor(i);
           line.color = new ColorRGBA(colorTuple[0], colorTuple[1], colorTuple[2], 1);
+          wglp.addLine(line);
         } catch (error) {
-          console.error(`[EegRenderer InitEffect2] Ch ${i}: Error setting color:`, error);
-          line.color = new ColorRGBA(1, 1, 1, 1); // fallback white
+          console.error(`[EegRenderer] Ch ${i}: Error adding line:`, error);
         }
-        try {
-            (wglp as any).addLine(line);
-        } catch(addError) {
-            console.error(`[EegRenderer InitEffect2] Ch ${i}: Error adding line:`, addError, line);
-        }
-      } else {
-          console.warn(`[EegRenderer InitEffect2] Ch ${i}: Line instance is null or undefined in dataRef.`);
       }
     });
 
-    console.log(`[EegRenderer InitEffect2] Lines added/updated.`);
-    wglp.update(); // Update plot after adding/updating lines
-
-    // No cleanup needed specifically for adding lines, Effect 1 handles plot cleanup.
-
-  // Depend on plot initialization state, lines readiness state, and the actual dataRef content
-  // Check isInitializedRef.current inside
-  }, [dataVersion, wglpRef, isInitializedRef]);
+    wglp.update();
+  }, [lines]); // Reruns when lines array changes
 
 
   // Resize Effect: Now depends on containerWidth and containerHeight props
@@ -250,6 +141,52 @@ export const EegRenderer = React.memo(function EegRenderer({
   }, [canvasRef, containerWidth, containerHeight]); // Depend on props
 
 
-  // Component renders nothing itself
-  return null;
+  // Effect 4: The Render Loop
+  useEffect(() => {
+    if (!isActive || !wglpRef.current || lines.length === 0) {
+      return;
+    }
+
+    const wglp = wglpRef.current;
+    let animationFrameId: number;
+
+    const render = () => {
+      const sampleChunks = dataBuffer.getAndClearData();
+      if (sampleChunks.length > 0) {
+        const channelBatches: Record<number, number[]> = {};
+
+        sampleChunks.forEach(chunk => {
+          chunk.samples.forEach(sample => {
+            if (!channelBatches[sample.channelIndex]) {
+              channelBatches[sample.channelIndex] = [];
+            }
+            channelBatches[sample.channelIndex].push(sample.value);
+          });
+        });
+
+        Object.entries(channelBatches).forEach(([chIndexStr, values]) => {
+          const chIndex = parseInt(chIndexStr, 10);
+          if (lines[chIndex] && values.length > 0) {
+            lines[chIndex].shiftAdd(new Float32Array(values));
+          }
+        });
+        
+        wglp.update();
+      }
+      animationFrameId = requestAnimationFrame(render);
+    };
+
+    render();
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+    };
+  }, [isActive, lines, dataBuffer]); // Simplified dependencies
+
+
+  return (
+    <div className="relative w-full h-full">
+      <canvas ref={canvasRef} className="absolute top-0 left-0 w-full h-full" />
+    </div>
+  );
 });

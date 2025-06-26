@@ -13,7 +13,6 @@ interface CircularGraphWrapperProps {
   dataBuffer: ReturnType<typeof useDataBuffer<SampleChunk>>;
   targetFps?: number;
   displaySeconds?: number;
-  dataVersion: number;
 }
 
 export const CircularGraphWrapper = ({
@@ -24,7 +23,6 @@ export const CircularGraphWrapper = ({
   dataBuffer,
   targetFps = 60,
   displaySeconds = 10,
-  dataVersion
 }: CircularGraphWrapperProps) => {
 
   // The wrapper now directly uses the EegCircularGraph and passes the buffer.
@@ -37,7 +35,6 @@ export const CircularGraphWrapper = ({
       dataBuffer={dataBuffer}
       targetFps={targetFps}
       displaySeconds={displaySeconds}
-      dataVersion={dataVersion}
     />
   );
 };

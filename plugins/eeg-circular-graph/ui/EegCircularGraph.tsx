@@ -13,7 +13,6 @@ interface EegCircularGraphProps {
   dataBuffer: ReturnType<typeof useDataBuffer<SampleChunk>>;
   targetFps?: number;
   displaySeconds?: number;
-  dataVersion: number;
 }
 
 export const EegCircularGraph = ({
@@ -24,7 +23,6 @@ export const EegCircularGraph = ({
   dataBuffer,
   targetFps = 60,
   displaySeconds = 10,
-  dataVersion
 }: EegCircularGraphProps) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rendererRef = useRef<EegCircularRendererRef>(null);
@@ -51,7 +49,7 @@ export const EegCircularGraph = ({
         });
       });
     }
-  }, [dataVersion, dataBuffer, numChannels]);
+  }, [dataBuffer, numChannels]);
 
   return (
     <div className="eeg-circular-graph" style={{ width: containerWidth, height: containerHeight }}>
