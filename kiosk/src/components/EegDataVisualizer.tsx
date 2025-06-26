@@ -6,10 +6,6 @@ import { FftRenderer } from '../../../plugins/brain_waves_fft/ui/FftRenderer';
 import { useEegData } from '../context/EegDataContext';
 import { useDataBuffer } from '../hooks/useDataBuffer';
 import { SampleChunk } from '../types/eeg';
-/* eslint-disable @typescript-eslint/ban-ts-comment */
-// @ts-ignore: WebglStep might be missing from types but exists at runtime
-import { WebglStep, ColorRGBA } from 'webgl-plot';
-import { WINDOW_DURATION } from '../utils/eegConstants';
 
 type DataView = 'signalGraph' | 'appletBrainWaves' | 'circularGraph';
 
@@ -21,71 +17,50 @@ interface EegDataVisualizerProps {
 
 export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFactor }: EegDataVisualizerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const [lines, setLines] = useState<WebglStep[]>([]);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const latestTimestampRef = useRef<number>(0);
-  const debugInfoRef = useRef({
-    lastPacketTime: 0,
-    packetsReceived: 0,
-    samplesProcessed: 0,
-  });
   const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, circularGraph: false, appletBrainWaves: false });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
   const [localDataVersion, setLocalDataVersion] = useState(0);
 
-  const circularGraphBuffer = useDataBuffer<SampleChunk>();
-  const signalGraphBuffer = useDataBuffer<SampleChunk>();
+    const circularGraphBuffer = useDataBuffer<SampleChunk>();
+    const signalGraphBuffer = useDataBuffer<SampleChunk>();
 
   const { subscribeRaw, subscribe, unsubscribe, fftData, fullFftPacket } = useEegData();
 
-  // Effect for raw data subscriptions (Signal and Circular graphs)
+  // Effect for all data subscriptions
   useEffect(() => {
-    if (activeView !== 'signalGraph' && activeView !== 'circularGraph') {
-      return;
-    }
-
+    // Always clean up previous subscriptions on re-run
     let unsubRaw: (() => void) | null = null;
+    let isSubscribedToFft = false;
 
-    if (activeView === 'signalGraph') {
-      console.log('[Visualizer] Subscribing to raw data for Signal Graph.');
-      signalGraphBuffer.clear();
+    if (activeView === 'signalGraph' || activeView === 'circularGraph') {
+      const targetBuffer = activeView === 'signalGraph' ? signalGraphBuffer : circularGraphBuffer;
+      console.log(`[Visualizer] Subscribing to raw data for ${activeView}.`);
+      targetBuffer.clear();
       unsubRaw = subscribeRaw((newSampleChunks) => {
         if (newSampleChunks.length > 0) {
-          signalGraphBuffer.addData(newSampleChunks);
+          targetBuffer.addData(newSampleChunks);
           setLocalDataVersion(v => v + 1);
         }
       });
-    } else { // activeView === 'circularGraph'
-      console.log('[Visualizer] Subscribing to raw data for Circular Graph.');
-      circularGraphBuffer.clear();
-      unsubRaw = subscribeRaw((newSampleChunks) => {
-        if (newSampleChunks.length > 0) {
-          circularGraphBuffer.addData(newSampleChunks);
-          setLocalDataVersion(v => v + 1);
-        }
-      });
+    } else if (activeView === 'appletBrainWaves') {
+      console.log('[Visualizer] Subscribing to Fft');
+      subscribe(['Fft']);
+      isSubscribedToFft = true;
+      setViewReadyState(s => ({ ...s, appletBrainWaves: true }));
     }
 
+    // Return a cleanup function that handles all cases
     return () => {
       if (unsubRaw) {
         console.log(`[Visualizer] Unsubscribing from raw data for view: ${activeView}`);
         unsubRaw();
       }
-    };
-  }, [activeView, subscribeRaw, signalGraphBuffer, circularGraphBuffer]);
-
-  // Effect for FFT data subscription
-  useEffect(() => {
-    if (activeView === 'appletBrainWaves') {
-      console.log('[Visualizer] Subscribing to Fft');
-      subscribe(['Fft']);
-      setViewReadyState(s => ({ ...s, appletBrainWaves: true }));
-      return () => {
+      if (isSubscribedToFft) {
         console.log('[Visualizer] Unsubscribing from Fft');
         unsubscribe(['Fft']);
-      };
-    }
-  }, [activeView, subscribe, unsubscribe]);
+      }
+    };
+  }, [activeView, subscribeRaw, unsubscribe, subscribe, signalGraphBuffer, circularGraphBuffer]);
 
   // Effect to setup ResizeObserver
   useLayoutEffect(() => {
@@ -110,25 +85,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
     return () => resizeObserver.disconnect();
   }, []);
 
-  // Effect to create/update WebGL lines
-  useEffect(() => {
-    const numChannels = config?.channels?.length || 0;
-    const sampleRate = config?.sample_rate;
-
-    if (sampleRate && numChannels > 0) {
-      const initialNumPoints = Math.ceil(sampleRate * (WINDOW_DURATION / 1000));
-      const newLines: WebglStep[] = [];
-      for (let i = 0; i < numChannels; i++) {
-        const line = new WebglStep(new ColorRGBA(1, 1, 1, 1), initialNumPoints);
-        line.lineSpaceX(-1, 2 / initialNumPoints);
-        newLines.push(line);
-      }
-      setLines(newLines);
-    } else {
-      setLines([]);
-    }
-  }, [config?.channels?.length, config?.sample_rate]);
-
   return (
     <div ref={containerRef} className="w-full h-full relative bg-gray-950">
       {containerSize.width > 0 && containerSize.height > 0 ? (
@@ -140,18 +96,14 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
               </div>
             ) : (
               <div className="relative h-full min-h-[300px]">
-                {lines.length > 0 && (
-                  <EegRenderer
-                    isActive={activeView === 'signalGraph'}
-                    lines={lines}
-                    config={config}
-                    latestTimestampRef={latestTimestampRef}
-                    debugInfoRef={debugInfoRef}
-                    dataBuffer={signalGraphBuffer}
-                    containerWidth={containerSize.width}
-                    containerHeight={containerSize.height}
-                  />
-                )}
+                <EegRenderer
+                  isActive={activeView === 'signalGraph'}
+                  config={config}
+                  dataBuffer={signalGraphBuffer}
+                  width={containerSize.width}
+                  height={containerSize.height}
+                  uiVoltageScaleFactor={uiVoltageScaleFactor}
+                />
               </div>
             )
           )}

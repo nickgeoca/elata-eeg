@@ -1,8 +1,7 @@
-import React from 'react';
+import React, { useRef, useState, useEffect } from 'react';
+import { FftRenderer } from './FftRenderer';
 
 interface FftData {
-  // Define the structure of the FFT data packet
-  // This should match the FftPacket in the backend
   psd_packets: { channel: number; psd: number[] }[];
   fft_config: {
     fft_size: number;
@@ -17,24 +16,38 @@ interface FftDisplayProps {
 }
 
 const FftDisplay: React.FC<FftDisplayProps> = ({ isActive, data }) => {
-  if (!isActive || !data) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+
+  useEffect(() => {
+    if (containerRef.current) {
+      const resizeObserver = new ResizeObserver(entries => {
+        if (entries[0]) {
+          const { width, height } = entries[0].contentRect;
+          setDimensions({ width, height });
+        }
+      });
+      resizeObserver.observe(containerRef.current);
+      return () => resizeObserver.disconnect();
+    }
+  }, []);
+
+  if (!isActive) {
+    return <div style={{ display: 'none' }} />;
+  }
+  
+  if (!data) {
     return <div>No FFT data available</div>;
   }
 
-  // Basic rendering of the FFT data
-  // This will be replaced with a proper visualization
   return (
-    <div>
-      <h2>FFT Power Spectral Density</h2>
-      <p>Window: {data.fft_config.window_function}</p>
-      <p>FFT Size: {data.fft_config.fft_size}</p>
-      <p>Sample Rate: {data.fft_config.sample_rate} Hz</p>
-      {data.psd_packets.map((packet) => (
-        <div key={packet.channel}>
-          <h3>Channel {packet.channel}</h3>
-          <pre>{JSON.stringify(packet.psd, null, 2)}</pre>
-        </div>
-      ))}
+    <div ref={containerRef} style={{ width: '100%', height: '100%' }}>
+      <FftRenderer
+        data={data}
+        isActive={isActive}
+        containerWidth={dimensions.width}
+        containerHeight={dimensions.height}
+      />
     </div>
   );
 };
