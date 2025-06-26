@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-const FFT_SIZE: usize = 512;
+const FFT_SIZE: usize = 1 << 12;
 const VOLTS_TO_MICROVOLTS: f32 = 1_000_000.0;
 
 #[derive(Clone)]

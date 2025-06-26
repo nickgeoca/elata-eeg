@@ -30,9 +30,6 @@ log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
-# FFT and signal processing
-rustfft = "6.0"
-num-complex = "0.4"
 
 [dev-dependencies]
 tempfile = "3.8"

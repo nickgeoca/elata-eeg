@@ -1,2 +1,1 @@
-pub mod brain_waves;
-pub mod brain_waves_fft;
+// Plugin modules - currently empty as plugins are loaded externally

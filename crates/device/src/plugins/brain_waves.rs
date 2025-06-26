@@ -11,8 +11,8 @@ use num_complex::Complex;
 use eeg_types::plugin::{EegPlugin, EventBus};
 use eeg_types::event::{EventFilter, SensorEvent, FftPacket, PsdPacket, FftConfig};
 
-const FFT_SIZE: usize = 512;
-const FFT_OVERLAP: usize = 256; // 50% overlap
+const FFT_SIZE: usize = 1 << 16;
+const FFT_OVERLAP: usize = 1 << 15; // 50% overlap
 
 /// Applies a Hann window to a slice of f32.
 /// The window reduces spectral leakage in the FFT.
