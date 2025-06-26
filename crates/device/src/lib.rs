@@ -9,4 +9,3 @@ pub mod elata_emu_v1;
 
 // Event-driven architecture modules
 pub mod event_bus;
-pub mod plugins;

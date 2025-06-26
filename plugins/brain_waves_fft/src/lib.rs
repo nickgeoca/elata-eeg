@@ -33,6 +33,34 @@ impl BrainWavesFftPlugin {
             sample_rate,
         }
     }
+
+    /// Check if there are any subscribers interested in FFT data
+    /// This includes both internal plugin subscribers and WebSocket clients
+    async fn has_fft_subscribers(&self, bus: &Arc<dyn EventBus>) -> bool {
+        // Check if there are any active subscribers on the event bus
+        // This includes both internal plugins and the connection manager for WebSocket clients
+        let subscriber_count = bus.subscriber_count();
+        
+        if subscriber_count == 0 {
+            // Log periodically when skipping processing due to no subscribers
+            static LAST_LOG_TIME: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+            let mut last_log = LAST_LOG_TIME.lock().unwrap();
+            let now = std::time::Instant::now();
+            
+            if last_log.map_or(true, |last| now.duration_since(last) > std::time::Duration::from_secs(30)) {
+                info!("[{}] No subscribers detected, skipping FFT calculations to save CPU", self.name());
+                *last_log = Some(now);
+            }
+            
+            return false;
+        }
+        
+        // If there are subscribers, we should process FFT data
+        // Note: This is a conservative approach - we process if ANY subscribers exist
+        // A more sophisticated implementation could track topic-specific subscriptions
+        // to only process when there are subscribers specifically interested in FFT data
+        true
+    }
 }
 
 #[async_trait]
@@ -81,6 +109,7 @@ impl EegPlugin for BrainWavesFftPlugin {
                                 continue;
                             }
 
+                            // Always accumulate samples in buffers for potential processing
                             for ch in 0..self.num_channels {
                                 let start = ch * samples_per_channel;
                                 let end = start + samples_per_channel;
@@ -88,8 +117,21 @@ impl EegPlugin for BrainWavesFftPlugin {
                                     self.channel_buffers[ch].extend_from_slice(channel_samples);
                                 }
                             }
-
+                            
+                            // TODO make this more effiecnet. like on/off based on subscrition
+                            // Only perform expensive FFT calculations if there are subscribers
                             while self.channel_buffers.iter().any(|b| b.len() >= FFT_SIZE) {
+                                // Check if there are any subscribers for FFT data before processing
+                                if !self.has_fft_subscribers(&bus).await {
+                                    // No subscribers - just drain the buffers to prevent memory buildup
+                                    // but skip the expensive FFT calculations
+                                    for ch in 0..self.num_channels {
+                                        if self.channel_buffers[ch].len() >= FFT_SIZE {
+                                            self.channel_buffers[ch].drain(..FFT_SIZE / 2);
+                                        }
+                                    }
+                                    continue;
+                                }
                                 let mut psd_packets = Vec::with_capacity(self.num_channels);
 
                                 for ch in 0..self.num_channels {

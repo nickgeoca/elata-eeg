@@ -146,21 +146,12 @@ To create a new plugin (e.g., `my_awesome_plugin`), follow these steps:
     my_awesome_plugin = { path = "../../plugins/my_awesome_plugin" }
     ```
 
-2.  **Add to `device/src/plugins/mod.rs`:**
-    *   Re-export your plugin's main struct so the supervisor can find it.
+2.  **Register in `device/src/main.rs`:**
+    *   Add your plugin to the plugin supervisor initialization section.
 
     ```rust
-    // ... other use statements
-    pub use my_awesome_plugin::MyAwesomePlugin;
-    ```
-
-3.  **Register in `device/src/plugin_supervisor.rs`:**
-    *   Add your plugin to the list of registered plugins in the `register_plugins` method.
-
-    ```rust
-    // in PluginSupervisor::register_plugins
-    let my_plugin = Box::new(plugins::MyAwesomePlugin::new());
-    self.plugins.push(my_plugin);
+    // In main.rs, in the plugin supervisor initialization section
+    plugin_supervisor.add_plugin(Box::new(my_awesome_plugin::MyAwesomePlugin::new()));
     ```
 
 After these steps, a recompile of the `device` crate will include your new plugin, and the `PluginSupervisor` will automatically start and manage it.

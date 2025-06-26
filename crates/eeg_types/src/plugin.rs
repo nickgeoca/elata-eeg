@@ -81,6 +81,10 @@ pub trait EegPlugin: Send + Sync {
 pub trait EventBus: Send + Sync {
     /// Broadcast an event to all subscribers
     async fn broadcast(&self, event: SensorEvent);
+    
+    /// Get the number of active subscribers to the event bus
+    /// This can be used by plugins to optimize processing when no subscribers are present
+    fn subscriber_count(&self) -> usize;
 }
 
 

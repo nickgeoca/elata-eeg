@@ -1,1 +1,0 @@
-// Plugin modules - currently empty as plugins are loaded externally
