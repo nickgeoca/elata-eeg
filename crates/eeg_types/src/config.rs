@@ -26,7 +26,7 @@ impl Default for DaemonConfig {
             max_recording_length_minutes: 60,
             recordings_directory: "recordings".to_string(),
             batch_size: 128,
-            session: "default_session".to_string(),
+            session: "session1".to_string(),
             filter_config: FilterConfig::default(),
             driver_type: DriverType::MockEeg,
         }

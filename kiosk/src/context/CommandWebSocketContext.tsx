@@ -1,6 +1,6 @@
 'use client';
 
-import { createContext, useState, useEffect, useContext, useMemo, useCallback } from 'react';
+import { createContext, useState, useEffect, useContext, useMemo, useCallback, useRef } from 'react';
 
 interface CommandWebSocketContextType {
   ws: WebSocket | null;
@@ -11,6 +11,7 @@ interface CommandWebSocketContextType {
   recordingStatus: string;
   recordingFilePath: string | null;
   isStartRecordingPending: boolean;
+  recordingError: string | null;
 }
 
 const CommandWebSocketContext = createContext<CommandWebSocketContextType | undefined>(
@@ -27,6 +28,8 @@ export const CommandWebSocketProvider = ({
   const [recordingStatus, setRecordingStatus] = useState('Not recording');
   const [recordingFilePath, setRecordingFilePath] = useState<string | null>(null);
   const [isStartRecordingPending, setIsStartRecordingPending] = useState(false);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const timeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
@@ -47,7 +50,10 @@ export const CommandWebSocketProvider = ({
           const isRecording = response.message.startsWith('Currently recording');
           const isStopped = response.message.includes('Recording stopped');
           const failedToStart = response.message.includes('Failed to start recording');
+          const isCommandSent = response.message.includes('command sent');
           let filePath = null;
+
+          console.log(`[Command] Processing message: "${response.message}", isRecording: ${isRecording}, pending: ${isStartRecordingPending}`);
 
           if (isRecording) {
             const match = response.message.match(/Currently recording to (.+)/);
@@ -59,22 +65,44 @@ export const CommandWebSocketProvider = ({
             console.log(`[Command] Recording stopped.`);
           }
 
-          setRecordingStatus(response.message);
-          setRecordingFilePath(filePath);
+          // Only update status for non-command-sent messages
+          if (!isCommandSent) {
+            setRecordingStatus(response.message);
+            setRecordingFilePath(filePath);
+          }
+          setRecordingError(null); // Clear any previous errors
 
-          // Clear pending state if we received a definitive response
+          // Clear pending state ONLY for definitive recording status (not command acknowledgments)
           if (isRecording || failedToStart || isStopped) {
-            if(isStartRecordingPending) {
-              console.timeEnd('startRecordingCommand');
-              setIsStartRecordingPending(false);
-            }
+            console.log(`[Command] Clearing pending state due to: isRecording=${isRecording}, failedToStart=${failedToStart}, isStopped=${isStopped}`);
+            setIsStartRecordingPending(prev => {
+              if (prev) {
+                console.timeEnd('startRecordingCommand');
+                // Clear timeout when recording successfully starts
+                if (timeoutRef.current) {
+                  clearTimeout(timeoutRef.current);
+                  timeoutRef.current = null;
+                }
+                return false;
+              }
+              return prev;
+            });
           }
         } else {
           console.error('[Command] Received error:', response.message);
-          if (isStartRecordingPending) {
-             console.timeEnd('startRecordingCommand');
-             setIsStartRecordingPending(false);
-          }
+          setRecordingError(response.message);
+          setIsStartRecordingPending(prev => {
+            if (prev) {
+              console.timeEnd('startRecordingCommand');
+              // Clear timeout on error
+              if (timeoutRef.current) {
+                clearTimeout(timeoutRef.current);
+                timeoutRef.current = null;
+              }
+              return false;
+            }
+            return prev;
+          });
         }
       } catch (error) {
         console.error('[Command] Error parsing response JSON:', error);
@@ -95,6 +123,11 @@ export const CommandWebSocketProvider = ({
 
     return () => {
       newWs.close();
+      // Clean up timeout on unmount
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -104,6 +137,24 @@ export const CommandWebSocketProvider = ({
       console.log('[Command] Sending "start" command...');
       console.time('startRecordingCommand');
       ws.send(JSON.stringify({ command: 'start' }));
+      
+      // Clear any existing timeout
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+      }
+      
+      // Add timeout protection - clear pending state after 10 seconds if no response
+      timeoutRef.current = setTimeout(() => {
+        setIsStartRecordingPending(prev => {
+          if (prev) {
+            console.warn('[Command] Start recording timeout - clearing pending state');
+            setRecordingError('Recording start timeout - please try again');
+            timeoutRef.current = null;
+            return false;
+          }
+          return prev;
+        });
+      }, 10000);
     }
   }, [ws, isStartRecordingPending]);
 
@@ -132,7 +183,8 @@ export const CommandWebSocketProvider = ({
     recordingStatus,
     recordingFilePath,
     isStartRecordingPending,
-  }), [ws, wsConnected, startRecording, stopRecording, sendPowerlineFilterCommand, recordingStatus, recordingFilePath, isStartRecordingPending]);
+    recordingError,
+  }), [ws, wsConnected, startRecording, stopRecording, sendPowerlineFilterCommand, recordingStatus, recordingFilePath, isStartRecordingPending, recordingError]);
 
   return (
     <CommandWebSocketContext.Provider value={value}>

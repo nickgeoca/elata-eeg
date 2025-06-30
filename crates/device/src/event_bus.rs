@@ -95,6 +95,10 @@ impl eeg_types::plugin::EventBus for EventBus {
         self.broadcast_event(event).await;
     }
     
+    fn subscribe(&self) -> broadcast::Receiver<SensorEvent> {
+        self.sender.subscribe()
+    }
+    
     fn subscriber_count(&self) -> usize {
         self.sender.receiver_count()
     }

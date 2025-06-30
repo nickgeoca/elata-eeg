@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::fs::File;
 use std::io;
 use chrono::{Local, DateTime};
@@ -23,7 +22,6 @@ use eeg_sensor::AdcConfig;
 pub struct CsvRecorderConfig {
     pub daemon_config: Arc<DaemonConfig>,
     pub adc_config: AdcConfig,
-    pub is_recording_shared: Arc<AtomicBool>,
 }
 
 impl Default for CsvRecorderConfig {
@@ -38,7 +36,6 @@ impl Default for CsvRecorderConfig {
                 vref: 4.5,
                 batch_size: 128,
             },
-            is_recording_shared: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -107,30 +104,38 @@ impl CsvRecorderPlugin {
     }
 
     /// Start recording to a new CSV file
-    async fn start_recording(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>) -> io::Result<String> {
+    async fn start_recording(
+        &self,
+        state: &mut tokio::sync::MutexGuard<'_, RecorderState>,
+        bus: &Arc<dyn EventBus>
+    ) -> io::Result<()> {
         if state.is_recording {
-            return Ok(format!("Already recording to {}", state.file_path.clone().unwrap_or_default()));
+            let message = format!("Already recording to {}", state.file_path.clone().unwrap_or_default());
+            bus.broadcast(SensorEvent::RecordingStatus {
+                is_recording: true,
+                file_path: state.file_path.clone(),
+                message,
+                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            }).await;
+            return Ok(());
         }
-        
-        self.config.is_recording_shared.store(true, Ordering::Relaxed);
         
         let recordings_dir = &self.config.daemon_config.recordings_directory;
         std::fs::create_dir_all(recordings_dir)?;
         
         let now: DateTime<Local> = Local::now();
-        let driver = format!("{:?}", self.config.adc_config.board_driver);
         let session_prefix = if self.config.daemon_config.session.is_empty() {
             "".to_string()
         } else {
             format!("session{}_", self.config.daemon_config.session)
         };
 
+        // Updated filename format to use elata-v1
         let filename = format!(
-            "{}/{}{}_board{}.csv",
+            "{}/{}{}_elata-v1.csv",
             recordings_dir,
             session_prefix,
             now.format("%Y-%m-%d_%H-%M"),
-            driver,
         );
         
         let file = File::create(&filename)?;
@@ -153,14 +158,35 @@ impl CsvRecorderPlugin {
         state.start_timestamp = None;
         state.recording_start_time = Some(Instant::now());
         
-        info!("Started recording to {}", filename);
-        Ok(format!("Started recording to {}", filename))
+        let message = format!("Currently recording to {}", filename);
+        info!("[{}] {}", self.name(), message);
+        
+        // Broadcast success status
+        bus.broadcast(SensorEvent::RecordingStatus {
+            is_recording: true,
+            file_path: Some(filename),
+            message,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+        }).await;
+        
+        Ok(())
     }
     
     /// Stop recording and close the CSV file
-    async fn stop_recording(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>) -> io::Result<String> {
+    async fn stop_recording(
+        &self,
+        state: &mut tokio::sync::MutexGuard<'_, RecorderState>,
+        bus: &Arc<dyn EventBus>
+    ) -> io::Result<()> {
         if !state.is_recording {
-            return Ok("Not currently recording".to_string());
+            let message = "Not currently recording".to_string();
+            bus.broadcast(SensorEvent::RecordingStatus {
+                is_recording: false,
+                file_path: None,
+                message,
+                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+            }).await;
+            return Ok(());
         }
         
         if let Some(mut writer) = state.writer.take() {
@@ -171,16 +197,29 @@ impl CsvRecorderPlugin {
         state.is_recording = false;
         state.start_timestamp = None;
         
-        self.config.is_recording_shared.store(false, Ordering::Relaxed);
+        let message = format!("Stopped recording to {}", file_path);
+        info!("[{}] {}", self.name(), message);
         
-        info!("Stopped recording to {}", file_path);
-        Ok(format!("Stopped recording to {}", file_path))
+        // Broadcast stop status
+        bus.broadcast(SensorEvent::RecordingStatus {
+            is_recording: false,
+            file_path: None,
+            message,
+            timestamp: chrono::Utc::now().timestamp_millis() as u64,
+        }).await;
+        
+        Ok(())
     }
     
     /// Write EEG packet data to the CSV file
-    async fn write_eeg_packet(&self, state: &mut tokio::sync::MutexGuard<'_, RecorderState>, packet: &EegPacket) -> io::Result<String> {
+    async fn write_eeg_packet(
+        &self,
+        state: &mut tokio::sync::MutexGuard<'_, RecorderState>,
+        packet: &EegPacket,
+        bus: &Arc<dyn EventBus>
+    ) -> io::Result<()> {
         if !state.is_recording || state.writer.is_none() {
-            return Ok("Not recording".to_string());
+            return Ok(());
         }
         
         if state.start_timestamp.is_none() {
@@ -193,7 +232,8 @@ impl CsvRecorderPlugin {
         let writer = state.writer.as_mut().unwrap();
         let num_channels = self.config.adc_config.channels.len();
         if num_channels == 0 {
-            return Ok("No channels configured".to_string());
+            warn!("[{}] No channels configured for recording", self.name());
+            return Ok(());
         }
         let samples_per_channel = packet.voltage_samples.len() / num_channels;
         
@@ -221,15 +261,16 @@ impl CsvRecorderPlugin {
             state.last_flush_time = now;
         }
         
+        // Check for maximum recording length and rotate files if needed
         if let Some(start_time) = state.recording_start_time {
             if now.duration_since(start_time).as_secs() >= (self.config.daemon_config.max_recording_length_minutes * 60) as u64 {
-                let old_file = self.stop_recording(state).await?;
-                let new_file = self.start_recording(state).await?;
-                return Ok(format!("Maximum recording length reached. {} and {}", old_file, new_file));
+                info!("[{}] Maximum recording length reached, rotating files", self.name());
+                self.stop_recording(state, bus).await?;
+                self.start_recording(state, bus).await?;
             }
         }
         
-        Ok("Data written successfully".to_string())
+        Ok(())
     }
 }
 
@@ -248,12 +289,15 @@ impl EegPlugin for CsvRecorderPlugin {
     }
     
     fn event_filter(&self) -> Vec<EventFilter> {
-        vec![EventFilter::RawEegOnly]
+        vec![
+            EventFilter::RawEegOnly,           // For data recording
+            EventFilter::RecordingControlOnly, // For start/stop commands
+        ]
     }
 
     async fn run(
         &mut self,
-        _bus: Arc<dyn EventBus>,
+        bus: Arc<dyn EventBus>,
         mut receiver: broadcast::Receiver<SensorEvent>,
         shutdown_token: CancellationToken,
     ) -> Result<()> {
@@ -266,7 +310,7 @@ impl EegPlugin for CsvRecorderPlugin {
                     info!("[{}] Received shutdown signal", self.name());
                     let mut state = self.state.lock().await;
                     if state.is_recording {
-                        if let Err(e) = self.stop_recording(&mut state).await {
+                        if let Err(e) = self.stop_recording(&mut state, &bus).await {
                             error!("[{}] Error stopping recording during shutdown: {}", self.name(), e);
                         }
                     }
@@ -284,24 +328,57 @@ impl EegPlugin for CsvRecorderPlugin {
                             break;
                         }
                     };
+                    
                     match event {
+                        SensorEvent::StartRecording => {
+                            let mut state = self.state.lock().await;
+                            match self.start_recording(&mut state, &bus).await {
+                                Ok(_) => {
+                                    info!("[{}] Recording started successfully", self.name());
+                                }
+                                Err(e) => {
+                                    error!("[{}] Failed to start recording: {}", self.name(), e);
+                                    bus.broadcast(SensorEvent::RecordingStatus {
+                                        is_recording: false,
+                                        file_path: None,
+                                        message: format!("Failed to start recording: {}", e),
+                                        timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                                    }).await;
+                                }
+                            }
+                        }
+                        SensorEvent::StopRecording => {
+                            let mut state = self.state.lock().await;
+                            match self.stop_recording(&mut state, &bus).await {
+                                Ok(_) => {
+                                    info!("[{}] Recording stopped successfully", self.name());
+                                }
+                                Err(e) => {
+                                    error!("[{}] Failed to stop recording: {}", self.name(), e);
+                                }
+                            }
+                        }
+                        SensorEvent::QueryRecordingStatus => {
+                            let state = self.state.lock().await;
+                            let message = if state.is_recording {
+                                format!("Currently recording to: {}", state.file_path.clone().unwrap_or_default())
+                            } else {
+                                "Not recording".to_string()
+                            };
+                            
+                            bus.broadcast(SensorEvent::RecordingStatus {
+                                is_recording: state.is_recording,
+                                file_path: state.file_path.clone(),
+                                message,
+                                timestamp: chrono::Utc::now().timestamp_millis() as u64,
+                            }).await;
+                        }
                         SensorEvent::RawEeg(packet) => {
                             // Only record if recording is enabled
                             let mut state = self.state.lock().await;
-                            if self.config.is_recording_shared.load(Ordering::Relaxed) {
-                                if !state.is_recording {
-                                    if let Err(e) = self.start_recording(&mut state).await {
-                                        error!("[{}] Failed to start recording: {}", self.name(), e);
-                                        continue;
-                                    }
-                                }
-
-                                if let Err(e) = self.write_eeg_packet(&mut state, &packet).await {
+                            if state.is_recording {
+                                if let Err(e) = self.write_eeg_packet(&mut state, &packet, &bus).await {
                                     warn!("[{}] Failed to write data: {}", self.name(), e);
-                                }
-                            } else if state.is_recording {
-                                if let Err(e) = self.stop_recording(&mut state).await {
-                                    error!("[{}] Error stopping recording: {}", self.name(), e);
                                 }
                             }
                         }

@@ -230,6 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         config.clone(),
         config_applied_tx.clone(),
         connection_tx,
+        event_bus.clone(),
         is_recording.clone(),
     );
     

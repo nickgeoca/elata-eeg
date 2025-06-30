@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{broadcast, Mutex, mpsc};
 use eeg_sensor::AdcConfig;
 use eeg_types::{SensorEvent, EegPacket, FilteredEegPacket};
+use eeg_types::plugin::EventBus;
 
 #[derive(Clone, Debug)]
 pub enum ClientType {
@@ -55,6 +56,12 @@ fn with_atomic_bool(
     atomic: Arc<AtomicBool>,
 ) -> impl Filter<Extract = (Arc<AtomicBool>,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || atomic.clone())
+}
+
+fn with_event_bus(
+    bus: Arc<dyn EventBus>,
+) -> impl Filter<Extract = (Arc<dyn EventBus>,), Error = std::convert::Infallible> + Clone {
+    warp::any().map(move || bus.clone())
 }
 
 
@@ -216,7 +223,8 @@ pub async fn handle_config_websocket(
 /// Handle WebSocket connection for recording control commands
 pub async fn handle_command_websocket(
     ws: WebSocket,
-    is_recording: Arc<AtomicBool>,
+    bus: Arc<dyn EventBus>,
+    mut status_receiver: broadcast::Receiver<SensorEvent>,
     config: Arc<Mutex<AdcConfig>>,
     config_update_tx: mpsc::Sender<AdcConfig>,
 ) {
@@ -234,13 +242,12 @@ pub async fn handle_command_websocket(
         }
     });
 
+    // Query current recording status when client connects
+    bus.broadcast(SensorEvent::QueryRecordingStatus).await;
+    
     let initial_status = CommandResponse {
         status: "ok".to_string(),
-        message: if is_recording.load(Ordering::Relaxed) {
-            "Currently recording".to_string()
-        } else {
-            "Not recording".to_string()
-        },
+        message: "Connected to recording control".to_string(),
     };
     if let Ok(status_json) = serde_json::to_string(&initial_status) {
         if tx.send(Message::text(status_json)).await.is_err() {
@@ -248,23 +255,30 @@ pub async fn handle_command_websocket(
         }
     }
 
-    let periodic_tx = tx.clone();
-    let is_recording_clone = is_recording.clone();
+    // Listen for recording status events and forward them to the WebSocket client
+    let status_tx = tx.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         loop {
-            interval.tick().await;
-            let status_update = CommandResponse {
-                status: "ok".to_string(),
-                message: if is_recording_clone.load(Ordering::Relaxed) {
-                    "Currently recording".to_string()
-                } else {
-                    "Not recording".to_string()
-                },
-            };
-            if let Ok(status_json) = serde_json::to_string(&status_update) {
-                if periodic_tx.send(Message::text(status_json)).await.is_err() {
-                    break;
+            match status_receiver.recv().await {
+                Ok(SensorEvent::RecordingStatus { is_recording, file_path, message, timestamp: _ }) => {
+                    let status_update = CommandResponse {
+                        status: "ok".to_string(),
+                        message: if is_recording {
+                            format!("Currently recording to: {}", file_path.unwrap_or_default())
+                        } else {
+                            message
+                        },
+                    };
+                    if let Ok(status_json) = serde_json::to_string(&status_update) {
+                        if status_tx.send(Message::text(status_json)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => continue, // Ignore other events
+                Err(broadcast::error::RecvError::Closed) => break,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    println!("Command WebSocket: Lagged behind status broadcast by {} messages.", n);
                 }
             }
         }
@@ -288,49 +302,41 @@ pub async fn handle_command_websocket(
                 Ok(daemon_cmd) => {
                     match daemon_cmd {
                         DaemonCommand::Start => {
-                            is_recording.store(true, Ordering::Relaxed);
+                            bus.broadcast(SensorEvent::StartRecording).await;
                             CommandResponse {
                                 status: "ok".to_string(),
-                                message: "Recording started (placeholder)".to_string(),
+                                message: "Recording start command sent".to_string(),
                             }
                         }
                         DaemonCommand::Stop => {
-                            is_recording.store(false, Ordering::Relaxed);
+                            bus.broadcast(SensorEvent::StopRecording).await;
                             CommandResponse {
                                 status: "ok".to_string(),
-                                message: "Recording stopped (placeholder)".to_string(),
+                                message: "Recording stop command sent".to_string(),
                             }
                         }
-                        DaemonCommand::Status => CommandResponse {
-                            status: "ok".to_string(),
-                            message: if is_recording.load(Ordering::SeqCst) {
-                                "Currently recording".to_string()
-                            } else {
-                                "Not recording".to_string()
-                            },
+                        DaemonCommand::Status => {
+                            bus.broadcast(SensorEvent::QueryRecordingStatus).await;
+                            CommandResponse {
+                                status: "ok".to_string(),
+                                message: "Status query sent".to_string(),
+                            }
                         },
                         DaemonCommand::SetPowerlineFilter { value: new_powerline_filter_opt } => {
-                            if is_recording.load(Ordering::Relaxed) {
+                            let is_valid = match new_powerline_filter_opt {
+                                Some(val) => val == 50 || val == 60,
+                                None => true,
+                            };
+                            if !is_valid {
                                 CommandResponse {
                                     status: "error".to_string(),
-                                    message: "Cannot change configuration during recording".to_string(),
+                                    message: "Invalid powerline filter value".to_string(),
                                 }
                             } else {
-                                let is_valid = match new_powerline_filter_opt {
-                                    Some(val) => val == 50 || val == 60,
-                                    None => true,
-                                };
-                                if !is_valid {
-                                    CommandResponse {
-                                        status: "error".to_string(),
-                                        message: "Invalid powerline filter value".to_string(),
-                                    }
-                                } else {
-                                    let _config_guard = config.lock().await;
-                                    CommandResponse {
-                                        status: "ok".to_string(),
-                                        message: "Powerline filter configuration unchanged.".to_string(),
-                                    }
+                                let _config_guard = config.lock().await;
+                                CommandResponse {
+                                    status: "ok".to_string(),
+                                    message: "Powerline filter configuration updated.".to_string(),
                                 }
                             }
                         }
@@ -357,7 +363,8 @@ pub fn setup_websocket_routes(
     config: Arc<Mutex<AdcConfig>>,
     config_applied_tx: broadcast::Sender<AdcConfig>,
     connection_tx: mpsc::Sender<WebSocket>, // Sender to pass new connections to the ConnectionManager
-    is_recording: Arc<AtomicBool>,
+    event_bus: Arc<dyn EventBus>,
+    is_recording: Arc<AtomicBool>, // Still needed for config websocket
 ) -> (
     impl Filter<Extract = (impl warp::Reply,), Error = warp::Rejection> + Clone,
     mpsc::Receiver<AdcConfig>,
@@ -378,12 +385,13 @@ pub fn setup_websocket_routes(
 
     let command_route = warp::path("command")
         .and(warp::ws())
-        .and(with_atomic_bool(is_recording.clone()))
+        .and(with_event_bus(event_bus.clone()))
         .and(with_shared_state(config.clone()))
         .and(with_mpsc_tx(config_update_tx.clone()))
-        .map(|ws: warp::ws::Ws, is_rec, conf, tx| {
+        .map(|ws: warp::ws::Ws, bus: Arc<dyn EventBus>, conf: Arc<Mutex<AdcConfig>>, tx: mpsc::Sender<AdcConfig>| {
             ws.on_upgrade(move |socket| {
-                handle_command_websocket(socket, is_rec, conf, tx)
+                let status_receiver: broadcast::Receiver<SensorEvent> = bus.subscribe();
+                handle_command_websocket(socket, bus, status_receiver, conf, tx)
             })
         });
 
