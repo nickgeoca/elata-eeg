@@ -55,7 +55,7 @@ export const EegRenderer = React.memo(function EegRenderer({
 
   const NCH   = config.channels.length;
   const NPTS  = config.samplesPerLine ?? 1024;
-  const YSCL  = 1000000.0*(uiVoltageScaleFactor ?? 0.01);
+  const YSCL  = 100000.0*(uiVoltageScaleFactor ?? 0.01);
 
   /* ---------- init (once) ---------- */
   useEffect(() => {
