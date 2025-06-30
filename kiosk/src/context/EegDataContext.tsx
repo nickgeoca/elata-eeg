@@ -200,11 +200,21 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
  }, []);
 
   const subscribe = useCallback((topics: string[]) => {
-    setSubscriptions(prev => [...new Set([...prev, ...topics])]);
+    setSubscriptions(prev => {
+      const newSubs = [...new Set([...prev, ...topics])];
+      // The subscription message will be sent by EegDataHandler when subscriptions change
+      console.log('[EegDataContext] Subscribing to topics:', topics);
+      return newSubs;
+    });
   }, []);
 
   const unsubscribe = useCallback((topics: string[]) => {
-    setSubscriptions(prev => prev.filter(t => !topics.includes(t)));
+    setSubscriptions(prev => {
+      const newSubs = prev.filter(t => !topics.includes(t));
+      // The unsubscription message will be sent by EegDataHandler when subscriptions change
+      console.log('[EegDataContext] Unsubscribing from topics:', topics);
+      return newSubs;
+    });
   }, []);
 
   // Clear buffer when configuration changes to prevent misalignment

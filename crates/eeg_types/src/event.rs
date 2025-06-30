@@ -10,7 +10,7 @@ use bytes::Bytes;
 pub const PROTOCOL_VERSION: u8 = 1;
 
 #[repr(u8)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum WebSocketTopic {
     FilteredEeg = 0,
     Fft = 1,

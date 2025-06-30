@@ -82,10 +82,31 @@ export function useEegDataHandler({
     onSamplesRef.current = onSamples;
   }, [onSamples]);
 
-  // The subscription logic is no longer needed, as the new protocol sends all data
-  // over a single binary WebSocket connection. The client will parse topics locally.
+  // Watch for subscription changes and send messages to backend
   useEffect(() => {
-   subscriptionsRef.current = subscriptions;
+    const prevSubscriptions = subscriptionsRef.current;
+    subscriptionsRef.current = subscriptions;
+    
+    // Only send messages if WebSocket is connected and subscriptions actually changed
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN &&
+        JSON.stringify(prevSubscriptions) !== JSON.stringify(subscriptions)) {
+      
+      // Find newly added subscriptions
+      const newSubscriptions = subscriptions.filter(topic => !prevSubscriptions.includes(topic));
+      if (newSubscriptions.length > 0) {
+        const message = { type: 'subscribe', topics: newSubscriptions };
+        console.log('[EegDataHandler] Sending subscribe message:', message);
+        wsRef.current.send(JSON.stringify(message));
+      }
+      
+      // Find removed subscriptions
+      const removedSubscriptions = prevSubscriptions.filter(topic => !subscriptions.includes(topic));
+      if (removedSubscriptions.length > 0) {
+        const message = { type: 'unsubscribe', topics: removedSubscriptions };
+        console.log('[EegDataHandler] Sending unsubscribe message:', message);
+        wsRef.current.send(JSON.stringify(message));
+      }
+    }
   }, [subscriptions]);
 
 
@@ -118,6 +139,18 @@ export function useEegDataHandler({
   useEffect(() => {
     console.log(`[EegDataHandler] Effect running to establish WebSocket connection.`);
     let isMounted = true;
+
+    // Function to send subscription messages to the backend
+    const sendSubscription = (topics: string[], action: 'subscribe' | 'unsubscribe') => {
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        const message = {
+          type: action,
+          topics: topics
+        };
+        console.log(`[EegDataHandler] Sending ${action} message:`, message);
+        wsRef.current.send(JSON.stringify(message));
+      }
+    };
 
     const connectWebSocket = () => {
       // Use the ref to get the latest config without adding it as a dependency
@@ -169,7 +202,10 @@ export function useEegDataHandler({
         }));
         console.log(`[EegDataHandler] WebSocket connection established.`);
 
-        // No initial subscription message needed with the new protocol
+        // Send initial subscriptions if any
+        if (subscriptionsRef.current.length > 0) {
+          sendSubscription(subscriptionsRef.current, 'subscribe');
+        }
       };
       
       ws.onmessage = (event: MessageEvent) => {

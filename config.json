@@ -2,7 +2,7 @@
   "max_recording_length_minutes": 60,
   "recordings_directory": "./recordings/",
   "session": "",
-  "batch_size": 16,
+  "batch_size": 32,
   "driver_type": "ads1299",
   "filter_config": {
     "dsp_high_pass_cutoff_hz": 0.5,

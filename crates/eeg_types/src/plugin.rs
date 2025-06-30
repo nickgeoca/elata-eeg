@@ -88,6 +88,20 @@ pub trait EventBus: Send + Sync {
     /// Get the number of active subscribers to the event bus
     /// This can be used by plugins to optimize processing when no subscribers are present
     fn subscriber_count(&self) -> usize;
+    
+    /// Check if there are active subscribers for a specific topic
+    /// This allows plugins to optimize processing by only running expensive calculations
+    /// when there are actually subscribers interested in the output
+    fn has_subscribers_for_topic(&self, topic: crate::event::WebSocketTopic) -> bool;
+    
+    /// Get the number of active subscribers for a specific topic
+    fn get_subscriber_count_for_topic(&self, topic: crate::event::WebSocketTopic) -> usize;
+    
+    /// Register a subscriber for a specific topic (called by ConnectionManager)
+    fn add_topic_subscriber(&self, topic: crate::event::WebSocketTopic, subscriber_id: String);
+    
+    /// Unregister a subscriber for a specific topic (called by ConnectionManager)
+    fn remove_topic_subscriber(&self, topic: crate::event::WebSocketTopic, subscriber_id: String);
 }
 
 

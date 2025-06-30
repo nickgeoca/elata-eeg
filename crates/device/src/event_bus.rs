@@ -7,8 +7,11 @@
 use tokio::sync::broadcast;
 use tracing::{debug, warn};
 use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
+use std::sync::RwLock;
+use std::hash::Hash;
 
-use eeg_types::SensorEvent;
+use eeg_types::{SensorEvent, event::WebSocketTopic};
 
 const EVENT_BUS_CAPACITY: usize = 256;
 
@@ -17,16 +20,30 @@ const EVENT_BUS_CAPACITY: usize = 256;
 /// This is a thin wrapper around Tokio's broadcast channel, which provides
 /// a multi-producer, multi-consumer, non-blocking channel suitable for
 /// high-throughput event distribution.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct EventBus {
     sender: broadcast::Sender<SensorEvent>,
+    /// Track subscribers by topic for optimization
+    topic_subscribers: RwLock<HashMap<WebSocketTopic, HashSet<String>>>,
+}
+
+impl Clone for EventBus {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            topic_subscribers: RwLock::new(HashMap::new()),
+        }
+    }
 }
 
 impl EventBus {
     /// Create a new event bus.
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(EVENT_BUS_CAPACITY);
-        Self { sender }
+        Self {
+            sender,
+            topic_subscribers: RwLock::new(HashMap::new()),
+        }
     }
 
     /// Subscribe to the event bus.
@@ -102,13 +119,37 @@ impl eeg_types::plugin::EventBus for EventBus {
     fn subscriber_count(&self) -> usize {
         self.sender.receiver_count()
     }
+    
+    fn has_subscribers_for_topic(&self, topic: WebSocketTopic) -> bool {
+        self.get_subscriber_count_for_topic(topic) > 0
+    }
+    
+    fn get_subscriber_count_for_topic(&self, topic: WebSocketTopic) -> usize {
+        let subscribers = self.topic_subscribers.read().unwrap();
+        subscribers.get(&topic).map(|set| set.len()).unwrap_or(0)
+    }
+    
+    fn add_topic_subscriber(&self, topic: WebSocketTopic, subscriber_id: String) {
+        let mut subscribers = self.topic_subscribers.write().unwrap();
+        subscribers.entry(topic).or_insert_with(HashSet::new).insert(subscriber_id);
+    }
+    
+    fn remove_topic_subscriber(&self, topic: WebSocketTopic, subscriber_id: String) {
+        let mut subscribers = self.topic_subscribers.write().unwrap();
+        if let Some(topic_set) = subscribers.get_mut(&topic) {
+            topic_set.remove(&subscriber_id);
+            if topic_set.is_empty() {
+                subscribers.remove(&topic);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use eeg_types::{EegPacket, SensorEvent};
+    use eeg_types::{EegPacket, SensorEvent, plugin::EventBus as EventBusTrait};
     use tokio::time::{timeout, Duration};
 
     #[tokio::test]
@@ -172,5 +213,40 @@ mod tests {
         
         // The count should reflect the drop immediately
         assert_eq!(bus.subscriber_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_topic_subscription_tracking() {
+        let bus = EventBus::new();
+        
+        // Initially no subscribers
+        assert!(!bus.has_subscribers_for_topic(WebSocketTopic::Fft));
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 0);
+        
+        // Add subscriber
+        bus.add_topic_subscriber(WebSocketTopic::Fft, "client1".to_string());
+        assert!(bus.has_subscribers_for_topic(WebSocketTopic::Fft));
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 1);
+        
+        // Add another subscriber for same topic
+        bus.add_topic_subscriber(WebSocketTopic::Fft, "client2".to_string());
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 2);
+        
+        // Add subscriber for different topic
+        bus.add_topic_subscriber(WebSocketTopic::FilteredEeg, "client3".to_string());
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 2);
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::FilteredEeg), 1);
+        
+        // Remove subscriber
+        bus.remove_topic_subscriber(WebSocketTopic::Fft, "client1".to_string());
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 1);
+        
+        // Remove last subscriber for topic
+        bus.remove_topic_subscriber(WebSocketTopic::Fft, "client2".to_string());
+        assert!(!bus.has_subscribers_for_topic(WebSocketTopic::Fft));
+        assert_eq!(bus.get_subscriber_count_for_topic(WebSocketTopic::Fft), 0);
+        
+        // Other topic should still have subscriber
+        assert!(bus.has_subscribers_for_topic(WebSocketTopic::FilteredEeg));
     }
 }

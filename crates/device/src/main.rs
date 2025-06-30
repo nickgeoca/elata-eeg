@@ -155,7 +155,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let initial_config = AdcConfig {
         sample_rate: 500,
-        channels: vec![0, 1, 2],
+        channels: vec![0, 1],
         gain: 24.0,
         board_driver: daemon_config.driver_type.clone(),
         batch_size: daemon_config.batch_size,
@@ -219,7 +219,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let cm_event_subscriber = event_bus.subscribe();
 
-    let mut connection_manager = ConnectionManager::new(connection_rx, cm_event_subscriber);
+    let mut connection_manager = ConnectionManager::new(connection_rx, cm_event_subscriber, event_bus.clone());
     let cm_shutdown = shutdown_token.clone();
     let mut connection_manager_handle = tokio::spawn(async move {
         connection_manager.run(cm_shutdown).await;
