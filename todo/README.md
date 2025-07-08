@@ -23,7 +23,8 @@ This directory contains task tracking and implementation documentation for the E
 - [Plugin Subscriber Awareness Detailed Guide](./plugin_subscriber_awareness_detailed_guide.md) - Comprehensive guide for implementing subscriber awareness across all plugins
 - [Plugin Subscriber Awareness Implementation Plan](./plugin_subscriber_awareness_implementation_plan.md) - Step-by-step plan for rolling out subscriber awareness to other plugins
 - [Architecture Robustness Analysis](./architecture-robustness-analysis.md) - Analysis of current system fragility and proposal for robust plugin pipeline design to eliminate "no data" failures
-- [Bounded Architecture Improvement Plan](./bounded-architecture-improvement-plan.md) - **RECOMMENDED APPROACH** - Keep current async architecture but add bounded buffers, timeouts, and fail-fast error handling to eliminate silent failures
+- [Bounded Architecture Improvement Plan](./bounded-architecture-improvement-plan.md) - Keep current async architecture but add bounded buffers, timeouts, and fail-fast error handling to eliminate silent failures
+- [Pipeline Transition Plan](./pipeline-transition-plan.md) - **CURRENT APPROACH** - Replace EventBus with simple multi-core pipeline: ADS1299 → Voltage → Filter → WebSocket. Ultra-simple design with immediate error propagation and frame drop detection.
 
 ## Notes
 
