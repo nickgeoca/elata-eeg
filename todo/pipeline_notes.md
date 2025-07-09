@@ -214,3 +214,27 @@ No plugin timeouts
 No restart on plugin failure
 Silent frame drops
 Recommendation: Pick 3-5 items from the checklist that directly solve these problems, ignore the rest. Keep it simple enough that a grad student can write a plugin in 30 minutes.
+
+>>>>>>>>>>>>>>>>
+Pipeline Structure: one core loop. what keeps it multi core tho?
+
+Data Buffering: why data buffering? config.json specifes a batch_size to keep the processing done in batches... like why should it be bigger than the batch_size? like im seeing added complexity but with out any reasoning. like what are the complexities are we missing any others? the idea is to pair down, but look at each one criticialy if we need it
+
+Error Handling: Error wise, we should propegate the error downstream. It should fail. then restart is context dependent. i would say restart, but the end point should specify what to do when this happens. like does it stpo recording or does it skip the frames an keep recording? that is dependent on the recording plugin/applet thing
+
+WebSocket Integration: can it output to a channel that the connection maanger consumes? what's your take here? is there a big peformance hit?
+
+1. Multi-Core Question: let's keep that part. why can't we do that? what do you htink?
+
+2. Temporary backpressure- that makes sense. maybe comment this in the webscoekt connection thing. ocnnection manager. for now just error it. if there is lost data then like we shouldn't be making up data. yeah for now no data buffering, but just add a comment
+
+3. Error Handling. Sounds good
+
+4. Webscoekt integration: there is a performance hit? there is a channel hop if it's sharing hte data pointer? why is that?
+
+
+1 no channel capactiy. that's what im saying. just batch_size. like why are we doing channel capcity? the only stage that needs taht is the connection manager b/c it's interfacing with web browsers. what happens if there are 3 web browsers connected to it? ... 
+
+2. how do we know if a stage dropped the data? like it was too slow, then the next stage goes to the data and it sees it wasn't updated? how does it know? a counter? then it propegates the error?
+
+3. try_send? so the producers push the data thru? so if the next stage is busy i'd say propegate an error thru and be done with it

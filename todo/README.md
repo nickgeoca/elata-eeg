@@ -25,6 +25,8 @@ This directory contains task tracking and implementation documentation for the E
 - [Architecture Robustness Analysis](./architecture-robustness-analysis.md) - Analysis of current system fragility and proposal for robust plugin pipeline design to eliminate "no data" failures
 - [Bounded Architecture Improvement Plan](./bounded-architecture-improvement-plan.md) - Keep current async architecture but add bounded buffers, timeouts, and fail-fast error handling to eliminate silent failures
 - [Pipeline Transition Plan](./pipeline-transition-plan.md) - **CURRENT APPROACH** - Replace EventBus with simple multi-core pipeline: ADS1299 → Voltage → Filter → WebSocket. Ultra-simple design with immediate error propagation and frame drop detection.
+- [Pipeline Graph Architecture](./pipeline-graph-architecture.md) - Comprehensive design document for the new dataflow graph architecture
+- [Pipeline Implementation Checklist](./pipeline-implementation-checklist.md) - **ACTIVE** - Detailed progress tracking for pipeline graph implementation (~55% complete)
 
 ## Notes
 

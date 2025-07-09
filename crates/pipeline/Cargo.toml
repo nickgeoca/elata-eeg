@@ -1,0 +1,28 @@
+[package]
+name = "pipeline"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+log = { workspace = true }
+eeg_types = { path = "../eeg_types" }
+thiserror = "1.0"
+uuid = { version = "1.0", features = ["v4", "serde"] }
+tokio-util = "0.7"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+
+[[example]]
+name = "basic_pipeline"
+path = "examples/basic_pipeline.rs"
+
+[[example]]
+name = "full_pipeline_test"
+path = "examples/full_pipeline_test.rs"
