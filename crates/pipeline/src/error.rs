@@ -55,6 +55,8 @@ pub type PipelineResult<T> = Result<T, PipelineError>;
 pub enum StageError {
     #[error("queue closed")]
     QueueClosed,
+    #[error("backpressure from {0}")]
+    Backpressure(&'static str),
     #[error("bad param {0}")]
     BadParam(String),
     #[error("fatal hw error: {0}")]

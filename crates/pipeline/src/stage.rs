@@ -306,6 +306,7 @@ mod tests {
 
 use crate::data::{Packet, VoltageEegPacket};
 use crate::error::StageError;
+use tokio::sync::mpsc::error::TrySendError;
 
 // In a real implementation, MemoryPool would be a complex struct.
 // For now, a type alias is sufficient for the code to compile.
@@ -315,12 +316,14 @@ pub type MemoryPool = ();
 #[async_trait]
 pub trait Input<T>: Send + Sync {
     async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
+    fn try_recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
 }
 
 /// The trait for sending a packet to a downstream stage.
 #[async_trait]
 pub trait Output<T>: Send + Sync {
     async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError>;
+    fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>>;
 }
 
 /// The main trait for a data plane stage.
@@ -330,6 +333,7 @@ pub trait DataPlaneStage: Send + Sync {
 }
 
 /// A message sent from the Control Plane to a specific stage.
+#[derive(Debug)]
 pub enum ControlMsg {
     Pause,
     Resume,
@@ -347,3 +351,158 @@ pub struct StageContext {
     pub outputs: HashMap<String, Box<dyn Output<VoltageEegPacket>>>,
     pub control_rx: mpsc::UnboundedReceiver<ControlMsg>,
 }
+
+
+// --- Blanket Implementations for Tokio MPSC Channels ---
+
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
+
+#[async_trait]
+impl<T: Send + Sync + 'static> Input<T> for Receiver<Packet<T>> {
+    async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
+        Ok(self.recv().await)
+    }
+
+    fn try_recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
+        match self.try_recv() {
+            Ok(p) => Ok(Some(p)),
+            Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => Err(StageError::QueueClosed),
+        }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> Input<T> for UnboundedReceiver<Packet<T>> {
+    async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
+        Ok(self.recv().await)
+    }
+
+    fn try_recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
+        match self.try_recv() {
+            Ok(p) => Ok(Some(p)),
+            Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::error::TryRecvError::Disconnected) => Err(StageError::QueueClosed),
+        }
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> Output<T> for Sender<Packet<T>> {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError> {
+        mpsc::Sender::send(self, packet)
+            .await
+            .map_err(|_| StageError::Fatal("output channel closed".into()))
+    }
+
+    fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
+        mpsc::Sender::try_send(self, packet)
+    }
+}
+
+#[async_trait]
+impl<T: Send + Sync + 'static> Output<T> for UnboundedSender<Packet<T>> {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError> {
+        mpsc::UnboundedSender::send(self, packet)
+            .map_err(|_| StageError::Fatal("output channel closed".into()))
+    }
+
+    fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
+        mpsc::UnboundedSender::send(self, packet).map_err(|e| TrySendError::Closed(e.0))
+    }
+}
+
+
+// --- Data Plane Factory and Registry ---
+
+/// Stage factory trait for creating data plane stage instances from configuration.
+///
+/// This is the data plane counterpart to the control plane's `StageFactory`.
+#[async_trait]
+pub trait DataPlaneStageFactory: Send + Sync {
+    /// Create a new data plane stage instance with the given parameters.
+    async fn create_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStage>>;
+
+    /// Get the stage type this factory creates.
+    fn stage_type(&self) -> &'static str;
+
+    /// Get parameter schema for this stage type.
+    fn parameter_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
+/// Registry for data plane stage factories.
+#[derive(Default)]
+pub struct DataPlaneStageRegistry {
+    factories: HashMap<String, Box<dyn DataPlaneStageFactory>>,
+}
+
+impl DataPlaneStageRegistry {
+    /// Create a new empty registry.
+    pub fn new() -> Self {
+        let mut registry = Self {
+            factories: HashMap::new(),
+        };
+        registry.populate();
+        registry
+    }
+
+    /// Populates the registry with all statically registered factories.
+    fn populate(&mut self) {
+        for registrar in inventory::iter::<StaticStageRegistrar> {
+            let factory = (registrar.factory_fn)();
+            self.register_boxed(factory);
+        }
+    }
+
+    /// Register a data plane stage factory.
+    /// Register a data plane stage factory.
+    pub fn register<F>(&mut self, factory: F)
+    where
+        F: DataPlaneStageFactory + 'static,
+    {
+        self.register_boxed(Box::new(factory));
+    }
+
+    /// Registers a boxed factory.
+    fn register_boxed(&mut self, factory: Box<dyn DataPlaneStageFactory>) {
+        let stage_type = factory.stage_type().to_string();
+        self.factories.insert(stage_type, factory);
+    }
+
+    /// Create a stage instance from configuration.
+    pub async fn create_stage(
+        &self,
+        stage_type: &str,
+        params: &StageParams,
+    ) -> PipelineResult<Box<dyn DataPlaneStage>> {
+        let factory = self.factories.get(stage_type).ok_or_else(|| {
+            crate::error::PipelineError::UnknownStageType {
+                stage_type: stage_type.to_string(),
+            }
+        })?;
+
+        factory.create_stage(params).await
+    }
+
+    /// Get all registered stage types.
+    pub fn stage_types(&self) -> Vec<&str> {
+        self.factories.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Get parameter schema for a stage type.
+    pub fn parameter_schema(&self, stage_type: &str) -> Option<serde_json::Value> {
+        self.factories.get(stage_type).map(|f| f.parameter_schema())
+    }
+}
+
+/// A struct for statically registering a `DataPlaneStageFactory`.
+///
+/// This struct is collected by `inventory` at compile time.
+pub struct StaticStageRegistrar {
+    /// A function that creates a new instance of the factory.
+    pub factory_fn: fn() -> Box<dyn DataPlaneStageFactory>,
+}
+
+inventory::collect!(StaticStageRegistrar);

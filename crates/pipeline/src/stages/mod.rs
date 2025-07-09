@@ -17,9 +17,9 @@ use crate::stage::StageRegistry;
 
 /// Register all built-in stages with the registry
 pub fn register_builtin_stages(registry: &mut StageRegistry) {
-    registry.register(AcquireStageFactory::new());
-    registry.register(ToVoltageStageFactory::new());
-    registry.register(FilterStageFactory::new());
-    registry.register(WebSocketSinkFactory::new());
-    registry.register(CsvSinkFactory::new());
+    // registry.register(AcquireStageFactory::new());
+    // registry.register(ToVoltageStageFactory::new());
+    // registry.register(FilterStageFactory::new()); // This is now auto-registered
+    // registry.register(WebSocketSinkFactory::new());
+    // registry.register(CsvSinkFactory::new());
 }

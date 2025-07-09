@@ -15,6 +15,9 @@ eeg_types = { path = "../eeg_types" }
 thiserror = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 tokio-util = "0.7"
+crossbeam-utils = "0.8"
+schemars = "0.8"
+inventory = "0.3"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

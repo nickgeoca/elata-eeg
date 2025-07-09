@@ -35,8 +35,8 @@ graph TD
         subgraph within D_Thread
             Pool[Memory Pool] -- Allocates --> P1(Packet);
             Acquire -- Pushes to --> Q1{Queue};
-            Q1 -- Pops from --> Filter;
-            Filter -- Pushes to --> Q2{Queue};
+            Q1 -- Pops from --> Gain;
+            Gain -- Pushes to --> Q2{Queue};
             Q2 -- Pops from --> Sink;
         end
     end
@@ -46,7 +46,7 @@ graph TD
         P1 -- Contains --> Data[T: Buffer];
     end
 
-    A -- "Control Msgs (e.g., change param)" --> Filter;
+    A -- "Control Msgs (e.g., change param)" --> Gain;
     Sink -- "Returns Packet to" --> Pool;
 
     style Pool fill:#ccf,stroke:#333,stroke-width:2px
@@ -66,6 +66,20 @@ The `MemoryPool` is a thread-safe, lock-free container that holds a number of pr
     *   `try_acquire()`: A non-blocking method that returns `Option<Packet<T>>`. This allows stages to handle pool exhaustion by either dropping a frame or applying backpressure.
 *   **Safety:** The implementation of the pool and packet requires `unsafe` Rust to manage the static lifetimes. This code will be isolated in its own module and rigorously tested with `miri` and `loom` to prevent undefined behavior.
 *   **Multiple Pools for Different Data Shapes:** The system supports multiple, named memory pools. This is critical for stages like downsamplers, which change the batch size (and thus packet size) of the data. A stage can acquire a packet from one pool and produce a packet for another.
+
+### 2.2.1. Dynamic Batch Size Handling
+
+The pipeline supports dynamic batch sizes to accommodate stages that alter the data's shape, such as downsamplers or FFT windowing stages. The batch size is not a single, pipeline-wide constant. Instead, it is a property of the data itself, carried within each `Packet<T>`'s header.
+
+*   **Propagation:** By default, a stage should assume the output batch size is the same as the input batch size. Most stages, like filters or gain stages, modify data in-place and do not need to change the batch size.
+*   **Transformation:** Stages that fundamentally change the number of samples (e.g., a downsampler that consumes 16 samples to produce 1) are responsible for this transformation. The workflow is as follows:
+    1.  Receive an input `Packet<T>` (e.g., with `batch_size: 16`).
+    2.  Process the data.
+    3.  Acquire a *new* `Packet<U>` from a `MemoryPool` configured for the smaller output size (e.g., `batch_size: 1`).
+    4.  Populate the new packet and send it downstream.
+*   **Origination:** The initial batch size is determined by the acquisition stage at the beginning of the pipeline (e.g., reading from a sensor). This stage acquires packets from a memory pool configured for its specific needs.
+
+This model provides maximum flexibility, allowing different parts of the pipeline to operate on data chunks of the most appropriate size, which is critical for both performance (e.g., FFTs on power-of-two sizes) and latency (e.g., smaller batches for UI updates).
 
 ### 2.3. Bounded, Lock-Free Queues
 
@@ -127,7 +141,7 @@ A developer implements the `DataPlaneStage` trait. The runtime handles the rest.
 The transition will be incremental to minimize risk.
 
 1.  **Phase 1 (Coexistence):** Create `ToDataPlane` and `FromDataPlane` bridge stages. This allows the new and old runtimes to coexist, with data being copied between them.
-2.  **Phase 2 (Migration):** Migrate performance-critical stages (e.g., FIR filter) to the `DataPlaneStage` trait one by one.
+2.  **Phase 2 (Migration):** Migrate performance-critical stages (e.g., Gain stage) to the `DataPlaneStage` trait one by one.
 3.  **Phase 3 (Full Transition):** Once all high-rate stages are migrated, remove the bridge stages.
 
 ## 6. Risk Analysis & Mitigation
@@ -176,14 +190,14 @@ graph TD
     end
     subgraph Rust Server
         B(WebSocket Server) -- JSON RPC --> C{Command Router};
-        C -- "stage_id: 'filter1'" --> D[filter1 channel];
+        C -- "stage_id: 'gain1'" --> D[gain1 channel];
         C -- "stage_id: 'downsampler'" --> E[downsampler channel];
     end
     subgraph Pipeline Thread
         D -- mpsc::Sender --> F[StageContext];
     end
 
-    A -- "{'stage_id': 'filter1', 'cmd': 'UpdateParam', ...}" --> B;
+    A -- "{'stage_id': 'gain1', 'cmd': 'UpdateParam', ...}" --> B;
 ```
 
 The JSON RPC message contains the `stage_id` which the server uses as a key to look up the correct `mpsc::Sender` for the target stage.
@@ -191,9 +205,9 @@ The JSON RPC message contains the `stage_id` which the server uses as a key to l
 **Example JSON RPC:**
 ```json
 {
-  "stage_id": "filter1",
+  "stage_id": "gain1",
   "cmd": "UpdateParam",
-  "key": "coeffs",
-  "value": [0.1, 0.2, 0.1]
+  "key": "gain",
+  "value": 1.5
 }
 ```

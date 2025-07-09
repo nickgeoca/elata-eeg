@@ -11,6 +11,8 @@ pub mod runtime;
 pub mod stages;
 pub mod error;
 pub mod data;
+#[macro_use]
+pub mod macros;
 
 // Re-export commonly used types
 pub use stage::*;
