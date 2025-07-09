@@ -302,3 +302,48 @@ mod tests {
         assert_eq!(registry.stage_types().len(), 0);
     }
 }
+// --- New Data Plane Types ---
+
+use crate::data::{Packet, VoltageEegPacket};
+use crate::error::StageError;
+
+// In a real implementation, MemoryPool would be a complex struct.
+// For now, a type alias is sufficient for the code to compile.
+pub type MemoryPool = ();
+
+/// The trait for receiving a packet from an upstream stage.
+#[async_trait]
+pub trait Input<T>: Send + Sync {
+    async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
+}
+
+/// The trait for sending a packet to a downstream stage.
+#[async_trait]
+pub trait Output<T>: Send + Sync {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError>;
+}
+
+/// The main trait for a data plane stage.
+#[async_trait]
+pub trait DataPlaneStage: Send + Sync {
+    async fn run(&mut self, context: &mut StageContext) -> Result<(), StageError>;
+}
+
+/// A message sent from the Control Plane to a specific stage.
+pub enum ControlMsg {
+    Pause,
+    Resume,
+    UpdateParam(String, serde_json::Value),
+}
+
+/// Contains everything a stage needs to run.
+pub struct StageContext {
+    pub memory_pools: HashMap<String, Arc<MemoryPool>>,
+    // The generic type parameter for Input/Output will need to be handled
+    // more robustly in a real implementation, likely with type erasure
+    // (e.g., using `Box<dyn Any>`). For this specific test case, we can
+    // hardcode it to the type we know `FilterStage` uses.
+    pub inputs: HashMap<String, Box<dyn Input<VoltageEegPacket>>>,
+    pub outputs: HashMap<String, Box<dyn Output<VoltageEegPacket>>>,
+    pub control_rx: mpsc::UnboundedReceiver<ControlMsg>,
+}

@@ -271,3 +271,40 @@ mod tests {
         assert_eq!(csv_data.channels[0].samples, vec![1.0, 2.0]);
     }
 }
+// --- New Data Plane Types ---
+
+/// A smart pointer that contains a header and a buffer.
+/// In a real implementation, this would also manage the memory lifetime
+/// and automatically return its buffer to a MemoryPool on Drop.
+#[derive(Debug)]
+pub struct Packet<T> {
+    pub header: PacketHeader,
+    pub samples: T, // Simplified for now, in reality this would be a more complex payload struct
+}
+
+/// The header contains metadata about the packet.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketHeader {
+    pub batch_size: usize,
+    pub timestamp: u64,
+}
+
+/// Example data packet for voltage data.
+#[derive(Debug, Default)]
+pub struct VoltageEegPacket {
+    pub samples: Vec<f32>,
+}
+
+impl<T> Packet<T> {
+    /// A constructor for easily creating packets in unit tests.
+    #[cfg(test)]
+    pub fn new_for_test(samples: T) -> Self {
+        Self {
+            header: PacketHeader {
+                batch_size: 0, // Not used in these tests
+                timestamp: 0,  // Not used in these tests
+            },
+            samples,
+        }
+    }
+}

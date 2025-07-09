@@ -50,3 +50,15 @@ pub enum PipelineError {
 
 /// Result type for pipeline operations
 pub type PipelineResult<T> = Result<T, PipelineError>;
+/// Error types for a single stage in the data plane.
+#[derive(thiserror::Error, Debug)]
+pub enum StageError {
+    #[error("queue closed")]
+    QueueClosed,
+    #[error("bad param {0}")]
+    BadParam(String),
+    #[error("fatal hw error: {0}")]
+    Fatal(String),
+    #[error("stage is busy and cannot perform the requested operation")]
+    Busy,
+}

@@ -1,149 +1,52 @@
 # Pipeline Transition Plan
 
-## Overview
-Replace EventBus with simple multi-core pipeline: ADS1299 → Voltage Conversion → Filtering → WebSocket
+This document outlines the plan for transitioning the existing sensor pipeline to the new hybrid architecture. The transition is designed to be incremental, allowing for a gradual rollout and minimizing risk.
 
-## Design Principles
-1. **No channel buffering** between processing stages (capacity=1)
-2. **Only ConnectionManager buffers** for multiple web browsers
-3. **Frame counters** for drop detection
-4. **Immediate error propagation** - no try_send(), just fail fast
-5. **Multi-core** - each stage in separate async task
+## 1. Phase 1: Coexistence
 
-## Data Flow
+The first phase focuses on allowing the new data plane to coexist with the existing `tokio`-based runtime.
 
-```mermaid
-graph TD
-    A[ADS1299 Raw Data] --> B[data_acquisition_loop]
-    B --> C[Voltage Stage - Core 1]
-    C --> D[Filter Stage - Core 2] 
-    D --> E[ConnectionManager - Core 3]
-    E --> F[WebSocket Clients]
-    
-    G[Frame Counter] --> C
-    G --> D
-    G --> E
-    
-    style C fill:#99ff99
-    style D fill:#99ff99
-    style E fill:#ccffcc
-```
+### 1.1. Bridge Stages
 
-## Implementation Steps
+Two special "bridge" stages will be created:
 
-### Phase 1: Create Pipeline Core
-- [ ] Create `crates/device/src/pipeline_core.rs`
-- [ ] Define data types: `RawEegData`, `VoltageData`, `FilteredData`
-- [ ] Implement frame counter logic
-- [ ] Create pipeline stages as separate async functions
+*   **`ToDataPlane`:** This stage will run in the `tokio` runtime and will be responsible for converting `Arc`-based `PipelineData` into `Packet`-based `PipelineData`. It will acquire a packet from the `MemoryPool`, copy the data, and then push it into a `StageQueue` for the data plane.
+*   **`FromDataPlane`:** This stage will run in the `tokio` runtime and will be responsible for converting `Packet`-based `PipelineData` back into `Arc`-based `PipelineData`. It will pop data from a `StageQueue` and copy it into a new `Arc`-based structure.
 
-### Phase 2: Replace EventBus in main.rs
-- [ ] Remove EventBus initialization
-- [ ] Remove PluginSupervisor
-- [ ] Replace with Pipeline initialization
-- [ ] Update data_acquisition_loop to send to pipeline
+### 1.2. Initial Integration
 
-### Phase 3: Update ConnectionManager
-- [ ] Modify ConnectionManager to receive from pipeline channel
-- [ ] Add buffering only for web browser connections
-- [ ] Keep existing WebSocket topic subscription logic
+The new `HybridRuntime` will be integrated into the main application, but it will initially only run a simple "passthrough" data plane that consists of a `ToDataPlane` stage, a single data plane stage (e.g., a no-op filter), and a `FromDataPlane` stage. This will allow for testing the core data plane functionality without affecting the existing pipeline.
 
-### Phase 4: Remove Dead Code
-- [ ] Remove `event_bus.rs`
-- [ ] Remove `plugin_supervisor.rs`
-- [ ] Remove plugin dependencies from Cargo.toml
-- [ ] Clean up unused imports
+## 2. Phase 2: Incremental Migration
 
-## Data Types
+The second phase focuses on migrating existing stages to the new data plane.
 
-```rust
-// Core pipeline data structures
-#[derive(Debug, Clone)]
-pub struct RawEegData {
-    pub frame_id: u64,
-    pub timestamps: Arc<Vec<u64>>,
-    pub raw_samples: Arc<Vec<i32>>,
-    pub channel_count: usize,
-    pub sample_rate: f32,
-}
+### 2.1. Stage-by-Stage Migration
 
-#[derive(Debug, Clone)]
-pub struct VoltageData {
-    pub frame_id: u64,
-    pub timestamps: Arc<Vec<u64>>,
-    pub voltage_samples: Arc<Vec<f32>>,
-    pub channel_count: usize,
-    pub sample_rate: f32,
-}
+Stages will be migrated one at a time, starting with the most performance-critical stages (e.g., the FIR filter). For each stage, a new `DataPlaneStage` implementation will be created, and the pipeline configuration will be updated to use the new implementation.
 
-#[derive(Debug, Clone)]
-pub struct FilteredData {
-    pub frame_id: u64,
-    pub timestamps: Arc<Vec<u64>>,
-    pub filtered_samples: Arc<Vec<f32>>,
-    pub channel_count: usize,
-    pub sample_rate: f32,
-}
-```
+### 2.2. Performance Monitoring
 
-## Pipeline Stages
+Throughout the migration process, performance will be closely monitored to ensure that the new data plane is delivering the expected benefits. The existing metrics system will be extended to collect metrics from the data plane, including queue depths, packet acquisition times, and processing latencies.
 
-### Stage 1: Voltage Conversion
-- Input: `RawEegData` from data_acquisition_loop
-- Process: Convert raw ADC values to voltage using vref/gain
-- Output: `VoltageData` to filter stage
-- Error: If filter stage busy, propagate error up
+## 3. Phase 3: Full Transition
 
-### Stage 2: Basic Filtering  
-- Input: `VoltageData` from voltage stage
-- Process: Apply DSP filters (high-pass, low-pass, powerline)
-- Output: `FilteredData` to ConnectionManager
-- Error: If ConnectionManager busy, propagate error up
+The final phase focuses on completing the transition to the new architecture.
 
-### Stage 3: ConnectionManager (existing)
-- Input: `FilteredData` from filter stage
-- Process: Serialize and send to WebSocket clients
-- Buffering: Only here, for multiple web browser connections
-- Error: Drop frames if web browsers are slow
+### 3.1. Removal of Bridge Stages
 
-## Error Handling Strategy
+Once all performance-critical stages have been migrated to the data plane, the bridge stages will be removed, and the data plane will become the primary path for all high-frequency data. The `tokio`-based runtime will still be used for control, configuration, and low-frequency event handling.
 
-1. **Frame Drop Detection**: Each stage checks frame_id sequence
-2. **Immediate Propagation**: No try_send() - fail fast on backpressure
-3. **Error Context**: Include stage name and frame_id in errors
-4. **Recovery**: Let main.rs decide whether to restart or continue
+### 3.2. Deprecation of Old `Stage` Trait
 
-## Channel Configuration
+The old `PipelineStage` trait will be deprecated and eventually removed, and all new stages will be implemented using the `DataPlaneStage` trait.
 
-```rust
-// Between processing stages - no buffering
-let (voltage_tx, voltage_rx) = mpsc::channel::<Arc<VoltageData>>(1);
-let (filter_tx, filter_rx) = mpsc::channel::<Arc<FilteredData>>(1);
+## 4. Transition Timeline
 
-// To ConnectionManager - buffer for web browsers
-let (websocket_tx, websocket_rx) = mpsc::channel::<Arc<FilteredData>>(32); // batch_size
-```
+The transition will be carried out over several sprints, with each sprint focusing on a specific set of stages. A detailed timeline will be created in the project management tool, but the high-level phases are as follows:
 
-## Benefits
+*   **Sprint 1-2:** Implement Phase 1 (Coexistence).
+*   **Sprint 3-6:** Implement Phase 2 (Incremental Migration), starting with the FIR filter and then moving to other stages.
+*   **Sprint 7:** Implement Phase 3 (Full Transition).
 
-1. **Simpler Architecture**: Linear pipeline vs complex EventBus
-2. **Better Error Handling**: Immediate failure vs silent drops
-3. **Easier Debugging**: Clear data flow and error propagation
-4. **Multi-Core Utilization**: Each stage on separate core
-5. **Zero-Copy**: Arc<T> for data sharing between stages
-
-## Migration Strategy
-
-1. Keep existing code working during transition
-2. Implement pipeline alongside EventBus initially
-3. Switch data_acquisition_loop to use pipeline
-4. Remove EventBus and plugins after verification
-5. Clean up dead code
-
-## Testing
-
-- [ ] Verify frame counters detect drops correctly
-- [ ] Test error propagation through pipeline
-- [ ] Confirm multi-core utilization
-- [ ] Validate WebSocket data integrity
-- [ ] Performance comparison with EventBus system
+This phased approach will ensure a smooth and controlled transition to the new architecture, delivering performance improvements incrementally while minimizing risk.
