@@ -85,3 +85,59 @@
 ---
 
 *Last updated: 2025-07-09*
+
+......
+Excellent questions. These get to the heart of the practical implementation and operational aspects of the architecture. Let's address them one by one.
+
+### 1. Plugin Workflow: `git clone` and `cargo build`
+
+Yes, the "clone, build, run" workflow is a primary design goal and is absolutely possible with this architecture. The system is explicitly designed to avoid requiring a recompile of the main host application when adding a new plugin.
+
+Here's how it works:
+1.  **Stable ABI:** The `pipeline-abi` crate provides a stable contract between the host and plugins. As long as a plugin is compiled with a compatible version of this ABI, the host can load it.
+2.  **Dynamic Loading:** The `PluginManager` component in the host is responsible for scanning the `plugins/` directory, finding the compiled dynamic libraries (`.so`, `.dll`, etc.), and loading them using `libloading`.
+3.  **Registration:** Once loaded, the `PluginManager` calls the plugin's `register_factories` function, which the plugin uses to tell the host about the new stages it provides.
+
+The edge cases you're rightly concerned about (like ABI mismatches or panics inside a plugin) are handled:
+*   **ABI Mismatch:** The host will check the plugin's ABI version at load time and will refuse to load an incompatible plugin, preventing a crash.
+*   **Plugin Panics:** The host will wrap calls into the plugin with `std::panic::catch_unwind`. If the plugin crashes, it will be safely disabled without taking down the entire pipeline.
+
+### 2. Master Implementation Checklist
+
+This is a great idea. A master checklist will be invaluable for tracking progress. I will create a new file, [`IMPLEMENTATION_CHECKLIST.md`](IMPLEMENTATION_CHECKLIST.md), based on the roadmap outlined in the transition plan.
+
+### 3. Where Pipeline Stages are Defined
+
+Pipeline stages are defined in two distinct locations, reflecting a separation of concerns:
+
+1.  **Core Stages (`crates/pipeline/src/stages/`):** This directory is for fundamental, built-in stages that are considered part of the main application. Examples would be an `AcquisitionStage` that knows how to talk to a specific sensor driver, a `ToVoltageStage` for converting raw ADC values, or common sinks like `CsvSink` and `WebSocketSink`.
+2.  **Plugin Stages (`plugins/`):** This directory is for optional, dynamically-loaded stages provided by plugins. These are for specialized processing (e.g., a specific type of filter, an advanced artifact detection algorithm) that are not part of the core offering.
+
+`crates/sensors` and `crates/device` do **not** define pipeline stages.
+*   `crates/sensors`: Contains the low-level hardware **drivers** (e.g., the code that communicates over SPI with the ADS1299). An `AcquisitionStage` (defined in `crates/pipeline/src/stages/`) would *use* a driver from this crate to get data.
+*   `crates/device`: Contains the main application logic (the "daemon" or "server") that **hosts and runs** the pipeline. It uses the `PipelineRuntime` to manage the pipeline's lifecycle.
+
+### 4. Handling Multiple ADS1299 Sensors
+
+The architecture handles multiple sensors through configuration. If you were to add 3 more ADS1299 sensors, the process would be:
+
+1.  **Hardware:** Connect the new sensors to your host system (e.g., via separate SPI buses or chip-select lines).
+2.  **Configuration (`pipeline.json`):** You would define multiple, independent `AcquisitionStage` instances in your pipeline configuration file. Each instance would be configured with the unique identifier for one of the physical sensors (e.g., `/dev/spi0.0`, `/dev/spi0.1`, etc.).
+3.  **Pipeline Graph:** These acquisition stages would become the starting points for parallel data flows. You could have three entirely separate pipelines, or you could design a pipeline graph that merges their data streams if needed. The system is flexible enough to support either topology.
+
+### 5. WebSocket Exposure and Pipeline Control
+
+The interaction with the UI via WebSockets is split into two distinct functions:
+
+1.  **Data Streaming:** To get data from a pipeline to the UI, you add a `WebSocketSink` stage to the end of your pipeline graph. This stage receives `Packet<T>` data, serializes it, and streams it out over a dedicated WebSocket connection. A UI component would connect to that specific WebSocket endpoint to visualize the data.
+2.  **Pipeline Control:** The main daemon (`crates/device/src/server.rs`) exposes a separate, central **command API** (likely over another WebSocket or a REST endpoint). To create a new pipeline, the UI would send a command to this API, including the full JSON definition of the pipeline graph. The server receives this command, uses the `GraphBuilder` to construct the pipeline, and tells the `PipelineRuntime` to start it. The same API is used for `pause`, `resume`, and `stop` commands.
+
+### 6. Dynamic Batch Sizes
+
+Yes, the architecture is explicitly designed to handle dynamic batch sizes. This is a critical feature for efficient processing. As you described:
+
+*   An `AcquisitionStage` can produce packets with `batch_size: 16`.
+*   A `FilterStage` would process that data in-place, passing on the packet with `batch_size: 16`.
+*   A `DownsampleStage` would consume the packet with 16 samples. It would then acquire a **new, smaller packet** from a `MemoryPool` configured for single samples, populate it with the one downsampled value, and send this new packet (with `batch_size: 1`) downstream.
+
+The `batch_size` is carried in each `Packet`'s header, not as a global constant, which makes this flexibility possible.
