@@ -1,9 +1,14 @@
-//! Voltage conversion stage for converting raw ADC values to voltages
-
+/* crates/pipeline/src/stages/to_voltage.rs (refactored version)
+The macro handles all the boilerplate:
+- Generates trait impls (DataPlaneStage, Erased*, Factory)
+- Sets up lazy I/O, run loop, yielding, back-pressure
+- Handles param schema/serde via the `params` struct
+- `inventory::submit!` registration
+*/
 use crate::{
     data::{Packet, RawEegPacket, VoltageEegPacket},
     error::StageError,
-    stage::{StageContext},
+    stage::{ControlMsg, StageContext, StageParams},
     stage_def,
 };
 use serde_json::Value;
@@ -31,15 +36,17 @@ stage_def! {
     init: |params| {
         let max_value = (1 << (params.adc_bits - 1)) - 1;
         let scale = params.vref / max_value as f32;
-        // The macro expects an instance of the stage struct containing the `fields`
-        // to be returned. The `params` are added automatically.
-        (scale: AtomicU32::new(scale.to_bits()))
+        Self {
+            // `scale` is from `fields`, the rest are from `params`
+            scale: AtomicU32::new(scale.to_bits()),
+        }
     },
 
-    /// process here (single packet at a time)
-    process: |self, pkt: Packet<RawEegPacket>, _ctx: &mut StageContext<_, _>| -> Result<Packet<VoltageEegPacket>, StageError> {
+    /// process data batch here
+    process: |self, pkt: Packet<RawEegPacket>, ctx: &mut StageContext<_, _>| -> Result<Packet<VoltageEegPacket>, StageError> {
         let scale = f32::from_bits(self.scale.load(Ordering::Acquire));
 
+        /// batch process
         let voltage_samples: Vec<f32> = pkt.samples.samples
             .iter()
             .map(|&raw| (raw as f32) * scale)
@@ -54,26 +61,17 @@ stage_def! {
     },
 
     /// Optional custom logic for handling parameter updates from control messages.
-    update_param: |self, key: &str, val: Value| {
+    update_param: |self, key: &str, val: Value| -> Result<(), StageError> {
         match key {
             "vref" => {
                 let new_vref = val.as_f64().map(|v| v as f32).ok_or_else(|| StageError::BadParam(key.into()))?;
-                // `self.adc_bits` is available because it's a param
-                let max_value = (1 << (self.adc_bits - 1)) - 1;
+                // Note: `self.params.adc_bits` would be available if the macro stores params.
+                let max_value = (1 << (self.params.adc_bits - 1)) - 1;
                 let new_scale = new_vref / max_value as f32;
                 self.scale.store(new_scale.to_bits(), Ordering::Release);
                 trace!("Updated scale to {}", new_scale);
             }
-            "adc_bits" => {
-                let new_adc_bits = val.as_u64().map(|v| v as u8).ok_or_else(|| StageError::BadParam(key.into()))?;
-                self.adc_bits = new_adc_bits;
-                // We need to recalculate the scale when adc_bits changes too
-                let vref = f32::from_bits(self.vref.to_bits());
-                let max_value = (1 << (new_adc_bits - 1)) - 1;
-                let new_scale = vref / max_value as f32;
-                self.scale.store(new_scale.to_bits(), Ordering::Release);
-                trace!("Updated adc_bits to {} and recalculated scale", new_adc_bits);
-            }
+            // The macro could auto-handle updates for other params if they don't need custom logic.
             _ => return Err(StageError::BadParam(key.into())),
         }
         Ok(())
