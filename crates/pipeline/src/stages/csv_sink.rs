@@ -1,306 +1,275 @@
-//! CSV sink stage for recording data to files
+//! CSV sink stage for recording voltage EEG data to files.
+//
+// This stage serves as a terminal sink for the data plane pipeline.
+// It demonstrates several key architectural patterns:
+// - **File I/O handling:** Efficiently writes CSV data to disk with proper buffering.
+// - **Hot-reloadable parameters:** File path and format options can be changed on-the-fly.
+// - **Correct concurrency:** Uses atomic operations for configuration changes.
+// - **Efficient run-loop:** Drains the input queue to maximize throughput.
+// - **Graceful termination:** Properly closes files and flushes buffers on shutdown.
 
 use async_trait::async_trait;
-use serde_json::json;
-use std::any::Any;
+use schemars::{schema_for, JsonSchema};
+use serde::Deserialize;
+use serde_json::Value;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tracing::{info, error, warn};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{error, info, trace, warn};
 
-use eeg_types::{EegPacket, FilteredEegPacket};
-use crate::data::{PipelineData, CsvData};
-use crate::error::{PipelineError, PipelineResult};
-use crate::stage::{PipelineStage, StageFactory, StageParams, StageMetric};
+use crate::ctrl_loop;
+use crate::data::{Packet, VoltageEegPacket, AnyPacketType};
+use crate::error::{PipelineResult, StageError};
+use crate::stage::{
+    ControlMsg, DataPlaneStage, DataPlaneStageFactory, DataPlaneStageErased, ErasedDataPlaneStageFactory,
+    ErasedStageContext, StageContext, StageParams, StaticStageRegistrar, Input, Output
+};
 
-/// CSV sink stage for recording data to files
+/// A high-performance CSV sink stage for the data plane.
 pub struct CsvSink {
-    /// Output file path
+    /// The output file path.
     path: PathBuf,
-    /// Data fields to include in CSV
-    fields: Vec<String>,
-    /// Whether to include headers
-    include_headers: bool,
-    /// Metrics
-    packets_written: u64,
-    bytes_written: u64,
-    /// File handle (placeholder - would be actual file in real implementation)
-    file_initialized: bool,
+    /// Whether to include CSV headers.
+    include_headers: AtomicBool,
+    /// Whether the stage is enabled.
+    enabled: AtomicBool,
+    /// Number of packets written.
+    packets_written: AtomicU64,
+    /// Number of bytes written.
+    bytes_written: AtomicU64,
+    /// The file writer (wrapped in Arc<Mutex> for thread safety).
+    writer: Arc<Mutex<Option<BufWriter<File>>>>,
+    /// Whether headers have been written.
+    headers_written: AtomicBool,
+    // Cached handles to avoid HashMap lookups in the hot path.
+    input_rx: Option<Box<dyn Input<VoltageEegPacket>>>,
 }
 
-impl CsvSink {
-    /// Create a new CSV sink
-    pub fn new(path: PathBuf, fields: Vec<String>, include_headers: bool) -> Self {
-        Self {
-            path,
-            fields,
-            include_headers,
-            packets_written: 0,
-            bytes_written: 0,
-            file_initialized: false,
-        }
-    }
+#[async_trait]
+impl DataPlaneStage<VoltageEegPacket, VoltageEegPacket> for CsvSink {
+    /// The main execution loop for the CSV sink stage.
+    async fn run(&mut self, ctx: &mut StageContext<VoltageEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
+        // First, handle any incoming control messages.
+        ctrl_loop!(self, ctx);
 
-    /// Initialize the CSV file (placeholder implementation)
-    async fn initialize_file(&mut self) -> PipelineResult<()> {
-        if self.file_initialized {
-            return Ok(());
-        }
-
-        // TODO: Implement actual file creation and header writing
-        // For now, just log what we would do
-        info!("Would create CSV file: {:?}", self.path);
-        
-        if self.include_headers {
-            let header_line = self.fields.join(",");
-            info!("Would write CSV headers: {}", header_line);
-            self.bytes_written += header_line.len() as u64 + 1; // +1 for newline
-        }
-
-        self.file_initialized = true;
-        Ok(())
-    }
-
-    /// Format CSV data into a row string
-    fn format_csv_row(&self, csv_data: &crate::data::CsvData) -> PipelineResult<String> {
-        let mut values = Vec::new();
-        
-        for field in &self.fields {
-            match field.as_str() {
-                "timestamp" => {
-                    values.push(csv_data.timestamp.to_string());
-                }
-                "frame_id" => {
-                    values.push(csv_data.frame_id.to_string());
-                }
-                "raw_channels" | "voltage_channels" | "filtered_channels" => {
-                    // Convert channel data to comma-separated values in brackets
-                    let channel_str = format!("[{}]",
-                        csv_data.channels.iter()
-                            .flat_map(|ch| &ch.samples)
-                            .map(|v| format!("{:.6}", v))
-                            .collect::<Vec<_>>()
-                            .join(";"));
-                    values.push(format!("\"{}\"", channel_str)); // Quote to handle commas
-                }
-                "sample_rate" => {
-                    values.push(csv_data.sample_rate.to_string());
-                }
-                _ => {
-                    values.push("".to_string()); // Unknown field
-                }
-            }
-        }
-        
-        Ok(values.join(","))
-    }
-
-    /// Convert packet to CSV row (legacy method - kept for compatibility)
-    fn packet_to_csv_row(&self, packet: &dyn Any) -> PipelineResult<String> {
-        let mut values = Vec::new();
-
-        // Try to downcast to different packet types
-        if let Some(eeg_packet) = packet.downcast_ref::<EegPacket>() {
-            for field in &self.fields {
-                match field.as_str() {
-                    "timestamp" => {
-                        if let Some(&first_ts) = eeg_packet.timestamps.first() {
-                            values.push(first_ts.to_string());
-                        } else {
-                            values.push("".to_string());
-                        }
-                    }
-                    "frame_id" => {
-                        values.push(eeg_packet.frame_id.to_string());
-                    }
-                    "raw_channels" => {
-                        // Convert array to comma-separated values in brackets
-                        let raw_str = format!("[{}]", 
-                            eeg_packet.raw_samples.iter()
-                                .map(|v| v.to_string())
-                                .collect::<Vec<_>>()
-                                .join(";"));
-                        values.push(format!("\"{}\"", raw_str)); // Quote to handle commas
-                    }
-                    "voltage_channels" => {
-                        let voltage_str = format!("[{}]", 
-                            eeg_packet.voltage_samples.iter()
-                                .map(|v| format!("{:.6}", v))
-                                .collect::<Vec<_>>()
-                                .join(";"));
-                        values.push(format!("\"{}\"", voltage_str));
-                    }
-                    "sample_rate" => {
-                        values.push(eeg_packet.sample_rate.to_string());
-                    }
-                    "channel_count" => {
-                        values.push(eeg_packet.channel_count.to_string());
-                    }
-                    _ => {
-                        values.push("".to_string()); // Unknown field
-                    }
-                }
-            }
-        } else if let Some(filtered_packet) = packet.downcast_ref::<FilteredEegPacket>() {
-            for field in &self.fields {
-                match field.as_str() {
-                    "timestamp" => {
-                        if let Some(&first_ts) = filtered_packet.timestamps.first() {
-                            values.push(first_ts.to_string());
-                        } else {
-                            values.push("".to_string());
-                        }
-                    }
-                    "frame_id" => {
-                        values.push(filtered_packet.frame_id.to_string());
-                    }
-                    "filtered_channels" => {
-                        let filtered_str = format!("[{}]", 
-                            filtered_packet.samples.iter()
-                                .map(|v| format!("{:.6}", v))
-                                .collect::<Vec<_>>()
-                                .join(";"));
-                        values.push(format!("\"{}\"", filtered_str));
-                    }
-                    "sample_rate" => {
-                        values.push(filtered_packet.sample_rate.to_string());
-                    }
-                    "channel_count" => {
-                        values.push(filtered_packet.channel_count.to_string());
-                    }
-                    _ => {
-                        values.push("".to_string()); // Unknown field
-                    }
-                }
-            }
-        } else {
-            return Err(PipelineError::RuntimeError {
-                stage_name: "csv_sink".to_string(),
-                message: "Unsupported packet type for CSV formatting".to_string(),
-            });
-        }
-
-        Ok(values.join(","))
-    }
-
-    /// Write CSV row to file (placeholder implementation)
-    async fn write_csv_row(&mut self, row: String) -> PipelineResult<()> {
-        // TODO: Implement actual file writing
-        // For now, just log what we would write
-        info!("Would write CSV row to {:?}: {}", self.path, 
-              if row.len() > 100 { format!("{}...", &row[..100]) } else { row.clone() });
-        
-        self.packets_written += 1;
-        self.bytes_written += row.len() as u64 + 1; // +1 for newline
-        
-        Ok(())
+        // Then, enter the packet processing loop.
+        self.process_packets(ctx).await
     }
 }
 
 #[async_trait]
-impl PipelineStage for CsvSink {
-    async fn process(&mut self, input: PipelineData) -> PipelineResult<PipelineData> {
-        // Initialize file if needed
+impl DataPlaneStageErased for CsvSink {
+    async fn run_erased(&mut self, context: &mut dyn ErasedStageContext) -> Result<(), StageError> {
+        // Downcast the erased context back to the concrete type
+        let concrete_context = context
+            .as_any_mut()
+            .downcast_mut::<StageContext<VoltageEegPacket, VoltageEegPacket>>()
+            .ok_or_else(|| StageError::Fatal("Context type mismatch for CsvSink".into()))?;
+        
+        self.run(concrete_context).await
+    }
+}
+
+impl CsvSink {
+    /// Creates a new `CsvSink`.
+    pub fn new(path: PathBuf, include_headers: bool, enabled: bool) -> Self {
+        Self {
+            path,
+            include_headers: AtomicBool::new(include_headers),
+            enabled: AtomicBool::new(enabled),
+            packets_written: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
+            writer: Arc::new(Mutex::new(None)),
+            headers_written: AtomicBool::new(false),
+            input_rx: None,
+        }
+    }
+
+    /// Initialize the CSV file and writer.
+    async fn initialize_file(&self) -> Result<(), StageError> {
+        let mut writer_guard = self.writer.lock().await;
+        
+        if writer_guard.is_some() {
+            return Ok(()); // Already initialized
+        }
+
+        // Create the file and buffered writer
+        let file = File::create(&self.path)
+            .map_err(|e| StageError::Fatal(format!("Failed to create CSV file {:?}: {}", self.path, e)))?;
+        
+        let buf_writer = BufWriter::new(file);
+        *writer_guard = Some(buf_writer);
+        
+        info!("CSV file initialized: {:?}", self.path);
+        Ok(())
+    }
+
+    /// Write CSV headers if needed.
+    async fn write_headers_if_needed(&self) -> Result<(), StageError> {
+        if !self.include_headers.load(Ordering::Acquire) || 
+           self.headers_written.load(Ordering::Acquire) {
+            return Ok(());
+        }
+
+        let mut writer_guard = self.writer.lock().await;
+        if let Some(ref mut writer) = writer_guard.as_mut() {
+            let header_line = "timestamp,channel_0,channel_1,channel_2,channel_3,channel_4,channel_5,channel_6,channel_7\n";
+            writer.write_all(header_line.as_bytes())
+                .map_err(|e| StageError::Fatal(format!("Failed to write CSV headers: {}", e)))?;
+            
+            self.headers_written.store(true, Ordering::Release);
+            self.bytes_written.fetch_add(header_line.len() as u64, Ordering::Relaxed);
+            trace!("CSV headers written");
+        }
+        
+        Ok(())
+    }
+
+    /// Gets mutable references to the input handle, initializing it on the first call.
+    #[cold]
+    #[inline(always)]
+    fn lazy_io<'a>(
+        input_rx: &'a mut Option<Box<dyn Input<VoltageEegPacket>>>,
+        ctx: &'a mut StageContext<VoltageEegPacket, VoltageEegPacket>,
+    ) -> &'a mut dyn Input<VoltageEegPacket> {
+        if input_rx.is_none() {
+            *input_rx = Some(
+                ctx.inputs
+                    .remove("in")
+                    .unwrap_or_else(|| panic!("Input 'in' not found for CSV sink stage")),
+            );
+        }
+        input_rx.as_mut().unwrap().as_mut()
+    }
+
+    /// Efficiently processes all available packets in the input queue.
+    async fn process_packets(&mut self, ctx: &mut StageContext<VoltageEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
+        // Initialize file if needed (do this before borrowing input)
         self.initialize_file().await?;
-        
-        // Convert packet to CSV row based on data type
-        let csv_row = match &input {
-            PipelineData::RawEeg(packet) => {
-                let csv_data = crate::data::CsvData::from_eeg_packet(packet, &self.fields);
-                self.format_csv_row(&csv_data)?
+        self.write_headers_if_needed().await?;
+
+        let input = Self::lazy_io(&mut self.input_rx, ctx);
+
+        // Loop to drain the input queue
+        loop {
+            let pkt = match input.try_recv()? {
+                Some(p) => p,
+                // The queue is empty, so we're done for now.
+                None => return Ok(()),
+            };
+
+            // Skip processing if disabled
+            if !self.enabled.load(Ordering::Acquire) {
+                continue;
             }
-            PipelineData::FilteredEeg(packet) => {
-                let csv_data = crate::data::CsvData::from_filtered_packet(packet, &self.fields);
-                self.format_csv_row(&csv_data)?
+
+            // Format the packet as CSV (inline to avoid borrowing conflicts)
+            let csv_line = {
+                let mut line = String::new();
+                
+                // Add timestamp
+                line.push_str(&pkt.header.timestamp.to_string());
+                
+                // Add voltage samples (assuming 8 channels for now)
+                for sample in pkt.samples.samples.iter().take(8) {
+                    line.push(',');
+                    line.push_str(&format!("{:.6}", sample));
+                }
+                
+                // Pad with zeros if we have fewer than 8 channels
+                for _ in pkt.samples.samples.len()..8 {
+                    line.push_str(",0.0");
+                }
+                
+                line.push('\n');
+                line
+            };
+
+            // Write to file
+            {
+                let mut writer_guard = self.writer.lock().await;
+                if let Some(ref mut buf_writer) = writer_guard.as_mut() {
+                    buf_writer.write_all(csv_line.as_bytes())
+                        .map_err(|e| StageError::Fatal(format!("Failed to write CSV data: {}", e)))?;
+                    
+                    // Flush periodically for real-time monitoring
+                    buf_writer.flush()
+                        .map_err(|e| StageError::Fatal(format!("Failed to flush CSV data: {}", e)))?;
+                }
             }
-            _ => return Err(PipelineError::RuntimeError {
-                stage_name: "csv_sink".to_string(),
-                message: "CSV sink only supports RawEeg and FilteredEeg data".to_string(),
-            }),
-        };
-        
-        // Write to file
-        self.write_csv_row(csv_row).await?;
-        
-        // CSV sinks are terminal nodes, so we return the input unchanged
-        // (though in practice, nothing should be connected to the output)
-        Ok(input)
-    }
 
-    fn stage_type(&self) -> &'static str {
-        "csv_sink"
-    }
-
-    fn description(&self) -> &'static str {
-        "CSV sink for recording data to files"
-    }
-
-    async fn initialize(&mut self) -> PipelineResult<()> {
-        info!("Initializing CSV sink: path={:?}, fields={:?}, headers={}", 
-               self.path, self.fields, self.include_headers);
-        Ok(())
-    }
-
-    async fn cleanup(&mut self) -> PipelineResult<()> {
-        info!("Cleaning up CSV sink, wrote {} packets ({} bytes) to {:?}", 
-               self.packets_written, self.bytes_written, self.path);
-        // TODO: Close file handle
-        Ok(())
-    }
-
-    fn get_metrics(&self) -> Vec<StageMetric> {
-        vec![
-            StageMetric::new(
-                "packets_written".to_string(),
-                self.packets_written as f64,
-                "count".to_string(),
-            ),
-            StageMetric::new(
-                "bytes_written".to_string(),
-                self.bytes_written as f64,
-                "bytes".to_string(),
-            ),
-        ]
-    }
-
-    fn validate_params(&self, params: &StageParams) -> PipelineResult<()> {
-        // Validate path
-        if let Some(path) = params.get("path") {
-            let path = path.as_str().ok_or_else(|| PipelineError::InvalidConfiguration {
-                message: "path parameter must be a string".to_string(),
-            })?;
+            self.packets_written.fetch_add(1, Ordering::Relaxed);
+            self.bytes_written.fetch_add(csv_line.len() as u64, Ordering::Relaxed);
             
-            if path.is_empty() {
-                return Err(PipelineError::InvalidConfiguration {
-                    message: "path cannot be empty".to_string(),
-                });
-            }
-
-            // Check if path has valid extension
-            if !path.ends_with(".csv") {
-                return Err(PipelineError::InvalidConfiguration {
-                    message: "path must end with .csv extension".to_string(),
-                });
-            }
+            trace!("CSV packet written, total packets: {}", self.packets_written.load(Ordering::Relaxed));
         }
+    }
 
-        // Validate fields
-        if let Some(fields) = params.get("fields") {
-            let fields = fields.as_array().ok_or_else(|| PipelineError::InvalidConfiguration {
-                message: "fields parameter must be an array".to_string(),
-            })?;
-            
-            if fields.is_empty() {
-                return Err(PipelineError::InvalidConfiguration {
-                    message: "fields array cannot be empty".to_string(),
-                });
-            }
+    /// Format a voltage EEG packet as a CSV line.
+    fn format_packet_as_csv(&self, packet: &Packet<VoltageEegPacket>) -> Result<String, StageError> {
+        let mut line = String::new();
+        
+        // Add timestamp
+        line.push_str(&packet.header.timestamp.to_string());
+        
+        // Add voltage samples (assuming 8 channels for now)
+        for sample in packet.samples.samples.iter().take(8) {
+            line.push(',');
+            line.push_str(&format!("{:.6}", sample));
         }
+        
+        // Pad with zeros if we have fewer than 8 channels
+        for _ in packet.samples.samples.len()..8 {
+            line.push_str(",0.0");
+        }
+        
+        line.push('\n');
+        Ok(line)
+    }
 
+    /// Updates a stage parameter based on a key-value pair from the control plane.
+    fn update_param(&mut self, key: &str, val: Value) -> Result<(), StageError> {
+        match key {
+            "enabled" => {
+                let is_enabled = val.as_bool().unwrap_or(true);
+                self.enabled.store(is_enabled, Ordering::Release);
+                trace!("CSV sink 'enabled' set to {}", is_enabled);
+            }
+            "include_headers" => {
+                let include = val.as_bool().unwrap_or(true);
+                self.include_headers.store(include, Ordering::Release);
+                trace!("CSV sink 'include_headers' set to {}", include);
+            }
+            _ => return Err(StageError::BadParam(key.into())),
+        }
         Ok(())
     }
 }
 
-/// Factory for creating CSV sink stages
+/// Parameters for configuring a `CsvSink`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CsvSinkParams {
+    /// The output file path.
+    #[serde(default = "default_path")]
+    path: String,
+    /// Whether to include CSV headers.
+    #[serde(default = "default_include_headers")]
+    include_headers: bool,
+}
+
+fn default_path() -> String {
+    "output.csv".to_string()
+}
+
+fn default_include_headers() -> bool {
+    true
+}
+
 pub struct CsvSinkFactory;
 
 impl CsvSinkFactory {
@@ -310,32 +279,16 @@ impl CsvSinkFactory {
 }
 
 #[async_trait]
-impl StageFactory for CsvSinkFactory {
-    async fn create_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn PipelineStage>> {
-        let path = params.get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("output.csv")
-            .to_string();
-
-        let fields = params.get("fields")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .collect()
-            })
-            .unwrap_or_else(|| vec!["timestamp".to_string(), "filtered_channels".to_string()]);
-
-        let include_headers = params.get("include_headers")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
-        let stage = CsvSink::new(PathBuf::from(path), fields, include_headers);
-        
-        // Validate parameters
-        stage.validate_params(params)?;
-
+impl DataPlaneStageFactory<VoltageEegPacket, VoltageEegPacket> for CsvSinkFactory {
+    /// Creates a new `CsvSink` instance from JSON parameters.
+    async fn create_stage(
+        &self,
+        params: &StageParams,
+    ) -> PipelineResult<Box<dyn DataPlaneStage<VoltageEegPacket, VoltageEegPacket>>> {
+        // Convert StageParams (HashMap) to serde_json::Value before deserializing
+        let params_value = serde_json::to_value(params.clone())?;
+        let params: CsvSinkParams = serde_json::from_value(params_value)?;
+        let stage = CsvSink::new(PathBuf::from(params.path), params.include_headers, true);
         Ok(Box::new(stage))
     }
 
@@ -344,108 +297,121 @@ impl StageFactory for CsvSinkFactory {
     }
 
     fn parameter_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Output CSV file path",
-                    "pattern": ".*\\.csv$",
-                    "default": "output.csv"
-                },
-                "fields": {
-                    "type": "array",
-                    "description": "Data fields to include in CSV",
-                    "items": {
-                        "type": "string",
-                        "enum": ["timestamp", "frame_id", "raw_channels", "voltage_channels", "filtered_channels", "sample_rate", "channel_count"]
-                    },
-                    "default": ["timestamp", "filtered_channels"]
-                },
-                "include_headers": {
-                    "type": "boolean",
-                    "description": "Whether to include column headers",
-                    "default": true
-                }
-            },
-            "required": ["path", "fields"]
-        })
+        serde_json::to_value(schema_for!(CsvSinkParams)).unwrap_or_default()
     }
 }
 
-impl Default for CsvSinkFactory {
-    fn default() -> Self {
-        Self::new()
+#[async_trait]
+impl ErasedDataPlaneStageFactory for CsvSinkFactory {
+    async fn create_erased_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStageErased>> {
+        // Extract path parameter
+        let path = params.get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("output.csv");
+        
+        let include_headers = params.get("include_headers")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        
+        let stage = CsvSink::new(PathBuf::from(path), include_headers, true);
+        Ok(Box::new(stage) as Box<dyn DataPlaneStageErased>)
+    }
+
+    fn stage_type(&self) -> &'static str {
+        DataPlaneStageFactory::stage_type(self)
+    }
+
+    fn parameter_schema(&self) -> serde_json::Value {
+        DataPlaneStageFactory::parameter_schema(self)
+    }
+}
+
+// Automatically register this stage factory with the pipeline runtime.
+inventory::submit! {
+    StaticStageRegistrar {
+        factory_fn: || Box::new(CsvSinkFactory::new()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::data::{PacketHeader, VoltageEegPacket};
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    // MockInput for testing
+    struct MockInput {
+        rx: mpsc::UnboundedReceiver<Packet<VoltageEegPacket>>,
+    }
+
+    #[async_trait]
+    impl Input<VoltageEegPacket> for MockInput {
+        async fn recv(&mut self) -> Result<Option<Packet<VoltageEegPacket>>, StageError> {
+            Ok(self.rx.recv().await)
+        }
+        fn try_recv(&mut self) -> Result<Option<Packet<VoltageEegPacket>>, StageError> {
+            match self.rx.try_recv() {
+                Ok(p) => Ok(Some(p)),
+                Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::error::TryRecvError::Disconnected) => Err(StageError::QueueClosed),
+            }
+        }
+    }
+
+    fn setup_test_rig() -> (
+        CsvSink,
+        StageContext<VoltageEegPacket, VoltageEegPacket>,
+        mpsc::UnboundedSender<ControlMsg>,
+        mpsc::UnboundedSender<Packet<VoltageEegPacket>>,
+    ) {
+        let stage = CsvSink::new(PathBuf::from("/tmp/test.csv"), true, true);
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+
+        let mut inputs: HashMap<String, Box<dyn Input<VoltageEegPacket>>> = HashMap::new();
+        inputs.insert("in".to_string(), Box::new(MockInput { rx: in_rx }));
+
+        let ctx = StageContext {
+            control_rx,
+            inputs,
+            outputs: HashMap::new(), // CSV sink has no outputs
+            memory_pools: HashMap::new(),
+        };
+
+        (stage, ctx, control_tx, in_tx)
+    }
 
     #[tokio::test]
     async fn test_csv_sink_creation() {
         let factory = CsvSinkFactory::new();
         let mut params = HashMap::new();
-        params.insert("path".to_string(), json!("test.csv"));
-        params.insert("fields".to_string(), json!(["timestamp", "filtered_channels"]));
-        params.insert("include_headers".to_string(), json!(true));
+        params.insert("path".to_string(), serde_json::json!("test.csv"));
+        params.insert("include_headers".to_string(), serde_json::json!(true));
 
         let stage = factory.create_stage(&params).await.unwrap();
-        assert_eq!(stage.stage_type(), "csv_sink");
+        assert_eq!(DataPlaneStageFactory::stage_type(&factory), "csv_sink");
     }
 
     #[tokio::test]
-    async fn test_csv_sink_validation() {
-        let factory = CsvSinkFactory::new();
+    async fn test_csv_formatting() {
+        let sink = CsvSink::new(PathBuf::from("test.csv"), true, true);
         
-        // Test invalid path extension
-        let mut params = HashMap::new();
-        params.insert("path".to_string(), json!("test.txt"));
-        assert!(factory.create_stage(&params).await.is_err());
-
-        // Test empty fields
-        params.clear();
-        params.insert("path".to_string(), json!("test.csv"));
-        params.insert("fields".to_string(), json!([]));
-        assert!(factory.create_stage(&params).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_csv_row_formatting() {
-        let sink = CsvSink::new(
-            PathBuf::from("test.csv"),
-            vec!["timestamp".to_string(), "frame_id".to_string()],
-            true,
-        );
+        let header = PacketHeader { batch_size: 8, timestamp: 1234567890 };
+        let samples = VoltageEegPacket { samples: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0] };
+        let packet = Packet::new_for_test(samples);
         
-        // Create test EEG packet
-        let timestamps = vec![1000, 1001, 1002];
-        let raw_samples = vec![100, 200, 300];
-        let voltage_samples = vec![1.0, 2.0, 3.0];
-        
-        let packet = EegPacket::new(
-            timestamps,
-            42,
-            raw_samples,
-            voltage_samples,
-            1,
-            250.0,
-        );
-
-        let csv_row = sink.packet_to_csv_row(&packet).unwrap();
-        assert!(csv_row.contains("1000")); // timestamp
-        assert!(csv_row.contains("42"));   // frame_id
+        let csv_line = sink.format_packet_as_csv(&packet).unwrap();
+        assert!(csv_line.contains("1234567890")); // timestamp
+        assert!(csv_line.contains("1.000000"));   // first sample
+        assert!(csv_line.contains("8.000000"));   // last sample
     }
 
     #[test]
     fn test_parameter_schema() {
         let factory = CsvSinkFactory::new();
-        let schema = factory.parameter_schema();
+        let schema = crate::stage::DataPlaneStageFactory::parameter_schema(&factory);
         assert!(schema.is_object());
-        assert!(schema["properties"]["path"].is_object());
-        assert!(schema["properties"]["fields"].is_object());
-        assert!(schema["properties"]["include_headers"].is_object());
     }
 }

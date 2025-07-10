@@ -1,3 +1,12 @@
+> **ARCHITECTURAL NOTE (2025-07-09):** This document contains the critical feedback that led to the project's pivot to a direct, ABI-first plugin architecture. The "bridge stage" and "coexistence" concepts discussed below are now **obsolete**.
+>
+> The suggestions in this document, particularly the `StageDescriptor` pattern, have been integrated into the primary architecture documents. Please refer to the following for the current, authoritative plan:
+>
+> *   **Canonical Architecture:** [`todo/unified-pipeline-architecture.md`](todo/unified-pipeline-architecture.md)
+>   *   **Implementation Plan:** [`IMPLEMENTATION_CHECKLIST.md`](IMPLEMENTATION_CHECKLIST.md)
+
+---
+
 # Unified EEG Pipeline — Holistic Integration Roadmap
 
 ## 1  Current State Snapshot

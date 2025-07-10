@@ -29,6 +29,9 @@ pub enum PipelineError {
     #[error("Pipeline is not running")]
     NotRunning,
 
+    #[error("Invalid pipeline state: {0}")]
+    InvalidState(String),
+
     #[error("Stage '{stage_name}' is locked and cannot be modified")]
     StageLocked { stage_name: String },
 
@@ -63,4 +66,10 @@ pub enum StageError {
     Fatal(String),
     #[error("stage is busy and cannot perform the requested operation")]
     Busy,
+    #[error("send error: {0}")]
+    SendError(String),
+    #[error("invalid context: {0}")]
+    InvalidContext(String),
+    #[error("IO error: {0}")]
+    Io(String),
 }

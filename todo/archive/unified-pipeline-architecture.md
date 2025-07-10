@@ -1,59 +1,64 @@
+> [!WARNING]
+> # DEPRECATED: Outdated Architectural Vision
+> This document describes an architectural vision for a dynamic, ABI-driven plugin system that is NOT currently implemented in the codebase. The current implementation uses a pure-Rust, inventory-based static plugin registration system. This document is retained for historical context but should not be used as a reference for the current architecture.
+
 # Unified Hybrid Sensor Pipeline Architecture
 
-**Version: 1.1**
+**Version: 2.0 (ABI-First)**
 
-This document provides a single, authoritative guide to the new hybrid sensor pipeline architecture. It consolidates the high-level design, detailed implementation plan, transition strategy, and answers to key technical questions.
+This document provides a single, authoritative guide to the new **ABI-driven** hybrid sensor pipeline architecture. It defines a stable, dynamic plugin model that allows for high-performance, real-time processing without requiring host recompilation.
 
 ## 1. Executive Summary
 
-To meet the high-performance requirements of the project, we are adopting a hybrid pipeline architecture. This design separates the system into two distinct planes:
+To meet the high-performance and extensibility requirements of the project, we are adopting an ABI-driven pipeline architecture. This design separates the system into two distinct planes:
 
-*   **The Control Plane:** The existing `PipelineGraph` and `PipelineRuntime`, responsible for configuration, management, and low-frequency event handling using standard `tokio` channels.
-*   **The Data Plane:** A new, high-performance path for real-time sensor data. It is built on four core principles:
-    1.  **Zero-Copy Data Flow:** Pre-allocated `MemoryPool`s provide reusable data packets of various sizes, eliminating runtime allocations.
-    2.  **Lock-Free Communication:** Bounded, lock-free queues (`rtrb` or `crossbeam`) pass lightweight packet pointers between stages, avoiding mutex contention.
-    3.  **Data-Driven Execution:** The pipeline is activated by the arrival of data from the acquisition source, similar to an interrupt-driven system. The run loop is non-blocking to ensure responsiveness.
-    4.  **Separation of Concerns:** The data path is isolated from the control path, allowing for independent operation and control (e.g., pausing the pipeline).
+*   **The Control Plane:** A `PipelineRuntime` responsible for configuration, management, and low-frequency event handling. It discovers and manages plugins through a `PluginManager`.
+*   **The Data Plane:** A high-performance path for real-time sensor data. It is built on five core principles:
+    1.  **Stable Plugin ABI:** A dedicated `pipeline-abi` crate defines a C-compatible `StageDescriptor` struct. This allows the host to dynamically load plugins (`.so`/`.dll` files) at runtime, creating a clear, versioned contract.
+    2.  **Zero-Copy Data Flow:** Pre-allocated `MemoryPool`s provide reusable `Packet<T>` buffers, eliminating runtime allocations.
+    3.  **Lock-Free Communication:** Bounded, lock-free queues (`rtrb` or `crossbeam`) pass lightweight packet pointers between stages, avoiding mutex contention.
+    4.  **Data-Driven Execution:** The pipeline is activated by the arrival of data from the acquisition source, similar to an interrupt-driven system.
+    5.  **Separation of Concerns:** The data path is isolated from the control path, allowing for independent operation and control (e.g., pausing the pipeline).
 
-This approach provides the performance and stability required for real-time processing while retaining the flexibility of the existing system for control and configuration.
+This approach provides the performance and stability required for real-time processing while enabling a robust, "drop-in" plugin ecosystem.
 
 ## 2. Architectural Deep Dive
 
-### 2.1. Data Flow and Key Components
+### 2.1. The ABI-Driven Plugin Model
+
+The core of the new architecture is a stable Application Binary Interface (ABI) that decouples the host application from its plugins. This allows new plugins to be added (`git clone`, `cargo build`) without recompiling the host.
 
 ```mermaid
 graph TD
-    subgraph Control Plane (Tokio-based)
-        A[PipelineRuntime] -- Manages --> B{PipelineGraph};
-        B -- Configures & Spawns --> D_Thread;
+    subgraph Host Application
+        A[PluginManager] -- Scans --> B((plugins/));
+        A -- "1. dlopen(plugin.so)" --> C{Plugin Dynamic Library};
+        A -- "2. dlsym('register_stage')" --> C;
+        A -- "3. Gets StageDescriptor" --> D[Stage Registry];
+        E[PipelineRuntime] -- Uses factory from --> D;
     end
 
-    subgraph Data Plane (Dedicated Thread)
-        style D_Thread fill:#f9f,stroke:#333,stroke-width:2px
-        D_Thread["Data Plane Thread Loop"];
-        
-        subgraph within D_Thread
-            Pool[Memory Pool] -- Allocates --> P1(Packet);
-            Acquire -- Pushes to --> Q1{Queue};
-            Q1 -- Pops from --> Gain;
-            Gain -- Pushes to --> Q2{Queue};
-            Q2 -- Pops from --> Sink;
-        end
-    end
-    
-    subgraph Packet Structure
-        P1 -- Contains --> Header[PacketHeader];
-        P1 -- Contains --> Data[T: Buffer];
+    subgraph Plugin: my_fft.so
+        style C fill:#dfd,stroke:#333
+        C -- Exposes --> F(#[no_mangle] register_stage);
+        F -- Returns pointer to --> G[StageDescriptor];
+        G -- Contains --> H[id: "com.mycorp.fft"];
+        G -- Contains --> I[version: 1];
+        G -- Contains --> J[constructor_fn];
     end
 
-    A -- "Control Msgs (e.g., change param)" --> Gain;
-    Sink -- "Returns Packet to" --> Pool;
+    subgraph Plugin: another_plugin.so
+        K[Another Plugin] -- Also exposes --> F;
+    end
 
-    style Pool fill:#ccf,stroke:#333,stroke-width:2px
-    style Q1 fill:#eef,stroke:#333,stroke-width:1px
-    style Q2 fill:#eef,stroke:#333,stroke-width:1px
-    style P1 fill:#dfd,stroke:#333,stroke-width:1px
+    B -- Contains --> C;
+    B -- Contains --> K;
 ```
+
+*   **`pipeline-abi` Crate:** A dedicated crate defines the stable contract. Its key component is the `StageDescriptor`.
+*   **`StageDescriptor`:** A `#[repr(C)]` struct that every plugin exposes. It contains all the metadata the host needs to use the plugin: a unique string `id`, a `version`, and a function pointer to a constructor for the stage.
+*   **`PluginManager`:** A service in the host that loads `.so`/`.dll` files from the `plugins/` directory, calls the `register_stage` function to get the descriptor, validates the ABI version, and populates a central `StageRegistry`.
+*   **`plugin.toml`:** A manifest file alongside each plugin for non-code metadata like author, license, and UI component paths.
 
 ### 2.2. The `MemoryPool` and `Packet<T>` Smart Pointer
 
@@ -89,37 +94,22 @@ Communication between data plane stages is handled by bounded, single-producer, 
 *   **Configurable Capacity:** The capacity of each queue is a critical tuning parameter set in the pipeline's JSON configuration. A small capacity (e.g., 4) minimizes latency for fast stages, while a larger capacity (e.g., 200) absorbs jitter for slow, I/O-bound stages like a WebSocket sink.
 *   **Sizing Formula:** As a rule of thumb, the minimum queue capacity can be estimated with the formula: `min_capacity = ceil(max_stage_latency_ms / batch_period_ms)`. This helps prevent random guessing during configuration.
 
-## 3. Implementation Plan
+## 3. Implementation Plan (ABI-First)
 
-### 3.1. Core Data Structures (`Packet<T>`, `MemoryPool`, `StageQueue`)
+The implementation is prioritized to establish the stable plugin contract first, enabling parallel development of the host and plugins.
 
-1.  **`Packet<T>`:** Implement the smart pointer with a custom `Drop` trait to return its buffer to the pool.
-2.  **`MemoryPool<T>`:** Implement the lock-free pool using `crossbeam::ArrayQueue`. Provide both `acquire` (blocking) and `try_acquire` (non-blocking) methods. Hot-path methods like `acquire` and `release` should be marked with `#[inline(always)]`.
-3.  **`StageQueue<T>`:** Create a wrapper around `rtrb` or `crossbeam::queue::ArrayQueue` that implements our `Input` and `Output` traits.
+### 3.1. Phase 1: The Stable ABI & Plugin System
+1.  **`pipeline-abi` Crate:** Create the dedicated, versioned crate defining the `StageDescriptor`, `DataPlaneStage` trait, and the `register_stage` function signature.
+2.  **`PluginManager`:** Implement the host-side service to load dynamic libraries, validate their ABI version via the `StageDescriptor`, and populate a `StageRegistry`. All calls into plugin code must be wrapped in `std::panic::catch_unwind`.
+3.  **Developer Tooling:** Create a `cargo xtask build-plugins` script and a `cargo generate` template to standardize plugin creation and building.
 
-### 3.2. Stage and Runtime Implementation
+### 3.2. Phase 2: Initial Vertical Slice
+1.  **Core Stages:** Implement essential stages like `AcquisitionStage`, `ToVoltageStage`, and `WebSocketSink` as ABI-compliant plugins.
+2.  **Configuration:** The `GraphBuilder` will be updated to read a JSON configuration that references stages by their string IDs (e.g., `"com.mycorp.fft"`). It will use the `PluginManager`'s registry to look up the corresponding constructor and instantiate the graph.
 
-1.  **`Input`/`Output` Traits:**
-    ```rust
-    pub trait Input<T> {
-        async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
-    }
-    pub trait Output<T> {
-        async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError>;
-    }
-    ```
-2.  **`DataPlaneStage` Trait:** Define the core trait for all high-performance stages.
-3.  **`StageContext`:** Create the context struct passed to each stage, containing access to the memory pool and the stage's I/O channels.
-4.  **`HybridRuntime`:** Implement the runtime that executes the data plane loop on a dedicated thread.
-
-### 3.3. Configuration Loading
-
-The `GraphBuilder` will be updated to:
-1.  Read queue capacities from a `connections` array in the JSON config.
-2.  Define and configure multiple `memory_pools` with specific packet sizes and counts.
-3.  Recognize a new `data_plane` stage type.
-4.  Deserialize stage-specific `params` from the JSON (e.g., filter coefficients, downsampling factors) and pass them to the stage's constructor.
-5.  Connect stage inputs and outputs, including specifying which memory pool an output should draw from.
+### 3.3. Phase 3: UI Integration & Full Adoption
+1.  **UI Discovery:** Implement a `/api/plugins` endpoint on the server that serves the `plugin.toml` manifests.
+2.  **Dynamic UI:** The Kiosk frontend will fetch from this endpoint and use dynamic `import()` to load the UI bundles for available plugins.
 
 ## 4. Stage Developer's Guide & Code Example
 
@@ -136,26 +126,27 @@ A developer implements the `DataPlaneStage` trait. The runtime handles the rest.
 *   **Send a Packet:** `context.outputs.get_mut("my_output").unwrap().send(packet).await?;`
 *   **Memory Release is Automatic:** `Packet<T>`'s `Drop` implementation handles returning memory to the pool.
 
-## 5. Transition Plan
+## 5. Implementation Strategy: Direct Adoption
 
-The transition will be incremental to minimize risk.
+The previous transition plan involving "bridge" stages is now **obsolete**. We are pursuing a direct implementation of the final architecture.
 
-1.  **Phase 1 (Coexistence):** Create `ToDataPlane` and `FromDataPlane` bridge stages. This allows the new and old runtimes to coexist, with data being copied between them.
-2.  **Phase 2 (Migration):** Migrate performance-critical stages (e.g., Gain stage) to the `DataPlaneStage` trait one by one.
-3.  **Phase 3 (Full Transition):** Once all high-rate stages are migrated, remove the bridge stages.
+*   **No Bridge Stages:** The `ToDataPlane` and `FromDataPlane` stages will not be implemented. This avoids the complexity and technical debt of a temporary migration layer.
+*   **Parallel Systems:** The legacy `PipelineStage` system and the new `DataPlaneStage` system will coexist in the codebase during development but will not interact within a running pipeline.
+*   **Focus on New System:** All new development effort will be focused on creating and running pipelines within the new, ABI-driven Data Plane.
+*   **Deprecation:** Once the new system achieves feature parity for all critical use cases, the legacy runtime, traits, and stages will be removed from the codebase.
 
 ## 6. Risk Analysis & Mitigation
 
-This design's primary complexity lies in the `unsafe` code required for the memory pool.
+The primary complexities are the `unsafe` code in the memory pool and the FFI boundary of the plugin system.
 
-*   **Risk:** Undefined behavior (data races, memory corruption) due to incorrect `unsafe` implementation.
-*   **Mitigation:**
-    1.  **Isolation:** The `MemoryPool` and `Packet` will be developed in a separate, self-contained module.
-    2.  **Rigorous Testing:** Use `miri` to detect undefined behavior and `loom` to test for concurrency issues under heavy load.
-    3.  **Fault Injection:** Wrap stage execution in `catch_unwind` to prevent a single stage panic from corrupting the memory pool.
-    4.  **Observability:** Add `tracing` spans to all key operations (acquire, release, send, recv) to monitor the system's health.
+*   **Risk: Undefined Behavior in Memory Pool:** Data races or memory corruption due to incorrect `unsafe` implementation.
+    *   **Mitigation:** Isolate the `MemoryPool` and `Packet` in a self-contained module. Mandate rigorous testing with `miri` and `loom`.
+*   **Risk: Plugin Panic:** A faulty plugin crashes the entire host application.
+    *   **Mitigation:** The `PluginManager` **must** wrap every call across the FFI boundary (e.g., to the stage constructor or `process` method) in `std::panic::catch_unwind`. A panicking plugin will be disabled and logged, not crash the system.
+*   **Risk: ABI Drift:** A plugin compiled with an old `pipeline-abi` version is loaded by a new host, causing a segfault.
+    *   **Mitigation:** The `StageDescriptor` contains a version field. The `PluginManager` will compare this to its own ABI version at load time and refuse to load incompatible plugins.
 
-This unified document provides a complete and actionable plan. Are you ready to approve this architecture and move forward with implementation?
+This document, now aligned with the ABI-first approach, provides a complete and actionable plan.
 
 ## 7. Implementation and Documentation Standards
 

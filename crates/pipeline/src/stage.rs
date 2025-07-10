@@ -304,32 +304,70 @@ mod tests {
 }
 // --- New Data Plane Types ---
 
-use crate::data::{Packet, VoltageEegPacket};
+use crate::data::{MemoryPool, Packet, AnyPacketType};
 use crate::error::StageError;
 use tokio::sync::mpsc::error::TrySendError;
-
-// In a real implementation, MemoryPool would be a complex struct.
-// For now, a type alias is sufficient for the code to compile.
-pub type MemoryPool = ();
+use std::sync::Mutex; // Added for Mutex
 
 /// The trait for receiving a packet from an upstream stage.
 #[async_trait]
-pub trait Input<T>: Send + Sync {
+pub trait Input<T: AnyPacketType>: Send + Sync {
     async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
     fn try_recv(&mut self) -> Result<Option<Packet<T>>, StageError>;
 }
 
 /// The trait for sending a packet to a downstream stage.
 #[async_trait]
-pub trait Output<T>: Send + Sync {
-    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError>;
+pub trait Output<T: AnyPacketType>: Send + Sync {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>>;
     fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>>;
 }
 
 /// The main trait for a data plane stage.
 #[async_trait]
-pub trait DataPlaneStage: Send + Sync {
-    async fn run(&mut self, context: &mut StageContext) -> Result<(), StageError>;
+pub trait DataPlaneStage<InputPacket: AnyPacketType, OutputPacket: AnyPacketType>: Send + Sync {
+    async fn run(&mut self, context: &mut StageContext<InputPacket, OutputPacket>) -> Result<(), StageError>;
+}
+
+/// Type-erased trait for DataPlaneStage to enable object-safe storage in registries.
+/// This trait allows stages with different InputPacket and OutputPacket types to be
+/// stored together in a HashMap while maintaining type safety through the factory pattern.
+#[async_trait]
+pub trait DataPlaneStageErased: Send + Sync {
+    /// Run the stage with type-erased context.
+    /// The concrete stage implementation will downcast the context to its expected types.
+    async fn run_erased(&mut self, context: &mut dyn ErasedStageContext) -> Result<(), StageError>;
+}
+
+/// Type-erased context trait to enable object-safe stage execution.
+pub trait ErasedStageContext: Send + Sync {
+    /// Get the control message receiver
+    fn control_rx(&mut self) -> &mut mpsc::UnboundedReceiver<ControlMsg>;
+    
+    /// Get memory pools as a type-erased map
+    fn memory_pools(&mut self) -> &mut HashMap<String, Arc<Mutex<dyn AnyMemoryPool>>>;
+    
+    /// Attempt to downcast to a concrete StageContext type
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+// Note: We cannot provide a blanket implementation for DataPlaneStageErased
+// because it would have unconstrained type parameters. Instead, each concrete
+// stage type must implement DataPlaneStageErased manually or through a macro.
+
+/// Implement ErasedStageContext for concrete StageContext
+impl<I: AnyPacketType, O: AnyPacketType> ErasedStageContext for StageContext<I, O> {
+    fn control_rx(&mut self) -> &mut mpsc::UnboundedReceiver<ControlMsg> {
+        &mut self.control_rx
+    }
+    
+    fn memory_pools(&mut self) -> &mut HashMap<String, Arc<Mutex<dyn AnyMemoryPool>>> {
+        &mut self.memory_pools
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// A message sent from the Control Plane to a specific stage.
@@ -341,15 +379,32 @@ pub enum ControlMsg {
 }
 
 /// Contains everything a stage needs to run.
-pub struct StageContext {
-    pub memory_pools: HashMap<String, Arc<MemoryPool>>,
-    // The generic type parameter for Input/Output will need to be handled
-    // more robustly in a real implementation, likely with type erasure
-    // (e.g., using `Box<dyn Any>`). For this specific test case, we can
-    // hardcode it to the type we know `FilterStage` uses.
-    pub inputs: HashMap<String, Box<dyn Input<VoltageEegPacket>>>,
-    pub outputs: HashMap<String, Box<dyn Output<VoltageEegPacket>>>,
+pub struct StageContext<InputPacket: AnyPacketType, OutputPacket: AnyPacketType> {
+    pub memory_pools: HashMap<String, Arc<Mutex<dyn AnyMemoryPool>>>,
+    pub inputs: HashMap<String, Box<dyn Input<InputPacket>>>,
+    pub outputs: HashMap<String, Box<dyn Output<OutputPacket>>>,
     pub control_rx: mpsc::UnboundedReceiver<ControlMsg>,
+}
+
+/// A trait for type-erasing `MemoryPool<T>` so it can be stored in a `HashMap`.
+pub trait AnyMemoryPool: Send + Sync + 'static {
+    // We don't need to expose acquire/try_acquire here, as stages will get
+    // their specific pools from the context and call those methods directly.
+    // This trait is primarily for storing different `MemoryPool<T>` types together.
+    
+    /// Downcast to Any for type recovery
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+impl<T: AnyPacketType> AnyMemoryPool for MemoryPool<T> {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 
@@ -358,7 +413,7 @@ pub struct StageContext {
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 #[async_trait]
-impl<T: Send + Sync + 'static> Input<T> for Receiver<Packet<T>> {
+impl<T: AnyPacketType> Input<T> for Receiver<Packet<T>> {
     async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
         Ok(self.recv().await)
     }
@@ -373,7 +428,7 @@ impl<T: Send + Sync + 'static> Input<T> for Receiver<Packet<T>> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> Input<T> for UnboundedReceiver<Packet<T>> {
+impl<T: AnyPacketType> Input<T> for UnboundedReceiver<Packet<T>> {
     async fn recv(&mut self) -> Result<Option<Packet<T>>, StageError> {
         Ok(self.recv().await)
     }
@@ -388,11 +443,11 @@ impl<T: Send + Sync + 'static> Input<T> for UnboundedReceiver<Packet<T>> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> Output<T> for Sender<Packet<T>> {
-    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError> {
+impl<T: AnyPacketType> Output<T> for Sender<Packet<T>> {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
         mpsc::Sender::send(self, packet)
             .await
-            .map_err(|_| StageError::Fatal("output channel closed".into()))
+            .map_err(|e| TrySendError::Closed(e.0))
     }
 
     fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
@@ -401,10 +456,9 @@ impl<T: Send + Sync + 'static> Output<T> for Sender<Packet<T>> {
 }
 
 #[async_trait]
-impl<T: Send + Sync + 'static> Output<T> for UnboundedSender<Packet<T>> {
-    async fn send(&mut self, packet: Packet<T>) -> Result<(), StageError> {
-        mpsc::UnboundedSender::send(self, packet)
-            .map_err(|_| StageError::Fatal("output channel closed".into()))
+impl<T: AnyPacketType> Output<T> for UnboundedSender<Packet<T>> {
+    async fn send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
+        mpsc::UnboundedSender::send(self, packet).map_err(|e| TrySendError::Closed(e.0))
     }
 
     fn try_send(&mut self, packet: Packet<T>) -> Result<(), TrySendError<Packet<T>>> {
@@ -419,9 +473,9 @@ impl<T: Send + Sync + 'static> Output<T> for UnboundedSender<Packet<T>> {
 ///
 /// This is the data plane counterpart to the control plane's `StageFactory`.
 #[async_trait]
-pub trait DataPlaneStageFactory: Send + Sync {
+pub trait DataPlaneStageFactory<InputPacket: AnyPacketType, OutputPacket: AnyPacketType>: Send + Sync {
     /// Create a new data plane stage instance with the given parameters.
-    async fn create_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStage>>;
+    async fn create_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStage<InputPacket, OutputPacket>>>;
 
     /// Get the stage type this factory creates.
     fn stage_type(&self) -> &'static str;
@@ -432,10 +486,33 @@ pub trait DataPlaneStageFactory: Send + Sync {
     }
 }
 
+/// Type-erased factory trait that is object-safe and can be stored in registries.
+/// This trait provides a bridge between concrete DataPlaneStageFactory<I, O> implementations
+/// and the registry that needs to store different factory types together.
+#[async_trait]
+pub trait ErasedDataPlaneStageFactory: Send + Sync {
+    /// Create a new data plane stage instance with type erasure.
+    /// Returns a Box<dyn DataPlaneStageErased> that can be stored and executed
+    /// without knowing the concrete InputPacket and OutputPacket types.
+    async fn create_erased_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStageErased>>;
+
+    /// Get the stage type this factory creates.
+    fn stage_type(&self) -> &'static str;
+
+    /// Get parameter schema for this stage type.
+    fn parameter_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+}
+
+// Note: We cannot provide a blanket implementation for ErasedDataPlaneStageFactory
+// because it would have unconstrained type parameters. Instead, each concrete
+// factory type must implement ErasedDataPlaneStageFactory manually or through a macro.
+
 /// Registry for data plane stage factories.
 #[derive(Default)]
 pub struct DataPlaneStageRegistry {
-    factories: HashMap<String, Box<dyn DataPlaneStageFactory>>,
+    factories: HashMap<String, Box<dyn ErasedDataPlaneStageFactory>>,
 }
 
 impl DataPlaneStageRegistry {
@@ -457,33 +534,36 @@ impl DataPlaneStageRegistry {
     }
 
     /// Register a data plane stage factory.
-    /// Register a data plane stage factory.
-    pub fn register<F>(&mut self, factory: F)
+    pub fn register<F, InputPacket, OutputPacket>(&mut self, factory: F)
     where
-        F: DataPlaneStageFactory + 'static,
+        F: DataPlaneStageFactory<InputPacket, OutputPacket> + ErasedDataPlaneStageFactory + 'static,
+        InputPacket: AnyPacketType,
+        OutputPacket: AnyPacketType,
     {
-        self.register_boxed(Box::new(factory));
+        let stage_type = DataPlaneStageFactory::stage_type(&factory).to_string();
+        self.factories.insert(stage_type, Box::new(factory));
     }
 
-    /// Registers a boxed factory.
-    fn register_boxed(&mut self, factory: Box<dyn DataPlaneStageFactory>) {
+    /// Registers a boxed erased factory.
+    fn register_boxed(&mut self, factory: Box<dyn ErasedDataPlaneStageFactory>) {
         let stage_type = factory.stage_type().to_string();
         self.factories.insert(stage_type, factory);
     }
 
-    /// Create a stage instance from configuration.
-    pub async fn create_stage(
+    /// Create a stage instance from configuration, returning a type-erased stage.
+    /// This is the primary method for creating stages from the registry.
+    pub async fn create_erased_stage(
         &self,
         stage_type: &str,
         params: &StageParams,
-    ) -> PipelineResult<Box<dyn DataPlaneStage>> {
+    ) -> PipelineResult<Box<dyn DataPlaneStageErased>> {
         let factory = self.factories.get(stage_type).ok_or_else(|| {
             crate::error::PipelineError::UnknownStageType {
                 stage_type: stage_type.to_string(),
             }
         })?;
 
-        factory.create_stage(params).await
+        factory.create_erased_stage(params).await
     }
 
     /// Get all registered stage types.
@@ -498,11 +578,8 @@ impl DataPlaneStageRegistry {
 }
 
 /// A struct for statically registering a `DataPlaneStageFactory`.
-///
-/// This struct is collected by `inventory` at compile time.
 pub struct StaticStageRegistrar {
-    /// A function that creates a new instance of the factory.
-    pub factory_fn: fn() -> Box<dyn DataPlaneStageFactory>,
+    pub factory_fn: fn() -> Box<dyn ErasedDataPlaneStageFactory>,
 }
 
 inventory::collect!(StaticStageRegistrar);

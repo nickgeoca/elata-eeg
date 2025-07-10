@@ -5,9 +5,10 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::config::{PipelineConfig, StageConfig};
-use crate::stage::{StageInstance, StageState, StageRegistry};
+use crate::config::{PipelineConfig, StageConfig, MemoryPoolConfig, ConnectionConfig};
+use crate::stage::{StageInstance, StageState, DataPlaneStageRegistry};
 use crate::error::{PipelineError, PipelineResult};
+use crate::data::{MemoryPool, AnyPacketType, RawEegPacket, VoltageEegPacket};
 
 /// Pipeline graph representing the dataflow structure
 #[derive(Debug)]
@@ -18,6 +19,10 @@ pub struct PipelineGraph {
     pub name: String,
     /// Stage instances in the graph
     pub stages: HashMap<String, StageInstance>,
+    /// Memory pools for the data plane
+    pub memory_pools: HashMap<String, MemoryPoolConfig>,
+    /// Explicit connections between stages
+    pub connections: Vec<ConnectionConfig>,
     /// Adjacency list representing data flow edges
     pub edges: HashMap<String, Vec<String>>,
     /// Reverse adjacency list for dependency tracking
@@ -31,7 +36,7 @@ pub struct PipelineGraph {
 }
 
 /// Graph runtime state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum GraphState {
     /// Graph is constructed but not running
     Idle,
@@ -58,13 +63,15 @@ pub struct StageConnection {
 
 /// Graph builder for constructing pipeline graphs from configuration
 pub struct GraphBuilder {
-    registry: Arc<StageRegistry>,
+    data_plane_registry: Arc<DataPlaneStageRegistry>,
 }
 
 impl GraphBuilder {
-    /// Create a new graph builder
-    pub fn new(registry: Arc<StageRegistry>) -> Self {
-        Self { registry }
+    /// Create a new graph builder with data plane registry
+    pub fn new(data_plane_registry: Arc<DataPlaneStageRegistry>) -> Self {
+        Self {
+            data_plane_registry,
+        }
     }
 
     /// Build a pipeline graph from configuration
@@ -74,7 +81,10 @@ impl GraphBuilder {
 
         let mut graph = PipelineGraph::new(config.metadata.name.clone());
 
-        // Create stage instances
+        // Create memory pools first
+        graph.create_memory_pools(&config.memory_pools)?;
+
+        // Create stage instances using the data plane registry
         for stage_config in &config.stages {
             if stage_config.enabled {
                 let instance = self.create_stage_instance(stage_config).await?;
@@ -82,11 +92,19 @@ impl GraphBuilder {
             }
         }
 
-        // Build edges
-        for stage_config in &config.stages {
-            if stage_config.enabled {
-                for input in &stage_config.inputs {
-                    graph.add_edge(input.clone(), stage_config.name.clone())?;
+        // Build edges from explicit connections or legacy inputs
+        if !config.connections.is_empty() {
+            // Use explicit connections
+            for connection in &config.connections {
+                graph.add_connection(connection.clone())?;
+            }
+        } else {
+            // Fall back to legacy input-based connections
+            for stage_config in &config.stages {
+                if stage_config.enabled {
+                    for input in &stage_config.inputs {
+                        graph.add_edge(input.clone(), stage_config.name.clone())?;
+                    }
                 }
             }
         }
@@ -99,22 +117,22 @@ impl GraphBuilder {
 
     /// Create a stage instance from configuration
     async fn create_stage_instance(&self, config: &StageConfig) -> PipelineResult<StageInstance> {
-        // Validate that the stage type is registered
-        if !self.registry.stage_types().contains(&config.stage_type.as_str()) {
-            return Err(PipelineError::UnknownStageType {
-                stage_type: config.stage_type.clone(),
-            });
+        // Check if the stage type is registered in the data plane registry
+        if self.data_plane_registry.stage_types().contains(&config.stage_type.as_str()) {
+            // This is a data plane stage - create instance for metadata tracking
+            let instance = StageInstance::new(
+                config.name.clone(),
+                config.stage_type.clone(),
+                config.params.clone(),
+                config.inputs.clone(),
+            );
+            return Ok(instance);
         }
 
-        // Create the stage instance
-        let instance = StageInstance::new(
-            config.name.clone(),
-            config.stage_type.clone(),
-            config.params.clone(),
-            config.inputs.clone(),
-        );
-
-        Ok(instance)
+        // Stage type not found in registry
+        Err(PipelineError::UnknownStageType {
+            stage_type: config.stage_type.clone(),
+        })
     }
 }
 
@@ -125,6 +143,8 @@ impl PipelineGraph {
             id: Uuid::new_v4(),
             name,
             stages: HashMap::new(),
+            memory_pools: HashMap::new(),
+            connections: Vec::new(),
             edges: HashMap::new(),
             reverse_edges: HashMap::new(),
             sources: HashSet::new(),
@@ -334,6 +354,54 @@ impl PipelineGraph {
     /// Set graph state
     pub fn set_state(&mut self, state: GraphState) {
         self.state = state;
+    }
+
+    /// Create memory pools from configuration
+    pub fn create_memory_pools(&mut self, pool_configs: &[MemoryPoolConfig]) -> PipelineResult<()> {
+        for pool_config in pool_configs {
+            if self.memory_pools.contains_key(&pool_config.name) {
+                return Err(PipelineError::InvalidConfiguration {
+                    message: format!("Memory pool '{}' already exists", pool_config.name),
+                });
+            }
+            self.memory_pools.insert(pool_config.name.clone(), pool_config.clone());
+        }
+        Ok(())
+    }
+
+    /// Add a connection between stages
+    pub fn add_connection(&mut self, connection: ConnectionConfig) -> PipelineResult<()> {
+        // Verify both stages exist
+        if !self.stages.contains_key(&connection.from) {
+            return Err(PipelineError::StageNotFound { name: connection.from.clone() });
+        }
+        if !self.stages.contains_key(&connection.to) {
+            return Err(PipelineError::StageNotFound { name: connection.to.clone() });
+        }
+
+        // Add to connections list
+        self.connections.push(connection.clone());
+
+        // Also add to legacy edges for compatibility
+        self.edges.entry(connection.from.clone()).or_insert_with(Vec::new).push(connection.to.clone());
+        self.reverse_edges.entry(connection.to).or_insert_with(Vec::new).push(connection.from);
+
+        Ok(())
+    }
+
+    /// Get memory pool configuration by name
+    pub fn get_memory_pool(&self, name: &str) -> Option<&MemoryPoolConfig> {
+        self.memory_pools.get(name)
+    }
+
+    /// Get all connections for a stage (outgoing)
+    pub fn get_stage_connections(&self, stage_name: &str) -> Vec<&ConnectionConfig> {
+        self.connections.iter().filter(|c| c.from == stage_name).collect()
+    }
+
+    /// Get all incoming connections for a stage
+    pub fn get_stage_inputs(&self, stage_name: &str) -> Vec<&ConnectionConfig> {
+        self.connections.iter().filter(|c| c.to == stage_name).collect()
     }
 }
 

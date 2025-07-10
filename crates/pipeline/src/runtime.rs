@@ -1,7 +1,7 @@
 //! Pipeline runtime for executing pipeline graphs
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -10,26 +10,31 @@ use uuid::Uuid;
 
 use crate::config::PipelineConfig;
 use crate::data::PipelineData;
-use crate::error::{PipelineError, PipelineResult};
+use crate::error::{PipelineError, PipelineResult, StageError};
 use crate::graph::{GraphBuilder, GraphState, PipelineGraph};
-use crate::stage::{StageInstance, StageRegistry, StageState, StageMetric, PipelineStage};
+use crate::stage::{
+    StageInstance, StageState, StageMetric, PipelineStage, DataPlaneStageRegistry, ControlMsg,
+    DataPlaneStageErased, ErasedStageContext, AnyMemoryPool
+};
 
 /// Pipeline runtime for executing pipeline graphs
 pub struct PipelineRuntime {
     /// Runtime ID
     pub id: Uuid,
-    /// Stage registry for creating stage instances
-    registry: Arc<StageRegistry>,
+    /// Data plane stage registry for new architecture
+    data_plane_registry: Arc<DataPlaneStageRegistry>,
     /// Currently loaded pipeline graph
     graph: Option<Arc<RwLock<PipelineGraph>>>,
     /// Running stage tasks
     stage_tasks: HashMap<String, JoinHandle<PipelineResult<()>>>,
     /// Stage channels for data flow
     stage_channels: HashMap<String, StageChannelSet>,
+    /// Control channels for sending commands to stages
+    control_channels: HashMap<String, mpsc::UnboundedSender<ControlMsg>>,
     /// Global cancellation token
     cancellation_token: CancellationToken,
-    /// Runtime state
-    state: RuntimeState,
+    /// Runtime state with recording lock
+    state: Arc<tokio::sync::RwLock<PipelineState>>,
     /// Runtime metrics
     metrics: Arc<tokio::sync::Mutex<RuntimeMetrics>>,
     /// Metrics sender for collecting stage metrics
@@ -38,7 +43,26 @@ pub struct PipelineRuntime {
     metrics_receiver: mpsc::UnboundedReceiver<StageMetric>,
 }
 
-/// Runtime state
+/// Pipeline state with recording lock functionality
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum PipelineState {
+    /// Pipeline is idle - parameters can be changed
+    Idle,
+    /// Pipeline is loading a configuration
+    Loading,
+    /// Pipeline is starting up
+    Starting,
+    /// Pipeline is running - parameters are locked to prevent live edits
+    Running,
+    /// Pipeline is paused - parameters can be changed
+    Paused,
+    /// Pipeline is stopping
+    Stopping,
+    /// Pipeline has encountered an error
+    Error(String),
+}
+
+/// Legacy runtime state for backward compatibility
 #[derive(Debug, Clone, PartialEq)]
 pub enum RuntimeState {
     /// Runtime is idle
@@ -56,7 +80,7 @@ pub enum RuntimeState {
 }
 
 /// Runtime metrics
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct RuntimeMetrics {
     /// Total number of data items processed
     pub items_processed: u64,
@@ -64,10 +88,30 @@ pub struct RuntimeMetrics {
     pub error_count: u64,
     /// Runtime uptime in milliseconds
     pub uptime_ms: u64,
-    /// Start time
-    pub start_time: Option<std::time::Instant>,
+    /// Start time (as Unix timestamp in milliseconds)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time_ms: Option<u64>,
     /// Stage-specific metrics
     pub stage_metrics: HashMap<String, Vec<StageMetric>>,
+    /// Queue length metrics per stage
+    pub queue_lengths: HashMap<String, usize>,
+    /// Memory pool usage metrics
+    pub pool_usage: HashMap<String, PoolUsageMetric>,
+}
+
+/// Memory pool usage metrics
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PoolUsageMetric {
+    /// Pool name
+    pub name: String,
+    /// Total capacity
+    pub capacity: usize,
+    /// Currently allocated packets
+    pub allocated: usize,
+    /// Available packets
+    pub available: usize,
+    /// Utilization percentage (0.0 - 1.0)
+    pub utilization: f64,
 }
 
 /// Channel set for a stage (input and output channels)
@@ -94,17 +138,18 @@ pub struct ExecutionContext {
 }
 
 impl PipelineRuntime {
-    /// Create a new pipeline runtime
-    pub fn new(registry: Arc<StageRegistry>) -> Self {
+    /// Create a new pipeline runtime with data plane registry
+    pub fn new(data_plane_registry: Arc<DataPlaneStageRegistry>) -> Self {
         let (metrics_sender, metrics_receiver) = mpsc::unbounded_channel();
         Self {
             id: Uuid::new_v4(),
-            registry,
+            data_plane_registry,
             graph: None,
             stage_tasks: HashMap::new(),
             stage_channels: HashMap::new(),
+            control_channels: HashMap::new(),
             cancellation_token: CancellationToken::new(),
-            state: RuntimeState::Idle,
+            state: Arc::new(tokio::sync::RwLock::new(PipelineState::Idle)),
             metrics: Arc::new(tokio::sync::Mutex::new(RuntimeMetrics::new())),
             metrics_sender,
             metrics_receiver,
@@ -113,15 +158,16 @@ impl PipelineRuntime {
 
     /// Load a pipeline configuration
     pub async fn load_pipeline(&mut self, config: &PipelineConfig) -> PipelineResult<()> {
-        if self.state == RuntimeState::Running {
+        let current_state = self.state.read().await.clone();
+        if current_state == PipelineState::Running {
             return Err(PipelineError::AlreadyRunning);
         }
 
-        self.state = RuntimeState::Loading;
+        *self.state.write().await = PipelineState::Loading;
         info!("Loading pipeline: {}", config.metadata.name);
 
-        // Build the graph
-        let builder = GraphBuilder::new(self.registry.clone());
+        // Build the graph using the data plane registry
+        let builder = GraphBuilder::new(self.data_plane_registry.clone());
         let graph = builder.build(config).await?;
 
         info!("Pipeline graph built with {} stages", graph.stages.len());
@@ -130,14 +176,15 @@ impl PipelineRuntime {
 
         // Store the graph
         self.graph = Some(Arc::new(RwLock::new(graph)));
-        self.state = RuntimeState::Idle;
+        *self.state.write().await = PipelineState::Idle;
 
         Ok(())
     }
 
     /// Start pipeline execution
     pub async fn start(&mut self) -> PipelineResult<()> {
-        if self.state == RuntimeState::Running {
+        let current_state = self.state.read().await.clone();
+        if current_state == PipelineState::Running {
             return Err(PipelineError::AlreadyRunning);
         }
 
@@ -146,7 +193,7 @@ impl PipelineRuntime {
                 message: "No pipeline loaded".to_string(),
             })?;
 
-        self.state = RuntimeState::Starting;
+        *self.state.write().await = PipelineState::Starting;
         info!("Starting pipeline execution");
 
         // Reset cancellation token
@@ -170,23 +217,29 @@ impl PipelineRuntime {
             graph_guard.set_all_stage_states(StageState::Running);
         }
 
-        self.state = RuntimeState::Running;
+        *self.state.write().await = PipelineState::Running;
         {
             let mut metrics = self.metrics.lock().await;
-            metrics.start_time = Some(std::time::Instant::now());
+            metrics.start_time_ms = Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64
+            );
         }
-        info!("Pipeline started successfully");
+        info!("Pipeline started successfully - Recording Lock ACTIVE");
 
         Ok(())
     }
 
     /// Stop pipeline execution
     pub async fn stop(&mut self) -> PipelineResult<()> {
-        if self.state != RuntimeState::Running {
+        let current_state = self.state.read().await.clone();
+        if current_state != PipelineState::Running && current_state != PipelineState::Paused {
             return Err(PipelineError::NotRunning);
         }
 
-        self.state = RuntimeState::Stopping;
+        *self.state.write().await = PipelineState::Stopping;
         info!("Stopping pipeline execution");
 
         // Signal cancellation
@@ -217,6 +270,7 @@ impl PipelineRuntime {
 
         // Clear channels
         self.stage_channels.clear();
+        self.control_channels.clear();
 
         // Update graph state
         if let Some(graph) = &self.graph {
@@ -226,15 +280,96 @@ impl PipelineRuntime {
             graph_guard.unlock_all_stages();
         }
 
-        self.state = RuntimeState::Idle;
-        info!("Pipeline stopped successfully");
+        *self.state.write().await = PipelineState::Idle;
+        info!("Pipeline stopped successfully - Recording Lock RELEASED");
 
         Ok(())
     }
 
-    /// Get current runtime state
-    pub fn state(&self) -> &RuntimeState {
-        &self.state
+    /// Pause pipeline execution (allows parameter changes)
+    pub async fn pause(&mut self) -> PipelineResult<()> {
+        let current_state = self.state.read().await.clone();
+        if current_state != PipelineState::Running {
+            return Err(PipelineError::InvalidState(
+                "Pipeline must be running to pause".to_string()
+            ));
+        }
+
+        *self.state.write().await = PipelineState::Paused;
+        info!("Pipeline paused - Recording Lock RELEASED");
+
+        // Send pause command to all stages
+        for (stage_name, control_tx) in &self.control_channels {
+            if let Err(e) = control_tx.send(ControlMsg::Pause) {
+                warn!("Failed to send pause command to stage '{}': {}", stage_name, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Resume pipeline execution (re-enables recording lock)
+    pub async fn resume(&mut self) -> PipelineResult<()> {
+        let current_state = self.state.read().await.clone();
+        if current_state != PipelineState::Paused {
+            return Err(PipelineError::InvalidState(
+                "Pipeline must be paused to resume".to_string()
+            ));
+        }
+
+        *self.state.write().await = PipelineState::Running;
+        info!("Pipeline resumed - Recording Lock ACTIVE");
+
+        // Send resume command to all stages
+        for (stage_name, control_tx) in &self.control_channels {
+            if let Err(e) = control_tx.send(ControlMsg::Resume) {
+                warn!("Failed to send resume command to stage '{}': {}", stage_name, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Update a parameter on a specific stage (respects recording lock)
+    pub async fn update_stage_parameter(
+        &self,
+        stage_id: &str,
+        key: String,
+        value: serde_json::Value,
+    ) -> PipelineResult<()> {
+        let current_state = self.state.read().await.clone();
+        
+        // Enforce recording lock - only allow parameter updates when not running
+        if current_state == PipelineState::Running {
+            return Err(PipelineError::InvalidState(
+                "Cannot update parameters while pipeline is running (Recording Lock active). Pause the pipeline first.".to_string()
+            ));
+        }
+
+        // Find the control channel for the target stage
+        let control_tx = self.control_channels.get(stage_id)
+            .ok_or_else(|| PipelineError::StageNotFound {
+                name: stage_id.to_string(),
+            })?;
+
+        // Send the parameter update command
+        control_tx.send(ControlMsg::UpdateParam(key.clone(), value.clone()))
+            .map_err(|_| PipelineError::ChannelError(
+                format!("Failed to send parameter update to stage '{}'", stage_id)
+            ))?;
+
+        info!("Parameter '{}' updated for stage '{}'", key, stage_id);
+        Ok(())
+    }
+
+    /// Get current pipeline state
+    pub async fn state(&self) -> PipelineState {
+        self.state.read().await.clone()
+    }
+
+    /// Get current pipeline state (non-async for compatibility)
+    pub fn state_sync(&self) -> Arc<tokio::sync::RwLock<PipelineState>> {
+        self.state.clone()
     }
 
     /// Get runtime metrics
@@ -309,8 +444,8 @@ impl PipelineRuntime {
                     name: stage_name.to_string(),
                 })?;
 
-            // Create the actual stage implementation
-            let mut stage = self.registry.create_stage(&stage_instance.stage_type, &stage_instance.params).await?;
+            // Create the actual stage implementation using data plane registry
+            let mut stage = self.data_plane_registry.create_erased_stage(&stage_instance.stage_type, &stage_instance.params).await?;
 
             // Get channels for this stage
             let channels = self.stage_channels.remove(stage_name)
@@ -338,84 +473,94 @@ impl PipelineRuntime {
         Ok(())
     }
 
-    /// Run a single stage
+    /// Run a single stage using the new data plane architecture
     async fn run_stage(
-        mut stage: Box<dyn PipelineStage>,
-        mut context: ExecutionContext,
+        mut stage: Box<dyn DataPlaneStageErased>,
+        context: ExecutionContext,
     ) -> PipelineResult<()> {
         info!("Starting stage: {}", context.stage_name);
 
-        // Initialize the stage
-        stage.initialize().await?;
+        // Create a type-erased context that implements ErasedStageContext
+        let mut erased_context = TypeErasedStageContext {
+            control_rx: context.control_rx,
+            memory_pools: context.memory_pools,
+            inputs: context.inputs,
+            outputs: context.outputs,
+            cancellation_token: context.cancellation_token,
+            metrics_sender: context.metrics_sender,
+            stage_name: context.stage_name,
+        };
 
-        // Main processing loop
+        // Run the stage with the erased context
         loop {
             tokio::select! {
                 // Check for cancellation
-                _ = context.cancellation_token.cancelled() => {
-                    info!("Stage '{}' received cancellation signal", context.stage_name);
+                _ = erased_context.cancellation_token.cancelled() => {
+                    info!("Stage '{}' received cancellation signal", erased_context.stage_name);
                     break;
                 }
                 
-                // Process input data from any available input channel
-                input_data = Self::receive_input_data(&mut context.inputs) => {
-                    match input_data {
-                        Some(data) => {
-                            // Process the data through the stage
-                            match stage.process(data).await {
-                                Ok(output) => {
-                                    // Send metrics about processed item
-                                    let _ = context.metrics_sender.send(StageMetric {
-                                        name: "items_processed".to_string(),
-                                        value: 1.0,
-                                        unit: "count".to_string(),
-                                        description: Some("Number of items processed".to_string()),
-                                        timestamp: std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs(),
-                                    });
-                                    
-                                    // Send output to all connected downstream stages
-                                    if let Err(e) = Self::send_output_data(&context.outputs, output).await {
-                                        error!("Failed to send output from stage '{}': {}", context.stage_name, e);
-                                        // Continue processing - don't fail the entire stage for send errors
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("Stage '{}' processing error: {}", context.stage_name, e);
-                                    // Send error metric
-                                    let _ = context.metrics_sender.send(StageMetric {
-                                        name: "errors".to_string(),
-                                        value: 1.0,
-                                        unit: "count".to_string(),
-                                        description: Some("Number of processing errors".to_string()),
-                                        timestamp: std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH)
-                                            .unwrap_or_default()
-                                            .as_secs(),
-                                    });
-                                    // For now, continue processing. In the future, we might want
-                                    // configurable error handling (fail-fast vs continue)
-                                }
-                            }
+                // Run the stage
+                result = stage.run_erased(&mut erased_context) => {
+                    match result {
+                        Ok(()) => {
+                            // Stage completed normally, continue
                         }
-                        None => {
-                            // No input data available, yield to prevent busy waiting
-                            tokio::time::sleep(tokio::time::Duration::from_millis(1)).await;
+                        Err(StageError::QueueClosed) => {
+                            info!("Stage '{}' input queue closed, shutting down", erased_context.stage_name);
+                            break;
+                        }
+                        Err(e) => {
+                            error!("Stage '{}' encountered error: {}", erased_context.stage_name, e);
+                            // Send error metric
+                            let _ = erased_context.metrics_sender.send(StageMetric {
+                                name: "errors".to_string(),
+                                value: 1.0,
+                                unit: "count".to_string(),
+                                description: Some("Number of errors encountered".to_string()),
+                                timestamp: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_micros() as u64,
+                            });
+                            return Err(PipelineError::StageError(e));
                         }
                     }
                 }
             }
         }
 
-        // Cleanup the stage
-        stage.cleanup().await?;
-        info!("Stage '{}' stopped", context.stage_name);
-
+        info!("Stage '{}' shut down", erased_context.stage_name);
         Ok(())
     }
+}
 
+/// Type-erased context implementation for the runtime
+struct TypeErasedStageContext {
+    control_rx: mpsc::UnboundedReceiver<ControlMsg>,
+    memory_pools: HashMap<String, Arc<Mutex<dyn AnyMemoryPool>>>,
+    inputs: HashMap<String, Box<dyn std::any::Any + Send>>,
+    outputs: HashMap<String, Box<dyn std::any::Any + Send>>,
+    cancellation_token: CancellationToken,
+    metrics_sender: mpsc::UnboundedSender<StageMetric>,
+    stage_name: String,
+}
+
+impl ErasedStageContext for TypeErasedStageContext {
+    fn control_rx(&mut self) -> &mut mpsc::UnboundedReceiver<ControlMsg> {
+        &mut self.control_rx
+    }
+    
+    fn memory_pools(&mut self) -> &mut HashMap<String, Arc<Mutex<dyn AnyMemoryPool>>> {
+        &mut self.memory_pools
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl PipelineRuntime {
     /// Start metrics collection task
     fn start_metrics_collection_task(&mut self) {
         let mut metrics_receiver = std::mem::replace(&mut self.metrics_receiver, mpsc::unbounded_channel().1);
@@ -522,7 +667,6 @@ impl PipelineRuntime {
 
         Ok(())
     }
-}
 
 impl RuntimeMetrics {
     /// Create new runtime metrics
@@ -531,15 +675,21 @@ impl RuntimeMetrics {
             items_processed: 0,
             error_count: 0,
             uptime_ms: 0,
-            start_time: None,
+            start_time_ms: None,
             stage_metrics: HashMap::new(),
+            queue_lengths: HashMap::new(),
+            pool_usage: HashMap::new(),
         }
     }
 
     /// Update uptime based on start time
     pub fn update_uptime(&mut self) {
-        if let Some(start_time) = self.start_time {
-            self.uptime_ms = start_time.elapsed().as_millis() as u64;
+        if let Some(start_time_ms) = self.start_time_ms {
+            let current_time_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            self.uptime_ms = current_time_ms.saturating_sub(start_time_ms);
         }
     }
 
@@ -563,16 +713,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_runtime_creation() {
-        let registry = Arc::new(StageRegistry::new());
+        let registry = Arc::new(DataPlaneStageRegistry::new());
         let runtime = PipelineRuntime::new(registry);
         
-        assert_eq!(runtime.state(), &RuntimeState::Idle);
+        assert_eq!(runtime.state().await, PipelineState::Idle);
         assert!(runtime.graph().await.is_none());
     }
 
     #[tokio::test]
     async fn test_pipeline_loading() {
-        let registry = Arc::new(StageRegistry::new());
+        let registry = Arc::new(DataPlaneStageRegistry::new());
         let mut runtime = PipelineRuntime::new(registry);
         
         let config = PipelineConfig::new(
@@ -585,4 +735,5 @@ mod tests {
         let result = runtime.load_pipeline(&config).await;
         assert!(result.is_ok() || matches!(result, Err(PipelineError::UnknownStageType { .. })));
     }
+}
 }

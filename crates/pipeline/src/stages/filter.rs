@@ -17,11 +17,11 @@ use tokio::sync::mpsc::error::TrySendError;
 use tracing::{error, trace, warn};
 
 use crate::ctrl_loop;
-use crate::data::{Packet, VoltageEegPacket};
+use crate::data::{Packet, VoltageEegPacket, AnyPacketType};
 use crate::error::{PipelineResult, StageError};
 use crate::stage::{
-    ControlMsg, DataPlaneStage, DataPlaneStageFactory, StageContext, StageParams,
-    StaticStageRegistrar,
+    ControlMsg, DataPlaneStage, DataPlaneStageFactory, DataPlaneStageErased, ErasedDataPlaneStageFactory,
+    ErasedStageContext, StageContext, StageParams, StaticStageRegistrar, Input, Output
 };
 
 /// A high-performance, in-place gain stage for the data plane.
@@ -38,19 +38,32 @@ pub struct GainStage {
     yield_threshold: u32,
     // Cached handles to avoid HashMap lookups in the hot path.
     // These are `None` until the first time `run` is called.
-    input_rx: Option<Box<dyn crate::stage::Input<VoltageEegPacket>>>,
-    output_tx: Option<Box<dyn crate::stage::Output<VoltageEegPacket>>>,
+    input_rx: Option<Box<dyn Input<VoltageEegPacket>>>,
+    output_tx: Option<Box<dyn Output<VoltageEegPacket>>>,
 }
 
 #[async_trait]
-impl DataPlaneStage for GainStage {
+impl DataPlaneStage<VoltageEegPacket, VoltageEegPacket> for GainStage {
     /// The main execution loop for the gain stage.
-    async fn run(&mut self, ctx: &mut StageContext) -> Result<(), StageError> {
+    async fn run(&mut self, ctx: &mut StageContext<VoltageEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
         // First, handle any incoming control messages.
         ctrl_loop!(self, ctx);
 
         // Then, enter the packet processing loop.
         self.process_packets(ctx).await
+    }
+}
+
+#[async_trait]
+impl DataPlaneStageErased for GainStage {
+    async fn run_erased(&mut self, context: &mut dyn ErasedStageContext) -> Result<(), StageError> {
+        // Downcast the erased context back to the concrete type
+        let concrete_context = context
+            .as_any_mut()
+            .downcast_mut::<StageContext<VoltageEegPacket, VoltageEegPacket>>()
+            .ok_or_else(|| StageError::Fatal("Context type mismatch for GainStage".into()))?;
+        
+        self.run(concrete_context).await
     }
 }
 
@@ -83,12 +96,12 @@ impl GainStage {
     #[cold]
     #[inline(always)]
     fn lazy_io<'a>(
-        input_rx: &'a mut Option<Box<dyn crate::stage::Input<VoltageEegPacket>>>,
-        output_tx: &'a mut Option<Box<dyn crate::stage::Output<VoltageEegPacket>>>,
-        ctx: &'a mut StageContext,
+        input_rx: &'a mut Option<Box<dyn Input<VoltageEegPacket>>>,
+        output_tx: &'a mut Option<Box<dyn Output<VoltageEegPacket>>>,
+        ctx: &'a mut StageContext<VoltageEegPacket, VoltageEegPacket>,
     ) -> (
-        &'a mut dyn crate::stage::Input<VoltageEegPacket>,
-        &'a mut dyn crate::stage::Output<VoltageEegPacket>,
+        &'a mut dyn Input<VoltageEegPacket>,
+        &'a mut dyn Output<VoltageEegPacket>,
     ) {
         if input_rx.is_none() {
             *input_rx = Some(
@@ -109,7 +122,7 @@ impl GainStage {
     }
 
     /// Efficiently processes all available packets in the input queue.
-    async fn process_packets(&mut self, ctx: &mut StageContext) -> Result<(), StageError> {
+    async fn process_packets(&mut self, ctx: &mut StageContext<VoltageEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
         let (input, output) = Self::lazy_io(&mut self.input_rx, &mut self.output_tx, ctx);
         let mut processed_count = 0;
 
@@ -143,7 +156,7 @@ impl GainStage {
             if let Err(e) = output.send(pkt).await {
                 // The downstream stage has shut down.
                 error!("Failed to send packet: {}", e);
-                return Err(e);
+                return Err(StageError::Fatal(format!("Failed to send packet: {}", e)));
             }
 
             // Be a good citizen and yield to the scheduler periodically.
@@ -211,13 +224,15 @@ impl GainStageFactory {
 }
 
 #[async_trait]
-impl DataPlaneStageFactory for GainStageFactory {
+impl DataPlaneStageFactory<VoltageEegPacket, VoltageEegPacket> for GainStageFactory {
     /// Creates a new `GainStage` instance from JSON parameters.
     async fn create_stage(
         &self,
         params: &StageParams,
-    ) -> PipelineResult<Box<dyn DataPlaneStage>> {
-        let params: GainStageParams = serde_json::from_value(params.clone())?;
+    ) -> PipelineResult<Box<dyn DataPlaneStage<VoltageEegPacket, VoltageEegPacket>>> {
+        // Convert StageParams (HashMap) to serde_json::Value before deserializing
+        let params_value = serde_json::to_value(params.clone())?; // Clone params before converting
+        let params: GainStageParams = serde_json::from_value(params_value)?;
         let stage = GainStage::new(params.gain, true, params.yield_threshold);
         Ok(Box::new(stage))
     }
@@ -228,6 +243,33 @@ impl DataPlaneStageFactory for GainStageFactory {
 
     fn parameter_schema(&self) -> serde_json::Value {
         serde_json::to_value(schema_for!(GainStageParams)).unwrap_or_default()
+    }
+}
+
+#[async_trait]
+impl ErasedDataPlaneStageFactory for GainStageFactory {
+    async fn create_erased_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStageErased>> {
+        // Extract gain parameter
+        let gain = params.get("gain")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+        
+        let stage = GainStage {
+            gain: AtomicU32::new(gain.to_bits()),
+            enabled: AtomicBool::new(true),
+            yield_threshold: 100, // Default value
+            input_rx: None,
+            output_tx: None,
+        };
+        Ok(Box::new(stage) as Box<dyn DataPlaneStageErased>)
+    }
+
+    fn stage_type(&self) -> &'static str {
+        DataPlaneStageFactory::stage_type(self)
+    }
+
+    fn parameter_schema(&self) -> serde_json::Value {
+        DataPlaneStageFactory::parameter_schema(self)
     }
 }
 
@@ -248,6 +290,8 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use tokio::sync::mpsc;
+    use std::sync::{Arc, Mutex};
+    use crate::data::MemoryPool;
 
     // MockInput now needs to support try_recv
     struct MockInput {
@@ -273,8 +317,8 @@ mod tests {
     }
     #[async_trait]
     impl Output<VoltageEegPacket> for MockOutput {
-        async fn send(&mut self, packet: Packet<VoltageEegPacket>) -> Result<(), StageError> {
-            self.tx.send(packet).map_err(|_| StageError::Fatal("send error".into()))
+        async fn send(&mut self, packet: Packet<VoltageEegPacket>) -> Result<(), TrySendError<Packet<VoltageEegPacket>>> {
+            self.tx.send(packet).map_err(|e| TrySendError::Closed(e.0))
         }
         fn try_send(
             &mut self,
@@ -287,7 +331,7 @@ mod tests {
 
     fn setup_test_rig() -> (
         GainStage,
-        StageContext,
+        StageContext<VoltageEegPacket, VoltageEegPacket>,
         mpsc::UnboundedSender<ControlMsg>,
         mpsc::UnboundedSender<Packet<VoltageEegPacket>>,
         mpsc::UnboundedReceiver<Packet<VoltageEegPacket>>,
@@ -308,7 +352,7 @@ mod tests {
             control_rx,
             inputs,
             outputs,
-            memory_pools: HashMap::new(),
+            memory_pools: HashMap::new(), // No memory pools needed for GainStage
         };
 
         (stage, ctx, control_tx, in_tx, out_rx)

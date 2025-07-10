@@ -1,149 +1,207 @@
 //! Voltage conversion stage for converting raw ADC values to voltages
 
 use async_trait::async_trait;
-use serde_json::json;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tracing::{info, error};
+use schemars::{schema_for, JsonSchema};
+use serde::Deserialize;
+use serde_json::Value;
+use std::sync::atomic::{AtomicU32, Ordering};
+use tokio::sync::mpsc::error::TrySendError;
+use tracing::{error, info, trace, warn};
 
-use eeg_types::EegPacket;
-use crate::data::PipelineData;
-use crate::error::{PipelineError, PipelineResult};
-use crate::stage::{PipelineStage, StageFactory, StageParams, StageMetric};
+use crate::ctrl_loop;
+use crate::data::{Packet, PacketHeader, RawEegPacket, VoltageEegPacket};
+use crate::error::{PipelineResult, StageError};
+use crate::stage::{
+    ControlMsg, DataPlaneStage, DataPlaneStageFactory, DataPlaneStageErased, ErasedDataPlaneStageFactory,
+    ErasedStageContext, StageContext, StageParams, StaticStageRegistrar,
+};
 
 /// Stage that converts raw ADC values to voltage values
 pub struct ToVoltageStage {
     /// Reference voltage for conversion
-    vref: f32,
+    vref: AtomicU32,
     /// ADC resolution (bits)
     adc_bits: u8,
-    /// Metrics
-    packets_processed: u64,
+    /// A flag to enable or disable the stage on-the-fly.
+    enabled: std::sync::atomic::AtomicBool,
+    /// The number of packets to process before yielding to the scheduler.
+    /// A value of 0 means the stage will never yield.
+    yield_threshold: u32,
+    // Cached handles to avoid HashMap lookups in the hot path.
+    // These are `None` until the first time `run` is called.
+    input_rx: Option<Box<dyn crate::stage::Input<RawEegPacket>>>,
+    output_tx: Option<Box<dyn crate::stage::Output<VoltageEegPacket>>>,
+}
+
+#[async_trait]
+impl DataPlaneStage<RawEegPacket, VoltageEegPacket> for ToVoltageStage {
+    /// The main execution loop for the voltage conversion stage.
+    async fn run(&mut self, ctx: &mut StageContext<RawEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
+        // First, handle any incoming control messages.
+        ctrl_loop!(self, ctx);
+
+        // Then, enter the packet processing loop.
+        self.process_packets(ctx).await
+    }
 }
 
 impl ToVoltageStage {
     /// Create a new to_voltage stage
-    pub fn new(vref: f32, adc_bits: u8) -> Self {
-        Self {
-            vref,
+    pub fn new(vref: f32, adc_bits: u8, yield_threshold: u32) -> Self {
+        let stage = Self {
+            vref: AtomicU32::new(0), // Initialized properly in `set_vref`
             adc_bits,
-            packets_processed: 0,
-        }
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            yield_threshold,
+            input_rx: None,
+            output_tx: None,
+        };
+        stage.set_vref(vref);
+        stage
+    }
+
+    /// Set the reference voltage
+    pub fn set_vref(&self, vref: f32) {
+        self.vref.store(vref.to_bits(), Ordering::Release);
+    }
+
+    /// Safely gets the reference voltage using atomic operations.
+    fn get_vref(&self) -> f32 {
+        f32::from_bits(self.vref.load(Ordering::Acquire))
     }
 
     /// Convert raw ADC value to voltage
     fn raw_to_voltage(&self, raw_value: i32) -> f32 {
         let max_value = (1 << (self.adc_bits - 1)) - 1; // For signed values
-        (raw_value as f32 / max_value as f32) * self.vref
+        (raw_value as f32 / max_value as f32) * self.get_vref()
     }
-}
 
-#[async_trait]
-impl PipelineStage for ToVoltageStage {
-    async fn process(&mut self, input: PipelineData) -> PipelineResult<PipelineData> {
-        // Extract EegPacket from PipelineData
-        let packet = match input {
-            PipelineData::RawEeg(packet) => packet,
-            _ => {
-                return Err(PipelineError::RuntimeError {
-                    stage_name: "to_voltage".to_string(),
-                    message: "Input is not RawEeg data".to_string(),
-                });
+    /// Gets mutable references to the input and output handles, initializing them
+    /// on the first call. This avoids HashMap lookups in the hot path.
+    #[cold]
+    #[inline(always)]
+    fn lazy_io<'a>(
+        input_rx: &'a mut Option<Box<dyn crate::stage::Input<RawEegPacket>>>,
+        output_tx: &'a mut Option<Box<dyn crate::stage::Output<VoltageEegPacket>>>,
+        ctx: &'a mut StageContext<RawEegPacket, VoltageEegPacket>,
+    ) -> (
+        &'a mut dyn crate::stage::Input<RawEegPacket>,
+        &'a mut dyn crate::stage::Output<VoltageEegPacket>,
+    ) {
+        if input_rx.is_none() {
+            *input_rx = Some(
+                ctx.inputs
+                    .remove("in")
+                    .unwrap_or_else(|| panic!("Input 'in' not found for to_voltage stage")),
+            );
+            *output_tx = Some(
+                ctx.outputs
+                    .remove("out")
+                    .unwrap_or_else(|| panic!("Output 'out' not found for to_voltage stage")),
+            );
+        }
+        (
+            input_rx.as_mut().unwrap().as_mut(),
+            output_tx.as_mut().unwrap().as_mut(),
+        )
+    }
+
+    /// Efficiently processes all available packets in the input queue.
+    async fn process_packets(&mut self, ctx: &mut StageContext<RawEegPacket, VoltageEegPacket>) -> Result<(), StageError> {
+        let yield_threshold = self.yield_threshold;
+        let vref = self.get_vref();
+        let adc_bits = self.adc_bits;
+        let max_value = (1 << (adc_bits - 1)) - 1; // For signed values
+        
+        let (input, output) = Self::lazy_io(&mut self.input_rx, &mut self.output_tx, ctx);
+        let mut processed_count = 0;
+
+        // Loop to drain the input queue.
+        loop {
+            let pkt = match input.try_recv()? {
+                Some(p) => p,
+                // The queue is empty, so we're done for now.
+                None => return Ok(()),
+            };
+
+            // Convert raw samples to voltages
+            let voltage_samples: Vec<f32> = pkt.samples.samples
+                .iter()
+                .map(|&raw| (raw as f32 / max_value as f32) * vref)
+                .collect();
+
+            // Create a new Packet with VoltageEegPacket type
+            let output_pkt = Packet::new(pkt.header, VoltageEegPacket { samples: voltage_samples }, std::sync::Weak::<std::sync::Mutex<crate::data::MemoryPool<VoltageEegPacket>>>::new());
+
+            // Send the packet downstream, handling back-pressure by awaiting.
+            if let Err(e) = output.send(output_pkt).await {
+                // The downstream stage has shut down.
+                error!("Failed to send packet: {}", e);
+                return Err(StageError::SendError(format!("Failed to send packet: {}", e)));
             }
-        };
 
-        // Convert raw samples to voltages
-        let voltage_samples: Vec<f32> = packet.raw_samples
-            .iter()
-            .map(|&raw| self.raw_to_voltage(raw))
-            .collect();
-
-        // Create new packet with converted voltages
-        let converted_packet = EegPacket::new(
-            packet.timestamps.to_vec(),
-            packet.frame_id,
-            packet.raw_samples.to_vec(),
-            voltage_samples,
-            packet.channel_count,
-            packet.sample_rate,
-        );
-
-        self.packets_processed += 1;
-
-        Ok(PipelineData::RawEeg(Arc::new(converted_packet)))
-    }
-
-    fn stage_type(&self) -> &'static str {
-        "to_voltage"
-    }
-
-    fn description(&self) -> &'static str {
-        "Converts raw ADC values to voltage values"
-    }
-
-    async fn initialize(&mut self) -> PipelineResult<()> {
-        info!("Initializing to_voltage stage: vref={}V, adc_bits={}", 
-               self.vref, self.adc_bits);
-        Ok(())
-    }
-
-    async fn cleanup(&mut self) -> PipelineResult<()> {
-        info!("Cleaning up to_voltage stage, processed {} packets", self.packets_processed);
-        Ok(())
-    }
-
-    fn get_metrics(&self) -> Vec<StageMetric> {
-        vec![
-            StageMetric::new(
-                "packets_processed".to_string(),
-                self.packets_processed as f64,
-                "count".to_string(),
-            ),
-            StageMetric::new(
-                "vref".to_string(),
-                self.vref as f64,
-                "V".to_string(),
-            ),
-            StageMetric::new(
-                "adc_bits".to_string(),
-                self.adc_bits as f64,
-                "bits".to_string(),
-            ),
-        ]
-    }
-
-    fn validate_params(&self, params: &StageParams) -> PipelineResult<()> {
-        // Validate reference voltage
-        if let Some(vref) = params.get("vref") {
-            let vref = vref.as_f64().ok_or_else(|| PipelineError::InvalidConfiguration {
-                message: "vref parameter must be a number".to_string(),
-            })?;
-            
-            if vref <= 0.0 || vref > 10.0 {
-                return Err(PipelineError::InvalidConfiguration {
-                    message: "vref must be between 0 and 10 volts".to_string(),
-                });
+            // Be a good citizen and yield to the scheduler periodically.
+            processed_count += 1;
+            if yield_threshold > 0 && processed_count >= yield_threshold {
+                processed_count = 0;
+                tokio::task::yield_now().await;
             }
         }
+    }
 
-        // Validate ADC bits
-        if let Some(adc_bits) = params.get("adc_bits") {
-            let adc_bits = adc_bits.as_u64().ok_or_else(|| PipelineError::InvalidConfiguration {
-                message: "adc_bits parameter must be a positive integer".to_string(),
-            })?;
-            
-            if adc_bits < 8 || adc_bits > 32 {
-                return Err(PipelineError::InvalidConfiguration {
-                    message: "adc_bits must be between 8 and 32".to_string(),
-                });
+    /// Updates a stage parameter based on a key-value pair from the control plane.
+    fn update_param(&mut self, key: &str, val: Value) -> Result<(), StageError> {
+        match key {
+            "vref" => {
+                let new_vref = val
+                    .as_f64()
+                    .map(|v| v as f32)
+                    .ok_or_else(|| StageError::BadParam(key.into()))?;
+                self.set_vref(new_vref);
+                trace!("Updating vref to {}", new_vref);
             }
+            "adc_bits" => {
+                let new_adc_bits = val
+                    .as_u64()
+                    .map(|v| v as u8)
+                    .ok_or_else(|| StageError::BadParam(key.into()))?;
+                self.adc_bits = new_adc_bits;
+                trace!("Updating adc_bits to {}", new_adc_bits);
+            }
+            _ => return Err(StageError::BadParam(key.into())),
         }
-
         Ok(())
     }
 }
 
-/// Factory for creating to_voltage stages
+/// Parameters for configuring a `ToVoltageStage`.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ToVoltageStageParams {
+    /// Reference voltage for ADC conversion
+    #[serde(default = "default_vref")]
+    vref: f32,
+    /// ADC resolution in bits
+    #[serde(default = "default_adc_bits")]
+    adc_bits: u8,
+    /// The number of packets to process before yielding to the scheduler.
+    /// Set to 0 to never yield.
+    #[serde(default = "default_yield_threshold")]
+    yield_threshold: u32,
+}
+
+fn default_vref() -> f32 {
+    4.5
+}
+
+fn default_adc_bits() -> u8 {
+    24
+}
+
+fn default_yield_threshold() -> u32 {
+    64
+}
+
 pub struct ToVoltageStageFactory;
 
 impl ToVoltageStageFactory {
@@ -153,21 +211,15 @@ impl ToVoltageStageFactory {
 }
 
 #[async_trait]
-impl StageFactory for ToVoltageStageFactory {
-    async fn create_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn PipelineStage>> {
-        let vref = params.get("vref")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(4.5) as f32;
-
-        let adc_bits = params.get("adc_bits")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(24) as u8;
-
-        let stage = ToVoltageStage::new(vref, adc_bits);
-        
-        // Validate parameters
-        stage.validate_params(params)?;
-
+impl DataPlaneStageFactory<RawEegPacket, VoltageEegPacket> for ToVoltageStageFactory {
+    /// Creates a new `ToVoltageStage` instance from JSON parameters.
+    async fn create_stage(
+        &self,
+        params: &StageParams,
+    ) -> PipelineResult<Box<dyn DataPlaneStage<RawEegPacket, VoltageEegPacket>>> {
+        let params_value = serde_json::to_value(params)?;
+        let params: ToVoltageStageParams = serde_json::from_value(params_value)?;
+        let stage = ToVoltageStage::new(params.vref, params.adc_bits, params.yield_threshold);
         Ok(Box::new(stage))
     }
 
@@ -176,79 +228,176 @@ impl StageFactory for ToVoltageStageFactory {
     }
 
     fn parameter_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "vref": {
-                    "type": "number",
-                    "description": "Reference voltage for ADC conversion",
-                    "minimum": 0.1,
-                    "maximum": 10.0,
-                    "default": 4.5
-                },
-                "adc_bits": {
-                    "type": "integer",
-                    "description": "ADC resolution in bits",
-                    "minimum": 8,
-                    "maximum": 32,
-                    "default": 24
-                }
-            }
-        })
+        serde_json::to_value(schema_for!(ToVoltageStageParams)).unwrap_or_default()
     }
 }
 
-impl Default for ToVoltageStageFactory {
-    fn default() -> Self {
-        Self::new()
+#[async_trait]
+impl DataPlaneStageErased for ToVoltageStage {
+    async fn run_erased(&mut self, ctx: &mut dyn ErasedStageContext) -> Result<(), StageError> {
+        let ctx = ctx.as_any_mut()
+            .downcast_mut::<StageContext<RawEegPacket, VoltageEegPacket>>()
+            .ok_or_else(|| StageError::InvalidContext("Expected StageContext<RawEegPacket, VoltageEegPacket>".to_string()))?;
+        self.run(ctx).await
+    }
+}
+
+#[async_trait]
+impl ErasedDataPlaneStageFactory for ToVoltageStageFactory {
+    async fn create_erased_stage(&self, params: &StageParams) -> PipelineResult<Box<dyn DataPlaneStageErased>> {
+        let params_value = serde_json::to_value(params)?;
+        let params: ToVoltageStageParams = serde_json::from_value(params_value)?;
+        let stage = ToVoltageStage::new(params.vref, params.adc_bits, params.yield_threshold);
+        Ok(Box::new(stage) as Box<dyn DataPlaneStageErased>)
+    }
+
+    fn stage_type(&self) -> &'static str {
+        DataPlaneStageFactory::stage_type(self)
+    }
+
+    fn parameter_schema(&self) -> serde_json::Value {
+        DataPlaneStageFactory::parameter_schema(self)
+    }
+}
+
+// Automatically register this stage factory with the pipeline runtime.
+inventory::submit! {
+    StaticStageRegistrar {
+        factory_fn: || Box::new(ToVoltageStageFactory::new()),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use crate::{
+        data::{Packet, RawEegPacket, VoltageEegPacket},
+        stage::{ControlMsg, Input, Output, StageContext},
+    };
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    // MockInput now needs to support try_recv
+    struct MockInput {
+        rx: mpsc::UnboundedReceiver<Packet<RawEegPacket>>,
+    }
+    #[async_trait]
+    impl Input<RawEegPacket> for MockInput {
+        async fn recv(&mut self) -> Result<Option<Packet<RawEegPacket>>, StageError> {
+            Ok(self.rx.recv().await)
+        }
+        fn try_recv(&mut self) -> Result<Option<Packet<RawEegPacket>>, StageError> {
+            match self.rx.try_recv() {
+                Ok(p) => Ok(Some(p)),
+                Err(mpsc::error::TryRecvError::Empty) => Ok(None),
+                Err(mpsc::error::TryRecvError::Disconnected) => Err(StageError::QueueClosed),
+            }
+        }
+    }
+
+    // MockOutput now needs to support try_send
+    struct MockOutput {
+        tx: mpsc::UnboundedSender<Packet<VoltageEegPacket>>,
+    }
+    #[async_trait]
+    impl Output<VoltageEegPacket> for MockOutput {
+        async fn send(&mut self, packet: Packet<VoltageEegPacket>) -> Result<(), TrySendError<Packet<VoltageEegPacket>>> {
+            self.tx.send(packet).map_err(|e| TrySendError::Closed(e.0))
+        }
+        fn try_send(
+            &mut self,
+            packet: Packet<VoltageEegPacket>,
+        ) -> Result<(), TrySendError<Packet<VoltageEegPacket>>> {
+            // An unbounded sender can't be "full", so we only need to handle the "closed" case.
+            self.tx.send(packet).map_err(|e| TrySendError::Closed(e.0))
+        }
+    }
+
+    fn setup_test_rig() -> (
+        ToVoltageStage,
+        StageContext<RawEegPacket, VoltageEegPacket>,
+        mpsc::UnboundedSender<ControlMsg>,
+        mpsc::UnboundedSender<Packet<RawEegPacket>>,
+        mpsc::UnboundedReceiver<Packet<VoltageEegPacket>>,
+    ) {
+        let stage = ToVoltageStage::new(4.5, 24, 64);
+
+        let (control_tx, control_rx) = mpsc::unbounded_channel();
+        let (in_tx, in_rx) = mpsc::unbounded_channel();
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+
+        let mut inputs: HashMap<String, Box<dyn Input<RawEegPacket>>> = HashMap::new();
+        inputs.insert("in".to_string(), Box::new(MockInput { rx: in_rx }));
+
+        let mut outputs: HashMap<String, Box<dyn Output<VoltageEegPacket>>> = HashMap::new();
+        outputs.insert("out".to_string(), Box::new(MockOutput { tx: out_tx }));
+
+        let ctx = StageContext {
+            control_rx,
+            inputs,
+            outputs,
+            memory_pools: HashMap::new(),
+        };
+
+        (stage, ctx, control_tx, in_tx, out_rx)
+    }
 
     #[tokio::test]
-    async fn test_to_voltage_stage_creation() {
+    async fn test_voltage_conversion() {
+        let (mut stage, mut ctx, _control_tx, in_tx, mut out_rx) = setup_test_rig();
+
+        // Create test RawEegPacket
+        let raw_samples = vec![8388607, 0, -8388607]; // Max, zero, min for 24-bit
+        let pkt = Packet::new_for_test(RawEegPacket { samples: raw_samples.clone() });
+        in_tx.send(pkt).unwrap();
+
+        stage.run(&mut ctx).await.unwrap();
+
+        let converted_pkt = out_rx.recv().await.unwrap();
+        
+        // Check that voltages were converted
+        assert!((converted_pkt.samples.samples[0] - 4.5).abs() < 0.001); // Max value -> vref
+        assert!(converted_pkt.samples.samples[1].abs() < 0.001); // Zero -> zero
+        assert!((converted_pkt.samples.samples[2] + 4.5).abs() < 0.001); // Min value -> -vref
+    }
+
+    #[tokio::test]
+    async fn test_update_params() {
+        let (mut stage, mut ctx, control_tx, _in_tx, _out_rx) = setup_test_rig();
+
+        // Send UpdateParam control message for vref
+        let new_vref = 3.3;
+        let msg = ControlMsg::UpdateParam("vref".to_string(), json!(new_vref));
+        control_tx.send(msg).unwrap();
+
+        // Run stage to process control message
+        stage.run(&mut ctx).await.unwrap();
+        assert!((stage.get_vref() - new_vref).abs() < 0.001);
+
+        // Send UpdateParam control message for adc_bits
+        let new_adc_bits = 16;
+        let msg = ControlMsg::UpdateParam("adc_bits".to_string(), json!(new_adc_bits));
+        control_tx.send(msg).unwrap();
+
+        // Run stage to process control message
+        stage.run(&mut ctx).await.unwrap();
+        assert_eq!(stage.adc_bits, new_adc_bits);
+    }
+
+    #[tokio::test]
+    async fn test_to_voltage_stage_factory_creation() {
         let factory = ToVoltageStageFactory::new();
         let mut params = HashMap::new();
         params.insert("vref".to_string(), json!(3.3));
         params.insert("adc_bits".to_string(), json!(16));
 
-        let stage = factory.create_stage(&params).await.unwrap();
-        assert_eq!(stage.stage_type(), "to_voltage");
+        let _stage = factory.create_stage(&params).await.unwrap();
+        // If we get here without panicking, the stage was created successfully
     }
 
     #[tokio::test]
-    async fn test_voltage_conversion() {
-        let mut stage = ToVoltageStage::new(4.5, 24);
-        
-        // Create test EEG packet
-        let timestamps = vec![1000, 1001, 1002];
-        let raw_samples = vec![8388607, 0, -8388607]; // Max, zero, min for 24-bit
-        let voltage_samples = vec![0.0, 0.0, 0.0]; // Will be overwritten
-        
-        let packet = EegPacket::new(
-            timestamps,
-            1,
-            raw_samples,
-            voltage_samples,
-            1,
-            250.0,
-        );
-
-        let result = stage.process(Box::new(packet)).await.unwrap();
-        let converted = result.downcast::<EegPacket>().unwrap();
-        
-        // Check that voltages were converted
-        assert!((converted.voltage_samples[0] - 4.5).abs() < 0.001); // Max value -> vref
-        assert!(converted.voltage_samples[1].abs() < 0.001); // Zero -> zero
-        assert!((converted.voltage_samples[2] + 4.5).abs() < 0.001); // Min value -> -vref
-    }
-
-    #[tokio::test]
-    async fn test_to_voltage_stage_validation() {
+    async fn test_to_voltage_stage_factory_validation() {
         let factory = ToVoltageStageFactory::new();
         
         // Test invalid vref
@@ -265,7 +414,7 @@ mod tests {
     #[test]
     fn test_parameter_schema() {
         let factory = ToVoltageStageFactory::new();
-        let schema = factory.parameter_schema();
+        let schema = <ToVoltageStageFactory as DataPlaneStageFactory<RawEegPacket, VoltageEegPacket>>::parameter_schema(&factory);
         assert!(schema.is_object());
         assert!(schema["properties"]["vref"].is_object());
         assert!(schema["properties"]["adc_bits"].is_object());

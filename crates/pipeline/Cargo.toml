@@ -16,11 +16,21 @@ thiserror = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 tokio-util = "0.7"
 crossbeam-utils = "0.8"
+crossbeam-queue = "0.3" # Added for ArrayQueue
 schemars = "0.8"
 inventory = "0.3"
+rtrb = { version = "0.2", optional = true } # Real-time ring buffer
+loom = { version = "0.7", optional = true } # For concurrency testing
+tokio-tungstenite = "0.20" # WebSocket support
+futures-util = "0.3" # For WebSocket stream handling
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
+
+[features]
+default = []
+rtrb = ["dep:rtrb"] # Enable rtrb queue backend
+loom = ["dep:loom"] # Enable loom testing
 
 [[example]]
 name = "basic_pipeline"

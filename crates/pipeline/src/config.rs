@@ -14,8 +14,14 @@ pub struct PipelineConfig {
     pub version: String,
     /// Pipeline metadata
     pub metadata: PipelineMetadata,
+    /// Memory pool configurations for the data plane
+    #[serde(default)]
+    pub memory_pools: Vec<MemoryPoolConfig>,
     /// Stage definitions
     pub stages: Vec<StageConfig>,
+    /// Connection configurations between stages
+    #[serde(default)]
+    pub connections: Vec<ConnectionConfig>,
 }
 
 /// Pipeline metadata
@@ -62,6 +68,50 @@ fn default_enabled() -> bool {
     true
 }
 
+/// Memory pool configuration for the data plane
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryPoolConfig {
+    /// Unique name for this memory pool
+    pub name: String,
+    /// Data type this pool manages (e.g., "RawEegPacket", "VoltageEegPacket")
+    pub data_type: String,
+    /// Number of packets to pre-allocate in this pool
+    pub capacity: usize,
+    /// Size of each packet's data buffer in bytes
+    pub packet_size: usize,
+    /// Optional description
+    pub description: Option<String>,
+}
+
+/// Connection configuration between stages
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectionConfig {
+    /// Source stage name
+    pub from: String,
+    /// Destination stage name
+    pub to: String,
+    /// Output port name on source stage (default: "out")
+    #[serde(default = "default_output_port")]
+    pub from_port: String,
+    /// Input port name on destination stage (default: "in")
+    #[serde(default = "default_input_port")]
+    pub to_port: String,
+    /// Queue capacity for this connection (None for unbounded)
+    pub queue_capacity: Option<usize>,
+    /// Optional description
+    pub description: Option<String>,
+}
+
+/// Default output port name
+fn default_output_port() -> String {
+    "out".to_string()
+}
+
+/// Default input port name
+fn default_input_port() -> String {
+    "in".to_string()
+}
+
 /// Sink configuration for terminal stages
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SinkConfig {
@@ -94,8 +144,24 @@ impl PipelineConfig {
                 modified_at: now,
                 tags: vec![],
             },
+            memory_pools: vec![],
             stages: vec![],
+            connections: vec![],
         }
+    }
+
+    /// Add a memory pool to the pipeline
+    pub fn add_memory_pool(&mut self, pool: MemoryPoolConfig) -> PipelineResult<()> {
+        // Check for duplicate pool names
+        if self.memory_pools.iter().any(|p| p.name == pool.name) {
+            return Err(PipelineError::InvalidConfiguration {
+                message: format!("Memory pool name '{}' already exists", pool.name),
+            });
+        }
+
+        self.memory_pools.push(pool);
+        self.metadata.modified_at = current_timestamp();
+        Ok(())
     }
 
     /// Add a stage to the pipeline
@@ -108,6 +174,27 @@ impl PipelineConfig {
         }
 
         self.stages.push(stage);
+        self.metadata.modified_at = current_timestamp();
+        Ok(())
+    }
+
+    /// Add a connection between stages
+    pub fn add_connection(&mut self, connection: ConnectionConfig) -> PipelineResult<()> {
+        // Check for duplicate connections
+        if self.connections.iter().any(|c| {
+            c.from == connection.from && c.to == connection.to &&
+            c.from_port == connection.from_port && c.to_port == connection.to_port
+        }) {
+            return Err(PipelineError::InvalidConfiguration {
+                message: format!(
+                    "Connection from '{}:{}' to '{}:{}' already exists",
+                    connection.from, connection.from_port,
+                    connection.to, connection.to_port
+                ),
+            });
+        }
+
+        self.connections.push(connection);
         self.metadata.modified_at = current_timestamp();
         Ok(())
     }
@@ -142,6 +229,26 @@ impl PipelineConfig {
         self.stages.iter_mut().find(|s| s.name == name)
     }
 
+    /// Get a memory pool by name
+    pub fn get_memory_pool(&self, name: &str) -> Option<&MemoryPoolConfig> {
+        self.memory_pools.iter().find(|p| p.name == name)
+    }
+
+    /// Get a mutable reference to a memory pool by name
+    pub fn get_memory_pool_mut(&mut self, name: &str) -> Option<&mut MemoryPoolConfig> {
+        self.memory_pools.iter_mut().find(|p| p.name == name)
+    }
+
+    /// Get connections for a specific stage (as source)
+    pub fn get_outgoing_connections(&self, stage_name: &str) -> Vec<&ConnectionConfig> {
+        self.connections.iter().filter(|c| c.from == stage_name).collect()
+    }
+
+    /// Get connections for a specific stage (as destination)
+    pub fn get_incoming_connections(&self, stage_name: &str) -> Vec<&ConnectionConfig> {
+        self.connections.iter().filter(|c| c.to == stage_name).collect()
+    }
+
     /// Validate the pipeline configuration
     pub fn validate(&self) -> PipelineResult<()> {
         // Check for empty pipeline
@@ -150,6 +257,9 @@ impl PipelineConfig {
                 message: "Pipeline must contain at least one stage".to_string(),
             });
         }
+
+        // Validate memory pools
+        self.validate_memory_pools()?;
 
         // Check for circular dependencies
         self.check_circular_dependencies()?;
@@ -168,6 +278,64 @@ impl PipelineConfig {
             }
         }
 
+        // Validate connections
+        self.validate_connections()?;
+
+        Ok(())
+    }
+
+    /// Validate memory pool configurations
+    fn validate_memory_pools(&self) -> PipelineResult<()> {
+        for pool in &self.memory_pools {
+            if pool.capacity == 0 {
+                return Err(PipelineError::InvalidConfiguration {
+                    message: format!("Memory pool '{}' must have capacity > 0", pool.name),
+                });
+            }
+            if pool.packet_size == 0 {
+                return Err(PipelineError::InvalidConfiguration {
+                    message: format!("Memory pool '{}' must have packet_size > 0", pool.name),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate connection configurations
+    fn validate_connections(&self) -> PipelineResult<()> {
+        for connection in &self.connections {
+            // Check that source stage exists
+            if !self.stages.iter().any(|s| s.name == connection.from) {
+                return Err(PipelineError::InvalidConfiguration {
+                    message: format!(
+                        "Connection references non-existent source stage '{}'",
+                        connection.from
+                    ),
+                });
+            }
+
+            // Check that destination stage exists
+            if !self.stages.iter().any(|s| s.name == connection.to) {
+                return Err(PipelineError::InvalidConfiguration {
+                    message: format!(
+                        "Connection references non-existent destination stage '{}'",
+                        connection.to
+                    ),
+                });
+            }
+
+            // Validate queue capacity if specified
+            if let Some(capacity) = connection.queue_capacity {
+                if capacity == 0 {
+                    return Err(PipelineError::InvalidConfiguration {
+                        message: format!(
+                            "Connection from '{}' to '{}' has invalid queue capacity (must be > 0)",
+                            connection.from, connection.to
+                        ),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 

@@ -11,8 +11,13 @@ pub mod runtime;
 pub mod stages;
 pub mod error;
 pub mod data;
+pub mod queue;
+pub mod control;
 #[macro_use]
 pub mod macros;
+
+#[cfg(test)]
+mod tests;
 
 // Re-export commonly used types
 pub use stage::*;

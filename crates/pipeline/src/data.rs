@@ -3,9 +3,13 @@
 //! This module defines the type-safe data structures used for communication
 //! between pipeline stages, replacing the unsafe `Box<dyn Any>` approach.
 
-use std::sync::Arc;
+use std::sync::{Arc, Weak, Mutex};
 use serde::{Serialize, Deserialize};
 use eeg_types::{EegPacket, FilteredEegPacket, FftPacket};
+use crossbeam_queue::ArrayQueue;
+use anyhow::{Result, anyhow};
+use tracing::{debug, error};
+use std::fmt::Debug; // Added for Debug trait bound
 
 /// Pipeline data that can flow between stages
 #[derive(Debug, Clone)]
@@ -231,10 +235,221 @@ impl WebSocketData {
     }
 }
 
+/// The header contains metadata about the packet.
+#[derive(Debug, Clone, Copy)]
+pub struct PacketHeader {
+    pub batch_size: usize,
+    pub timestamp: u64,
+}
+
+/// A smart pointer that contains a header and a buffer.
+/// Its `Drop` implementation automatically returns the buffer to its origin pool.
+#[derive(Debug)]
+pub struct Packet<T: TakeForDrop + Default + Debug> { // Added required bounds
+    pub header: PacketHeader,
+    pub samples: T,
+    // A weak reference to the pool this packet came from.
+    // This allows the packet to return itself to the pool when dropped,
+    // without creating a circular reference that would prevent the pool from being dropped.
+    pool: Weak<Mutex<MemoryPool<T>>>,
+}
+
+impl<T: TakeForDrop + Default + Debug> Packet<T> { // Added required bounds
+    /// Creates a new packet associated with a memory pool.
+    pub fn new(header: PacketHeader, samples: T, pool: Weak<Mutex<MemoryPool<T>>>) -> Self {
+        Self {
+            header,
+            samples,
+            pool,
+        }
+    }
+
+    /// Returns a weak reference to the memory pool this packet belongs to.
+    pub fn pool(&self) -> Weak<Mutex<MemoryPool<T>>> {
+        self.pool.clone()
+    }
+
+    /// A constructor for easily creating packets in unit tests.
+    #[cfg(test)]
+    pub fn new_for_test(samples: T) -> Self {
+        Self {
+            header: PacketHeader {
+                batch_size: 0, // Not used in these tests
+                timestamp: 0,  // Not used in these tests
+            },
+            samples,
+            pool: Weak::new(), // No pool association for test packets
+        }
+    }
+
+    /// Create a new packet for testing purposes with custom header (without a memory pool)
+    #[cfg(test)]
+    pub fn new_test(header: PacketHeader, samples: T) -> Self {
+        Self {
+            header,
+            samples,
+            pool: Weak::new(), // No pool association for test packets
+        }
+    }
+}
+
+impl<T: TakeForDrop + Default + Debug> Drop for Packet<T> { // Added required bounds
+    fn drop(&mut self) {
+        if let Some(pool_arc) = self.pool.upgrade() {
+            let pool_mutex = pool_arc.lock().unwrap();
+            // SAFETY: We are returning the `samples` back to the pool.
+            // The `samples` field is moved out of the Packet, and the Packet is then dropped.
+            // The MemoryPool ensures that the capacity is correct for the type T.
+            // This relies on the invariant that the `samples` field was originally acquired from this pool.
+            let samples_to_return = std::mem::replace(&mut self.samples, T::default()).take_for_drop();
+            match pool_mutex.queue.push(samples_to_return) {
+                Ok(_) => debug!("Packet returned to pool"),
+                Err(_) => error!("Failed to return packet to pool: queue is full or disconnected"),
+            }
+        } else {
+            debug!("Packet dropped without an associated pool or pool was already dropped.");
+        }
+    }
+}
+
+// Helper trait to allow taking ownership of `samples` in `Drop`
+// This is a workaround because `Drop` takes `&mut self`, and we need to move `samples` out.
+// In a real scenario, `T` would likely be a `Vec<f32>` or similar, and we'd manage its capacity.
+// For now, we'll assume `T` can be "emptied" or reset.
+pub trait TakeForDrop: Sized { // Added Sized bound
+    fn take_for_drop(self) -> Self;
+}
+
+impl TakeForDrop for Vec<f32> {
+    fn take_for_drop(mut self) -> Self {
+        self.clear(); // Clear the vector, but keep capacity
+        self
+    }
+}
+
+// Placeholder for other types that might be used as `T` in `Packet`
+impl TakeForDrop for VoltageEegPacket {
+    fn take_for_drop(mut self) -> Self {
+        self.samples.clear();
+        self
+    }
+}
+
+/// A thread-safe, lock-free memory pool for pre-allocated packets.
+#[derive(Debug)]
+pub struct MemoryPool<T: Default + TakeForDrop + Debug> { // Added Debug bound
+    queue: ArrayQueue<T>,
+    capacity: usize,
+}
+
+impl<T: Default + TakeForDrop + Debug> MemoryPool<T> { // Added Debug bound
+    /// Creates a new `MemoryPool` with a given capacity.
+    pub fn new(capacity: usize) -> Self {
+        let queue = ArrayQueue::new(capacity);
+        for _ in 0..capacity {
+            queue.push(T::default()).expect("Failed to pre-fill memory pool");
+        }
+        debug!("MemoryPool created with capacity: {}", capacity);
+        Self { queue, capacity }
+    }
+
+    /// Asynchronously acquires a packet from the pool. Waits until a packet is available.
+    pub async fn acquire(self_arc: &Arc<Mutex<Self>>, header: PacketHeader) -> Result<Packet<T>> { // Changed self to self_arc
+        let pool_weak = Arc::downgrade(self_arc);
+        loop {
+            let packet_option = {
+                let pool = self_arc.lock().unwrap();
+                pool.queue.pop()
+            };
+            
+            match packet_option {
+                Some(mut samples) => {
+                    // Reset samples before returning
+                    samples = samples.take_for_drop();
+                    let remaining = {
+                        let pool = self_arc.lock().unwrap();
+                        pool.queue.len()
+                    };
+                    debug!("Packet acquired from pool. Remaining: {}", remaining);
+                    return Ok(Packet::new(header, samples, pool_weak));
+                },
+                None => {
+                    debug!("MemoryPool is empty, waiting for a packet to be returned.");
+                    tokio::task::yield_now().await; // Yield to allow other tasks to run and potentially return packets
+                }
+            }
+        }
+    }
+
+    /// Tries to acquire a packet from the pool without blocking.
+    pub fn try_acquire(self_arc: &Arc<Mutex<Self>>, header: PacketHeader) -> Option<Packet<T>> { // Changed self to self_arc
+        let pool_weak = Arc::downgrade(self_arc);
+        match self_arc.lock().unwrap().queue.pop() { // Changed self to self_arc
+            Some(mut samples) => {
+                // Reset samples before returning
+                samples = samples.take_for_drop();
+                debug!("Packet acquired from pool (non-blocking). Remaining: {}", self_arc.lock().unwrap().queue.len()); // Changed self to self_arc
+                Some(Packet::new(header, samples, pool_weak))
+            },
+            None => {
+                debug!("MemoryPool is empty (non-blocking).");
+                None
+            }
+        }
+    }
+
+    /// Returns the current number of available packets in the pool.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns the total capacity of the pool.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Checks if the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Checks if the pool is full.
+    pub fn is_full(&self) -> bool {
+        self.queue.is_full()
+    }
+}
+
+/// Example data packet for raw EEG data.
+#[derive(Debug, Default)]
+pub struct RawEegPacket {
+    pub samples: Vec<i32>, // Raw ADC values
+}
+
+/// Example data packet for voltage data.
+#[derive(Debug, Default)]
+pub struct VoltageEegPacket {
+    pub samples: Vec<f32>,
+}
+
+impl TakeForDrop for RawEegPacket {
+    fn take_for_drop(mut self) -> Self {
+        self.samples.clear();
+        self
+    }
+}
+
+/// A trait for any type that can be used as the `samples` field in a `Packet`.
+/// This allows for type erasure in `StageContext` and other generic contexts.
+pub trait AnyPacketType: TakeForDrop + Default + Debug + Send + Sync + 'static {}
+
+impl AnyPacketType for RawEegPacket {}
+impl AnyPacketType for VoltageEegPacket {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use eeg_types::EegPacket;
+    use tokio::time::{timeout, Duration};
 
     #[test]
     fn test_pipeline_data_timestamp() {
@@ -270,41 +485,90 @@ mod tests {
         assert_eq!(csv_data.channels.len(), 1);
         assert_eq!(csv_data.channels[0].samples, vec![1.0, 2.0]);
     }
-}
-// --- New Data Plane Types ---
 
-/// A smart pointer that contains a header and a buffer.
-/// In a real implementation, this would also manage the memory lifetime
-/// and automatically return its buffer to a MemoryPool on Drop.
-#[derive(Debug)]
-pub struct Packet<T> {
-    pub header: PacketHeader,
-    pub samples: T, // Simplified for now, in reality this would be a more complex payload struct
-}
+    #[tokio::test]
+    async fn test_memory_pool_acquire_release() {
+        let pool_capacity = 2;
+        let pool = Arc::new(Mutex::new(MemoryPool::<Vec<f32>>::new(pool_capacity)));
 
-/// The header contains metadata about the packet.
-#[derive(Debug, Clone, Copy)]
-pub struct PacketHeader {
-    pub batch_size: usize,
-    pub timestamp: u64,
-}
+        assert_eq!(pool.lock().unwrap().len(), pool_capacity);
 
-/// Example data packet for voltage data.
-#[derive(Debug, Default)]
-pub struct VoltageEegPacket {
-    pub samples: Vec<f32>,
-}
+        let header = PacketHeader { batch_size: 10, timestamp: 123 };
+        let pkt1 = MemoryPool::acquire(&pool, header).await.unwrap(); // Corrected call
+        assert_eq!(pool.lock().unwrap().len(), pool_capacity - 1);
+        assert_eq!(pkt1.header.batch_size, 10);
 
-impl<T> Packet<T> {
-    /// A constructor for easily creating packets in unit tests.
-    #[cfg(test)]
-    pub fn new_for_test(samples: T) -> Self {
-        Self {
-            header: PacketHeader {
-                batch_size: 0, // Not used in these tests
-                timestamp: 0,  // Not used in these tests
-            },
-            samples,
-        }
+        let pkt2 = MemoryPool::acquire(&pool, header).await.unwrap(); // Corrected call
+        assert_eq!(pool.lock().unwrap().len(), pool_capacity - 2);
+
+        // Pool should be empty now
+        assert!(pool.lock().unwrap().is_empty());
+
+        // Dropping pkt1 should return it to the pool
+        drop(pkt1);
+        assert_eq!(pool.lock().unwrap().len(), pool_capacity - 1);
+
+        // Dropping pkt2 should return it to the pool
+        drop(pkt2);
+        assert_eq!(pool.lock().unwrap().len(), pool_capacity);
+    }
+
+    #[tokio::test]
+    async fn test_memory_pool_try_acquire() {
+        let pool_capacity = 1;
+        let pool = Arc::new(Mutex::new(MemoryPool::<Vec<f32>>::new(pool_capacity)));
+
+        let header = PacketHeader { batch_size: 10, timestamp: 123 };
+        let pkt1 = MemoryPool::try_acquire(&pool, header).unwrap(); // Corrected call
+        assert_eq!(pool.lock().unwrap().len(), 0);
+
+        // Try to acquire when empty, should return None
+        assert!(MemoryPool::try_acquire(&pool, header).is_none()); // Corrected call
+
+        drop(pkt1);
+        assert_eq!(pool.lock().unwrap().len(), 1);
+
+        let pkt2 = MemoryPool::try_acquire(&pool, header).unwrap(); // Corrected call
+        assert_eq!(pool.lock().unwrap().len(), 0);
+        drop(pkt2);
+    }
+
+    #[tokio::test]
+    async fn test_memory_pool_acquire_waits() {
+        let pool_capacity = 1;
+        let pool = Arc::new(Mutex::new(MemoryPool::<Vec<f32>>::new(pool_capacity)));
+
+        let header = PacketHeader { batch_size: 10, timestamp: 123 };
+        let _pkt1 = MemoryPool::acquire(&pool, header).await.unwrap(); // Takes the only packet // Corrected call
+
+        let pool_clone = Arc::clone(&pool);
+        let acquire_task = tokio::spawn(async move {
+            // This should wait until a packet is returned
+            MemoryPool::acquire(&pool_clone, header).await // Corrected call
+        });
+
+        // Give the acquire_task a moment to start waiting
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(pool.lock().unwrap().len(), 0); // Still empty
+
+        // Drop the first packet, which should unblock the acquire_task
+        drop(_pkt1);
+
+        // The acquire_task should now complete successfully
+        let result = timeout(Duration::from_millis(100), acquire_task).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
+        assert_eq!(pool.lock().unwrap().len(), 0); // Packet acquired by the task
+    }
+
+    #[tokio::test]
+    async fn test_packet_new_for_test() {
+        let samples = vec![1.0, 2.0, 3.0];
+        let pkt = Packet::new_for_test(samples.clone());
+        assert_eq!(pkt.samples, samples);
+        assert_eq!(pkt.header.batch_size, 0);
+        assert_eq!(pkt.header.timestamp, 0);
+        // Ensure it doesn't panic on drop without a real pool
+        drop(pkt);
     }
 }

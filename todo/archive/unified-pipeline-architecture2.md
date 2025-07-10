@@ -1,3 +1,7 @@
+> [!WARNING]
+> # DEPRECATED: Outdated Architectural Vision
+> This document describes an architectural vision for a dynamic, ABI-driven plugin system that is NOT currently implemented in the codebase. The current implementation uses a pure-Rust, inventory-based static plugin registration system. This document is retained for historical context but should not be used as a reference for the current architecture.
+
 # Architecture Plan: A Unified, Dynamic Plugin System
 
 ........ feedback

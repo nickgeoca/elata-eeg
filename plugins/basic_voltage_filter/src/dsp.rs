@@ -161,7 +161,7 @@ impl LowpassFilter {
 /// Signal processor for applying various filters to EEG data
 #[derive(Clone)]
 pub struct SignalProcessor {
-    _sample_rate: u32,
+    pub sample_rate: u32, // Made public for testing
     num_channels: usize,
     powerline_notch_filters: Option<Vec<NotchFilter>>, // Holds 50Hz OR 60Hz filters, or None
     highpass_filters: Vec<HighpassFilter>,
@@ -204,7 +204,7 @@ impl SignalProcessor {
         }
         
         Self {
-            _sample_rate: sample_rate,
+            sample_rate, // Renamed from _sample_rate
             num_channels,
             powerline_notch_filters,
             highpass_filters: (0..num_channels)
@@ -279,10 +279,10 @@ impl SignalProcessor {
     pub fn reset(&mut self, new_sample_rate: u32, new_num_channels: usize, dsp_high_pass_cutoff: f32, dsp_low_pass_cutoff: f32, powerline_filter_hz: Option<u32>) {
         println!("[SignalProcessor::reset] Resetting with sample_rate: {}, num_channels: {}, HP_cutoff: {}, LP_cutoff: {}, powerline_filter_hz: {:?}",
                  new_sample_rate, new_num_channels, dsp_high_pass_cutoff, dsp_low_pass_cutoff, powerline_filter_hz);
-        self._sample_rate = new_sample_rate;
+        self.sample_rate = new_sample_rate; // Renamed from _sample_rate
         self.num_channels = new_num_channels;
         // Recreate all filters
-        let sample_rate = self._sample_rate as f32;
+        let sample_rate = self.sample_rate as f32; // Renamed from _sample_rate
         
         // Create powerline notch filters based on the configuration
         self.powerline_notch_filters = match powerline_filter_hz {

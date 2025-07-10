@@ -1,3 +1,148 @@
+# Should we remove yield_threshold
+# Why “just a voltage converter” sprawls to 400-ish lines
+
+| Slice of file                                                                  | Rough LOC | Purpose                                                              |
+| ------------------------------------------------------------------------------ | --------- | -------------------------------------------------------------------- |
+| **Core math** (`raw_to_voltage`, scaling pre-calc)                             | **≈ 10**  | The actual conversion                                                |
+| Stage plumbing (trait impls, lazy I/O, param hot-reload, back-pressure, yield) | ≈ 120     | Glue every stage needs right now                                     |
+| Factory + type-erased wrappers (`DataPlaneStageFactory`, `Erased*`)            | ≈ 60      | Let the runtime create the stage from JSON and store it behind `dyn` |
+| `inventory::submit!` registration                                              | 5         | Auto-register with the graph                                         |
+| Serde + schemars param struct                                                  | 25        | Runtime validation & schema export                                   |
+| **Unit tests & mocks**                                                         | **≈ 180** | Three async tests, one schema test, plus `MockInput/Output` helpers  |
+| Comments & doc-strings                                                         | ≈ 30      | Explanatory text                                                     |
+
+So only \~10 lines are physics; the rest is *framework boilerplate* plus a healthy test suite. That’s why it feels bloated.
+
+---
+
+## Is that bad? Depends on your goals
+
+| Goal                                        | Verdict                                                                 |
+| ------------------------------------------- | ----------------------------------------------------------------------- |
+| **High perf, hot path**                     | Boilerplate is mostly compile-time; in release build it optimises away. |
+| **Code clarity / contributor friendliness** | 400 LOC for “x ⇢ y” is noisy. Worth trimming or hiding.                 |
+| **Re-use across stages**                    | The repetitive chunks beg for macros or helper traits.                  |
+
+---
+
+## Tactics to shrink & DRY things up
+
+1. **Macro-generate the common scaffolding**
+
+   ```rust
+   stage_def! {
+       name = ToVoltageStage,
+       inputs = RawEegPacket,
+       outputs = VoltageEegPacket,
+       params = {
+           vref: f32 = 4.5,
+           adc_bits: u8 = 24,
+           yield_threshold: u32 = 64,
+       },
+       logic = |self, pkt, out| {
+           let scale = self.scale.load(Ordering::Acquire);
+           pkt.samples.iter()
+               .map(|&r| r as f32 * scale)
+               .collect_into(&mut out.samples);
+       }
+   }
+   ```
+
+   A single `stage_def!` could expand into the trait impls, factory, schema export, and inventory registration.
+
+2. **Move unit tests into `tests/` directory**
+
+   By convention Rust integration tests live in `tests/*.rs`, keeping library files lean. You can still mock the I/O helpers there.
+
+3. **Offer a `BaseStage<TIn,TOut>` helper**
+
+   Encapsulate:
+
+   * cached `input_rx` / `output_tx`
+   * the `process_packets` drain loop
+   * yield logic
+
+   Concrete stages override a single `fn transform(&self, in:&TIn, out:&mut TOut)`.
+
+4. **Pre-compute the scale factor**
+
+   Instead of storing `vref` & `adc_bits` separately and re-doing the divide every sample:
+
+   ```rust
+   fn set_vref_bits(&self, vref:f32, bits:u8) {
+       let scale = vref / ((1 << (bits-1)) - 1) as f32;
+       self.scale.store(scale.to_bits(), Ordering::Release);
+   }
+   ```
+
+   Then `raw * scale` in the tight loop—no division.
+
+5. **Consider dropping atomic for `vref` if hot-reload isn’t critical**
+
+   A simple `RwLock<f32>` or even a plain field updated only on control messages is cheaper to read in the loop.
+
+6. **Hide erased-trait dance behind the macro**
+
+   Most contributors never need to spell out `DataPlaneStageErased`/`ErasedStageContext`.
+
+---
+
+### Quick metric after refactor
+
+* Macro invocation + domain logic + a few comments: **\~40 LOC**
+* Integration tests in `tests/to_voltage.rs`: as big as you like, but out of the main file.
+
+That keeps the pipeline ergonomic without losing safety or test coverage.
+
+---
+
+## Bottom line
+
+The file “looks right” in the sense that every section has a reason to exist, but you can:
+
+* **Consolidate boilerplate** with a macro or base-class pattern.
+* **Relocate tests** to trim the production file.
+* **Micro-optimise** the math (pre-computed scale) and data handling (reuse buffers).
+
+Do that and the voltage converter will shrink to something closer to what the domain complexity actually demands.
+
+..........
+Not crazy — just a trade-off.
+Below is a quick “sanity grid” so you can see where the macro / base-stage idea shines and where it bites.
+
+| Dimension                          | Status with **plain hand-written stages** | Status with **`stage_def!{…}` macro (or a BaseStage helper)**   |
+| ---------------------------------- | ----------------------------------------- | --------------------------------------------------------------- |
+| **Boilerplate**                    | High (5-7 impl blocks + mocks per file)   | Near-zero per new stage                                         |
+| **Contributor ramp-up**            | Easy to read, copy/paste; no macro magic  | One-time “how does this macro expand?” hurdle                   |
+| **Debugging / IDE jump-to-def**    | Straightforward                           | Harder; need `cargo expand` or RLS to see generated code        |
+| **Compile-time errors**            | Point at the offending line in the stage  | Often point inside macro expansion → noisier                    |
+| **Flexibility for oddball stages** | Total (you write whatever you want)       | You have to extend the macro every time you hit a new edge-case |
+| **Binary size / perf**             | Identical after inlining/O2               | Identical (macro disappears at compile time)                    |
+| **Long-term maintenance**          | N copies of similar code to patch         | One macro impl to patch, N copies just re-compile               |
+
+### When the macro pattern is worth it
+
+* **Many small stages** that all look the same apart from the math (exactly your case: gain, to-voltage, bias-remove, DC-offset, etc.).
+* **External contributors**: they write 20 lines of math, the pipeline “just works”.
+* **Hot-reload isn’t a goal** (because the macro approach assumes in-workspace compilation anyway).
+
+### When to skip the macro
+
+* You foresee **exotic stages** (multi-input joins, GPU kernels, variable output counts) that won’t fit the template.
+* Team members dislike macro indirection and prefer explicit code, even if verbose.
+* You plan to move back to a **runtime-loaded `.so` ABI** later; the macro would have to change again.
+
+### Practical middle-ground
+
+1. **Start with a small helper trait (`BaseStage`)** that hides the drain-loop / cached I/O handles. No macro yet.
+   *New stage skeleton*: 25-30 LOC.
+2. If you notice you’re still copy/pasting the same pattern after the third or fourth stage, graduate to a real macro or a code-gen build-script.
+3. Keep **unit tests in `tests/`** so production files stay lean no matter what.
+
+---
+
+So, no, it isn’t crazy; it’s a perfectly common Rust move for DSL-ish frameworks (think `actix_web::get!`, `serde::Serialize`, `tokio::main`). Just weigh the discoverability cost against the productivity boost, and introduce it only when you’re confident most stages are “cookie-cutter”.
+
 # Yaml style?  .. Medium Priority
 2.1 Strip it to the essentials, push the rest behind presets
 
