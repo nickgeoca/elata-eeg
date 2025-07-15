@@ -1,6 +1,6 @@
 use std::error::Error;
 use clap::Parser;
-use eeg_sensor::{AdcConfig, DriverType};
+use sensors::{AdcConfig, DriverType};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         board_driver: if args.mock { DriverType::MockEeg } else { DriverType::Ads1299 },
         batch_size: 4,
         vref: 4.5,
+        chips: vec![],
     };
 
     // Note: EegSystem has been moved to the device crate (elata_emu_v1 module)

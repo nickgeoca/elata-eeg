@@ -23,6 +23,9 @@ pub struct SensorMeta {
     /// True if the ADC output is two's complement.
     #[serde(default = "true_default")]
     pub is_twos_complement: bool,
+    /// Optional list of names for each channel in the data stream.
+    #[serde(default)]
+    pub channel_names: Vec<String>,
     /// Optional feature-gated tags for user-defined metadata.
     #[cfg(feature = "meta-tags")]
     #[serde(default)]
@@ -40,6 +43,7 @@ impl Default for SensorMeta {
             sample_rate: 1000,
             offset_code: 0,
             is_twos_complement: true,
+            channel_names: Vec::new(),
             #[cfg(feature = "meta-tags")]
             tags: HashMap::new(),
         }
@@ -84,9 +88,15 @@ mod arc_sensor_meta {
 
 /// A generic data packet that flows through the pipeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Packet<T> {
+pub struct PacketData<T> {
     pub header: PacketHeader,
     /// The sample data.
     /// Note: Consider `Arc<[T]>` or `Box<[T]>` in the future for true zero-copy from DMA buffers.
     pub samples: Vec<T>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum Packet {
+    RawI32(PacketData<i32>),
+    Voltage(PacketData<f32>),
 }

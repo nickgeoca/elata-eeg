@@ -1,33 +1,42 @@
 //! Basic pipeline example demonstrating the new, simplified architecture.
 
 use std::sync::Arc;
-use eeg_types::data::{Packet, PacketHeader, SensorMeta};
+use pipeline::data::{Packet, PacketData, PacketHeader, SensorMeta};
+use pipeline::config::StageConfig;
 use pipeline::control::PipelineEvent;
 use pipeline::stage::{Stage, StageContext};
-use pipeline::stages::to_voltage::ToVoltage;
+use pipeline::stages::to_voltage::ToVoltageFactory;
 use pipeline::error::StageError;
-use tokio::sync::mpsc;
+use crossbeam_channel as mpsc;
+use pipeline::registry::StageFactory;
 
 // A simple stage that doubles each sample.
 struct DoublerStage;
 
-#[async_trait::async_trait]
-impl Stage<f32, f32> for DoublerStage {
+impl Stage for DoublerStage {
     fn id(&self) -> &str {
         "DoublerStage"
     }
 
-    async fn process(&mut self, packet: Packet<f32>, _ctx: &mut StageContext) -> Result<Option<Packet<f32>>, StageError> {
-        let samples = packet.samples.into_iter().map(|s| s * 2.0).collect();
-        Ok(Some(Packet {
-            header: packet.header,
-            samples,
-        }))
+    fn process(
+        &mut self,
+        packet: Packet,
+        _ctx: &mut StageContext,
+    ) -> Result<Option<Packet>, StageError> {
+        if let Packet::Voltage(mut packet_data) = packet {
+            for sample in &mut packet_data.samples {
+                *sample *= 2.0;
+            }
+            Ok(Some(Packet::Voltage(packet_data)))
+        } else {
+            Err(StageError::BadConfig(
+                "Expected Packet::Voltage".to_string(),
+            ))
+        }
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Basic Pipeline Example");
     println!("======================");
 
@@ -41,33 +50,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_rate: 250,
         offset_code: 0,
         is_twos_complement: true,
+        channel_names: vec!["ch0".to_string(), "ch1".to_string(), "ch2".to_string(), "ch3".to_string()],
+        #[cfg(feature = "meta-tags")]
+        tags: Default::default(),
     });
 
-    let input_packet = Packet {
+    let input_packet = Packet::RawI32(PacketData {
         header: PacketHeader {
             ts_ns: 0,
             batch_size: 4,
-            meta: sensor_meta,
+            meta: sensor_meta.clone(),
         },
-        samples: vec![1000.0, 2000.0, -1000.0, -2000.0],
-    };
-    println!("Input Samples: {:?}", input_packet.samples);
+        samples: vec![1000i32, 2000, -1000, -2000],
+    });
+    if let Packet::RawI32(d) = &input_packet {
+        println!("Input Samples: {:?}", d.samples);
+    }
 
 
     // 2. Instantiate the stages
-    let mut to_voltage_stage = ToVoltage::default();
+    let mut to_voltage_stage = ToVoltageFactory::default().create(&StageConfig {
+        name: "to_voltage".to_string(),
+        stage_type: "ToVoltage".to_string(),
+        params: Default::default(),
+        inputs: Default::default(),
+    })?;
     let mut doubler_stage = DoublerStage;
-    let (event_tx, _) = mpsc::channel::<PipelineEvent>(10);
+    let (event_tx, _) = mpsc::unbounded::<PipelineEvent>();
     let mut ctx = StageContext::new(event_tx);
 
     // 3. Manually process the packet through the pipeline
     // Stage 1: Convert ADC counts to voltage
-    let voltage_packet = to_voltage_stage.process(input_packet, &mut ctx).await?.unwrap();
-    println!("After ToVoltage: {:?}", voltage_packet.samples);
+    let voltage_output = to_voltage_stage.process(input_packet, &mut ctx)?;
+    let voltage_packet = voltage_output.unwrap();
+    if let Packet::Voltage(d) = &voltage_packet {
+        println!("After ToVoltage: {:?}", d.samples);
+    }
 
     // Stage 2: Double the voltage values
-    let final_packet = doubler_stage.process(voltage_packet, &mut ctx).await?.unwrap();
-    println!("After Doubler:   {:?}", final_packet.samples);
+    let final_output = doubler_stage.process(voltage_packet, &mut ctx)?;
+    let final_packet = final_output.unwrap();
+    if let Packet::Voltage(d) = &final_packet {
+        println!("After Doubler:   {:?}", d.samples);
+    }
 
     println!("\nExample completed successfully!");
 

@@ -1,10 +1,9 @@
 use chrono::{DateTime, Local};
 use csv::Writer;
 use pipeline::control::{ControlCommand, CustomCommand};
-use pipeline::data::Packet;
+use pipeline::data::{Packet, PacketData};
 use pipeline::error::StageError;
 use pipeline::stage::{Stage, StageContext};
-use std::any::Any;
 use std::fs::File;
 use std::io;
 use std::sync::Arc;
@@ -118,21 +117,21 @@ impl Stage for CsvRecorderPlugin {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        match packet.downcast::<Packet<f32>>() {
-            Ok(pkt) => {
+    ) -> Result<Option<Packet>, StageError> {
+        match &packet {
+            Packet::Voltage(data) => {
                 let mut state = self.state.lock().unwrap();
                 if state.is_recording {
                     if let Some(writer) = state.writer.as_mut() {
-                        let samples_per_channel = pkt.samples.len() / self.num_channels;
+                        let samples_per_channel = data.samples.len() / self.num_channels;
                         for i in 0..samples_per_channel {
                             let mut record = Vec::with_capacity(1 + self.num_channels);
-                            record.push(pkt.header.ts_ns.to_string());
+                            record.push(data.header.ts_ns.to_string());
                             for ch in 0..self.num_channels {
                                 let sample_idx = i * self.num_channels + ch;
-                                record.push(pkt.samples[sample_idx].to_string());
+                                record.push(data.samples[sample_idx].to_string());
                             }
                             writer
                                 .write_record(&record)
@@ -140,9 +139,11 @@ impl Stage for CsvRecorderPlugin {
                         }
                     }
                 }
-                Ok(Some(Box::new(*pkt)))
             }
-            Err(packet) => Ok(Some(packet)),
+            // Ignore other packet types
+            _ => {}
         }
+        // Pass the packet through to the next stage
+        Ok(Some(packet))
     }
 }

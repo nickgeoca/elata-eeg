@@ -9,8 +9,7 @@ use pipeline::registry::{StageFactory, StageRegistry};
 use pipeline::runtime::{run, RuntimeMsg};
 use pipeline::stage::{Stage, StageContext};
 use serde_json::json;
-use std::any::Any;
-use std::sync::mpsc::{self, Sender};
+use crossbeam_channel::{self as mpsc, Sender};
 use std::sync::Arc;
 use std::thread;
 use tracing::{info, Level};
@@ -48,18 +47,20 @@ impl Stage for MultiplierStage {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+    ) -> Result<Option<Packet>, StageError> {
         info!("MultiplierStage processing packet");
-        let mut packet = packet
-            .downcast::<Packet<f32>>()
-            .map_err(|_| StageError::BadConfig("Expected Packet<f32>".to_string()))?;
-
-        for sample in &mut packet.samples {
-            *sample *= self.factor;
+        if let Packet::Voltage(mut packet_data) = packet {
+            for sample in &mut packet_data.samples {
+                *sample *= self.factor;
+            }
+            Ok(Some(Packet::Voltage(packet_data)))
+        } else {
+            Err(StageError::BadConfig(
+                "Expected Packet::Voltage".to_string(),
+            ))
         }
-        Ok(Some(packet as Box<dyn Any + Send>))
     }
 }
 
@@ -98,11 +99,11 @@ impl Stage for TestSink {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        if let Some(packet) = packet.downcast_ref::<Packet<f32>>() {
-            self.output_tx.send(packet.samples.len()).unwrap();
+    ) -> Result<Option<Packet>, StageError> {
+        if let Packet::Voltage(packet_data) = packet {
+            self.output_tx.send(packet_data.samples.len()).unwrap();
         }
         Ok(None) // Sinks consume the packet
     }
@@ -130,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     registry.register("Multiplier", Box::new(MultiplierStageFactory::default()));
 
     // The TestSink needs to communicate the result count back to the main thread.
-    let (output_tx, output_rx) = mpsc::channel::<usize>();
+    let (output_tx, output_rx) = mpsc::unbounded::<usize>();
     let sink_factory = TestSinkFactory {
         output_tx: Arc::new(std::sync::Mutex::new(Some(output_tx))),
     };
@@ -165,8 +166,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }))?;
 
     // 3. Create channels for the pipeline runtime
-    let (runtime_tx, runtime_rx) = mpsc::channel::<RuntimeMsg>();
-    let (event_tx, event_rx) = mpsc::channel::<PipelineEvent>();
+    let (runtime_tx, runtime_rx) = mpsc::unbounded::<RuntimeMsg>();
+    let (event_tx, event_rx) = mpsc::unbounded::<PipelineEvent>();
     let context = StageContext::new(event_tx.clone());
 
     // 4. Build the pipeline graph
@@ -186,7 +187,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     for i in 0..num_packets {
-        let packet: Box<dyn Any + Send> = Box::new(Packet {
+        let packet = Packet::RawI32(pipeline::data::PacketData {
             header: PacketHeader {
                 ts_ns: i as u64,
                 batch_size: samples_per_packet as u32,

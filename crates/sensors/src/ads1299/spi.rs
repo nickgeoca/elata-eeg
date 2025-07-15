@@ -77,13 +77,13 @@ impl InputPinDevice for InputPin {
 }
 
 /// Initialize SPI communication with the ADS1299.
-pub fn init_spi() -> Result<Box<dyn SpiDevice>, crate::types::DriverError> {
+pub fn init_spi(bus: Bus, slave_select: SlaveSelect) -> Result<Box<dyn SpiDevice>, crate::types::DriverError> {
     let spi_speed = 500_000; // 500kHz - confirmed working with Python script
     info!("Initializing SPI with speed: {} Hz, Mode: Mode1 (CPOL=0, CPHA=1)", spi_speed);
 
     match Spi::new(
-        Bus::Spi0,
-        SlaveSelect::Ss0,
+        bus,
+        slave_select,
         spi_speed,
         Mode::Mode1,  // CPOL=0, CPHA=1 for ADS1299
     ) {
@@ -102,15 +102,14 @@ pub fn init_spi() -> Result<Box<dyn SpiDevice>, crate::types::DriverError> {
 }
 
 /// Initialize the DRDY pin for detecting when new data is available.
-pub fn init_drdy_pin() -> Result<Box<dyn InputPinDevice>, crate::types::DriverError> {
-    info!("Initializing GPIO for DRDY pin (GPIO25)");
+pub fn init_drdy_pin(pin_num: u8) -> Result<Box<dyn InputPinDevice>, crate::types::DriverError> {
+    info!("Initializing GPIO for DRDY pin (GPIO{})", pin_num);
 
     match Gpio::new() {
         Ok(gpio) => {
             info!("GPIO initialization successful");
 
-            // GPIO25 (Pin 22) is used for DRDY
-            match gpio.get(25) {
+            match gpio.get(pin_num) {
                 Ok(pin) => {
                     info!("GPIO pin 25 acquired successfully");
                     Ok(Box::new(pin.into_input_pullup()))

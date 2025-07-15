@@ -1,11 +1,10 @@
 //! Converts raw i32 ADC samples into f32 voltage values.
 
 use crate::config::StageConfig;
+use crate::data::{Packet, PacketData};
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
-use crate::data::Packet;
-use std::any::Any;
 use std::sync::Arc;
 
 /// A factory for creating `ToVoltage` stages.
@@ -47,10 +46,10 @@ impl Stage for ToVoltage {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        if let Some(packet) = packet.downcast_ref::<Packet<i32>>() {
+    ) -> Result<Option<Packet>, StageError> {
+        if let Packet::RawI32(packet) = packet {
             let meta_ptr = Arc::as_ptr(&packet.header.meta) as usize;
 
             if self.cached_meta_ptr != meta_ptr {
@@ -71,12 +70,12 @@ impl Stage for ToVoltage {
                 .map(|&raw_sample| (raw_sample - self.cached_offset) as f32 * self.cached_scale_factor)
                 .collect();
 
-            let output_packet = Packet {
+            let output_packet = PacketData {
                 header: packet.header.clone(),
                 samples: samples_f32,
             };
 
-            return Ok(Some(Box::new(output_packet)));
+            return Ok(Some(Packet::Voltage(output_packet)));
         }
         Ok(None)
     }

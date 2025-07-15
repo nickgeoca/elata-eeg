@@ -66,7 +66,7 @@ impl From<StageError> for PipelineError {
 /// Result type for pipeline operations
 pub type PipelineResult<T> = Result<T, PipelineError>;
 /// Error types for a single stage in the data plane.
-#[derive(thiserror::Error, Debug)]
+#[derive(thiserror::Error, Debug, Clone)]
 pub enum StageError {
     #[error("queue closed")]
     QueueClosed,
@@ -91,5 +91,11 @@ pub enum StageError {
     #[error("IO error: {0}")]
     Io(String),
     #[error("JSON serialization/deserialization error: {0}")]
-    JsonError(#[from] serde_json::Error),
+    JsonError(String),
+}
+
+impl From<serde_json::Error> for StageError {
+    fn from(err: serde_json::Error) -> Self {
+        StageError::JsonError(err.to_string())
+    }
 }

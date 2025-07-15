@@ -1,8 +1,7 @@
 use pipeline::control::ControlCommand;
-use pipeline::data::Packet;
+use pipeline::data::{Packet, PacketData};
 use pipeline::error::StageError;
 use pipeline::stage::{Stage, StageContext};
-use std::any::Any;
 use uuid::Uuid;
 
 mod dsp;
@@ -41,15 +40,15 @@ impl Stage for BasicVoltageFilterPlugin {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        match packet.downcast::<Packet<i32>>() {
-            Ok(packet) => {
+    ) -> Result<Option<Packet>, StageError> {
+        match packet {
+            Packet::RawI32(data) => {
                 let vref = 4.5;
                 let gain = 24.0;
 
-                let mut voltage_samples: Vec<f32> = packet
+                let mut voltage_samples: Vec<f32> = data
                     .samples
                     .iter()
                     .map(|&raw_sample| {
@@ -77,14 +76,15 @@ impl Stage for BasicVoltageFilterPlugin {
                     }
                 }
 
-                let new_packet = Packet {
-                    header: packet.header.clone(),
+                let new_packet = Packet::Voltage(PacketData {
+                    header: data.header,
                     samples: voltage_samples,
-                };
+                });
 
-                Ok(Some(Box::new(new_packet)))
+                Ok(Some(new_packet))
             }
-            Err(packet) => Ok(Some(packet)),
+            // Pass through other packet types without modification
+            _ => Ok(Some(packet)),
         }
     }
 

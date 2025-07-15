@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use crossbeam_channel::Sender;
 use std::thread;
 use std::time::Duration;
 use log::{info, warn, debug};
@@ -10,7 +10,7 @@ use lazy_static::lazy_static;
 use crate::types::{AdcConfig, DriverStatus, DriverError, DriverType};
 use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{Packet, PacketHeader, SensorMeta};
+use pipeline::data::{Packet, PacketData, PacketHeader, SensorMeta};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -98,6 +98,12 @@ impl MockDriver {
             ));
         }
 
+        let channel_names = config
+            .channels
+            .iter()
+            .map(|&ch| format!("ch{}", ch))
+            .collect();
+
         let meta = Arc::new(SensorMeta {
             schema_ver: 2,
             source_type: "MockEeg".to_string(),
@@ -107,6 +113,9 @@ impl MockDriver {
             sample_rate: config.sample_rate,
             offset_code: 0,
             is_twos_complement: true,
+            channel_names,
+            #[cfg(feature = "meta-tags")]
+            tags: Default::default(),
         });
 
         let inner = MockInner {
@@ -130,7 +139,12 @@ impl MockDriver {
 
 // Implement the AdcDriver trait
 impl crate::types::AdcDriver for MockDriver {
-    fn acquire(&mut self, tx: Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
+    fn initialize(&mut self) -> Result<(), DriverError> {
+        // No hardware to initialize for the mock driver
+        Ok(())
+    }
+
+    fn acquire(&mut self, tx: crossbeam_channel::Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
         info!("MockDriver synchronous acquisition started");
 
         let inner_arc = self.inner.clone();
@@ -159,14 +173,14 @@ impl crate::types::AdcDriver for MockDriver {
             let relative_timestamp = current_sample_count * sample_interval_us;
             let samples = gen_realistic_eeg_data(&config, relative_timestamp);
 
-            let packet = Packet {
+            let packet = Packet::RawI32(PacketData {
                 header: PacketHeader {
                     ts_ns: (base_timestamp + relative_timestamp) * 1000,
                     batch_size: batch_size as u32,
                     meta: meta.clone(),
                 },
                 samples,
-            };
+            });
 
             if tx.send(BridgeMsg::Data(packet)).is_err() {
                 warn!("MockDriver bridge channel closed");

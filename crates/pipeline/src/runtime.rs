@@ -1,18 +1,17 @@
 //! Pipeline runtime for executing pipeline graphs.
 
 use crate::control::{ControlCommand, PipelineEvent};
+use crate::data::Packet;
 use crate::error::PipelineError;
 use crate::graph::PipelineGraph;
-use std::any::Any;
-use std::sync::mpsc::{Receiver, Sender, RecvTimeoutError, TryRecvError};
-use std::time::Duration;
+use crossbeam_channel::{Receiver, Sender};
 use tracing::info;
 
 /// A unified message type for the pipeline runtime.
 /// This enum encapsulates both data packets and control commands,
 /// allowing them to be sent through a single channel.
 pub enum RuntimeMsg {
-    Data(Box<dyn Any + Send>),
+    Data(Packet),
     Ctrl(ControlCommand),
 }
 
@@ -35,16 +34,17 @@ pub fn run(
 ) -> Result<(), PipelineError> {
     graph.context.event_tx = event_tx.clone();
     let mut topo = graph.topology_sort(); // Pre-compute the execution order.
-    let mut draining = false;
 
-    loop {
-        // Block on the external channel with a timeout
-        match runtime_rx.recv_timeout(Duration::from_millis(2)) {
-            Ok(RuntimeMsg::Ctrl(ControlCommand::Shutdown)) => {
+    // The main loop now blocks indefinitely on recv, which is what we want.
+    // The responsibility of selecting between multiple event sources is now
+    // in the main daemon loop.
+    for msg in runtime_rx {
+        match msg {
+            RuntimeMsg::Ctrl(ControlCommand::Shutdown) => {
                 info!("Shutdown command received, starting graceful drain...");
-                draining = true;
+                break; // Exit loop to start draining
             }
-            Ok(RuntimeMsg::Ctrl(cmd)) => {
+            RuntimeMsg::Ctrl(cmd) => {
                 info!("Received control command: {:?}", cmd);
                 graph.handle_control_command(&cmd)?;
                 if graph.topo_dirty {
@@ -53,40 +53,19 @@ pub fn run(
                     graph.topo_dirty = false;
                 }
             }
-            Ok(RuntimeMsg::Data(pkt)) => {
-                if !draining {
-                    graph.push(pkt, &topo)?;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                // No message, continue.
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                info!("All senders disconnected, initiating shutdown.");
-                draining = true;
+            RuntimeMsg::Data(pkt) => {
+                graph.push(pkt, &topo)?;
             }
         }
-
-        // Since the internal event channel is removed, we no longer poll it.
-        // All events are now sent directly to the external `event_tx`.
-
-        // Graceful shutdown logic
-        if draining {
-            if let Err(TryRecvError::Empty) = runtime_rx.try_recv() {
-                if graph.is_idle() {
-                    info!("Draining complete. Flushing sinks...");
-                    graph.flush()?; // Use the Drains trait
-                    info!("Sinks flushed. Sending ShutdownAck.");
-                    event_tx
-                        .send(PipelineEvent::ShutdownAck)
-                        .map_err(|e| PipelineError::SendError(e.to_string()))?;
-                    break; // Exit the loop
-                }
-            }
-        }
-
-        // The loop is now blocked on recv_timeout, so this sleep is no longer needed.
     }
+
+    // --- Graceful Shutdown ---
+    info!("Draining complete. Flushing sinks...");
+    graph.flush()?; // Use the Drains trait
+    info!("Sinks flushed. Sending ShutdownAck.");
+    event_tx
+        .send(PipelineEvent::ShutdownAck)
+        .map_err(|e| PipelineError::SendError(e.to_string()))?;
 
     info!("Pipeline has shut down gracefully.");
     Ok(())

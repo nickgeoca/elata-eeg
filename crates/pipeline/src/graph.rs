@@ -5,24 +5,23 @@ use crate::control::ControlCommand;
 use crate::error::{PipelineError, StageError};
 use crate::registry::StageRegistry;
 use crate::stage::{Stage, StageContext};
-use std::any::Any;
+use crate::data::Packet;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 pub type StageId = String;
 
 /// Represents a node in the pipeline graph.
 pub struct PipelineNode {
     pub name: StageId,
-    pub stage: Mutex<Box<dyn Stage>>,
+    pub stage: Box<dyn Stage>,
     pub input_source: Option<StageId>,
 }
 
 /// Represents the entire pipeline as a graph of connected stages.
 pub struct PipelineGraph {
-    pub nodes: HashMap<StageId, Arc<PipelineNode>>,
+    pub nodes: HashMap<StageId, PipelineNode>,
     pub context: StageContext,
     config: SystemConfig,
     pub topo_dirty: bool,
@@ -48,11 +47,11 @@ impl PipelineGraph {
             let stage = registry.create_stage(stage_config)?;
             let input_source = stage_config.inputs.first().cloned();
 
-            let node = Arc::new(PipelineNode {
+            let node = PipelineNode {
                 name: stage_config.name.clone(),
-                stage: Mutex::new(stage),
+                stage,
                 input_source,
-            });
+            };
             nodes.insert(stage_config.name.clone(), node);
         }
 
@@ -110,12 +109,8 @@ impl PipelineGraph {
     }
 
     /// Pushes a data packet through the pipeline using the pre-computed topological order.
-    pub fn push(
-        &mut self,
-        pkt: Box<dyn Any + Send>,
-        topo: &[StageId],
-    ) -> Result<(), PipelineError> {
-        let mut outputs: HashMap<StageId, Option<Box<dyn Any + Send>>> = HashMap::new();
+    pub fn push(&mut self, pkt: Packet, topo: &[StageId]) -> Result<(), PipelineError> {
+        let mut outputs: HashMap<StageId, Option<Packet>> = HashMap::new();
 
         // Find the source stage (the one with no inputs) and insert the initial packet.
         let source_stage_name = self
@@ -131,22 +126,21 @@ impl PipelineGraph {
         outputs.insert(source_stage_name, Some(pkt));
 
         for stage_id in topo {
-            let node = self.nodes.get(stage_id).unwrap();
-            let mut stage = node.stage.lock().unwrap();
+            if let Some(node) = self.nodes.get_mut(stage_id) {
+                // Determine the input for the current stage.
+                let input_packet = if let Some(source_id) = &node.input_source {
+                    // This stage takes input from a predecessor.
+                    outputs.remove(source_id).flatten()
+                } else {
+                    // This is a source stage, its input comes from the initial push.
+                    outputs.remove(stage_id).flatten()
+                };
 
-            // Determine the input for the current stage.
-            let input_packet = if let Some(source_id) = &node.input_source {
-                // This stage takes input from a predecessor.
-                outputs.remove(source_id).flatten()
-            } else {
-                // This is a source stage, its input comes from the initial push.
-                outputs.remove(stage_id).flatten()
-            };
-
-            // If there's a packet to process, run the stage.
-            if let Some(packet) = input_packet {
-                let result = stage.process(packet, &mut self.context)?;
-                outputs.insert(stage_id.clone(), result);
+                // If there's a packet to process, run the stage.
+                if let Some(packet) = input_packet {
+                    let result = node.stage.process(packet, &mut self.context)?;
+                    outputs.insert(stage_id.clone(), result);
+                }
             }
         }
         Ok(())
@@ -160,9 +154,8 @@ impl PipelineGraph {
             // Note: Full reconfiguration logic would go here. For now, we just set the flag.
         }
 
-        for node in self.nodes.values() {
-            let mut stage = node.stage.lock().unwrap();
-            stage.control(cmd, &mut self.context)?;
+        for node in self.nodes.values_mut() {
+            node.stage.control(cmd, &mut self.context)?;
         }
         Ok(())
     }
@@ -176,9 +169,8 @@ impl PipelineGraph {
     /// Flushes all sink stages that implement the `Drains` trait.
     /// TODO: This requires a mechanism to downcast `Stage` to `Drains`.
     pub fn flush(&mut self) -> Result<(), PipelineError> {
-        for node in self.nodes.values() {
-            let mut stage = node.stage.lock().unwrap();
-            if let Some(drains) = stage.as_drains() {
+        for node in self.nodes.values_mut() {
+            if let Some(drains) = node.stage.as_drains() {
                 drains.flush().map_err(|e| PipelineError::RuntimeError {
                     stage_name: node.name.clone(),
                     message: format!("IO error during flush: {}", e),

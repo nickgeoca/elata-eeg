@@ -1,33 +1,25 @@
 //! Main driver implementation for the ADS1299 chip.
 
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::sync::mpsc::Sender;
+use crossbeam_channel::Sender;
 use std::thread;
 use std::time::Duration;
 use log::{info, warn, debug};
-use lazy_static::lazy_static;
-
 use crate::types::{AdcConfig, AdcDriver, DriverStatus, DriverError, DriverType};
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{Packet, PacketHeader, SensorMeta};
-use super::error::HardwareLockGuard;
+use pipeline::data::{Packet, PacketData, PacketHeader, SensorMeta};
 use super::registers::{
     CMD_RESET, CMD_SDATAC, REG_ID_ADDR,
     CONFIG1_ADDR, CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR,
-    LOFF_SENSP_ADDR, MISC1_ADDR, CH1SET_ADDR, BIAS_SENSP_ADDR, BIAS_SENSN_ADDR,
-    CONFIG1_REG, CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG, MISC1_REG,
-    CHN_OFF, CHN_REG, BIAS_SENSN_REG_MASK, CMD_RDATAC
+    LOFF_SENSP_ADDR, MISC1_ADDR, BIAS_SENSP_ADDR, BIAS_SENSN_ADDR,
+    CMD_RDATAC
 };
 use super::spi::{SpiDevice, InputPinDevice, init_spi, init_drdy_pin, send_command_to_spi, wait_irq};
 use super::helpers::{ch_sample_to_raw, current_timestamp_micros};
 
 
-// Static hardware lock to simulate real hardware access constraints
-lazy_static! {
-    static ref HARDWARE_LOCK: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
-}
-
 /// ADS1299 driver for interfacing with the ADS1299EEG_FE board.
+#[derive(Clone)]
 pub struct Ads1299Driver {
     inner: Arc<Mutex<Ads1299Inner>>,
     spi: Arc<Mutex<Option<Box<dyn SpiDevice>>>>,
@@ -53,9 +45,6 @@ impl Ads1299Driver {
     pub fn new(
         config: AdcConfig,
     ) -> Result<Self, DriverError> {
-        // Acquire the hardware lock using RAII guard
-        let _hardware_lock_guard = HardwareLockGuard::new(&HARDWARE_LOCK)?;
-
         // Validate config
         if config.board_driver != DriverType::Ads1299 {
             return Err(DriverError::ConfigurationError(
@@ -108,13 +97,33 @@ impl Ads1299Driver {
             ));
         }
 
+        use rppal::spi::{Bus, SlaveSelect};
+
         // Initialize SPI
-        let spi = init_spi()?;
-        let drdy_pin = init_drdy_pin()?;
+        let chip_config = config.chips.get(0).ok_or_else(|| DriverError::ConfigurationError("Missing chip config".to_string()))?;
+        let bus = match chip_config.spi_bus {
+            0 => Bus::Spi0,
+            1 => Bus::Spi1,
+            _ => return Err(DriverError::ConfigurationError("Invalid SPI bus".to_string())),
+        };
+        let slave_select = match chip_config.cs_pin {
+            0 => SlaveSelect::Ss0,
+            1 => SlaveSelect::Ss1,
+            2 => SlaveSelect::Ss2,
+            _ => return Err(DriverError::ConfigurationError("Invalid CS pin".to_string())),
+        };
+        let spi = init_spi(bus, slave_select)?;
+        let drdy_pin = init_drdy_pin(chip_config.drdy_pin)?;
         
         // Initialize register cache
         let registers = [0u8; 24];
         
+        let channel_names = config
+            .channels
+            .iter()
+            .map(|&ch| format!("ch{}", ch))
+            .collect();
+
         let sensor_meta = Arc::new(SensorMeta {
             schema_ver: 2,
             source_type: "ADS1299".to_string(),
@@ -124,6 +133,9 @@ impl Ads1299Driver {
             sample_rate: config.sample_rate,
             offset_code: 0, // Assuming no offset for now
             is_twos_complement: true,
+            channel_names,
+            #[cfg(feature = "meta-tags")]
+            tags: Default::default(),
         });
 
         let inner = Ads1299Inner {
@@ -137,16 +149,11 @@ impl Ads1299Driver {
         };
         
         // Create the driver as mutable
-        let mut driver = Ads1299Driver {
+        let driver = Ads1299Driver {
             inner: Arc::new(Mutex::new(inner)),
             spi: Arc::new(Mutex::new(Some(spi))),
             drdy_pin: Arc::new(Mutex::new(Some(drdy_pin))),
         };
-
-        driver.initialize_chip()?;
-        
-        // Put chip in standby (low power) mode initially
-        driver.send_command(super::registers::CMD_STANDBY)?;
 
         info!("Ads1299Driver created with config: {:?}", config);
 
@@ -154,94 +161,74 @@ impl Ads1299Driver {
     }
     
     /// Send a command to the ADS1299.
-    fn send_command(&self, command: u8) -> Result<(), DriverError> {
+    pub fn send_command(&self, command: u8) -> Result<(), DriverError> {
         let mut spi_opt = self.spi.lock().unwrap();
         let spi = spi_opt.as_mut().ok_or(DriverError::NotInitialized)?;
         send_command_to_spi(spi.as_mut(), command)
     }
 
 
-    /// Initialize the ADS1299 chip with the current configuration.
-    fn initialize_chip(&mut self) -> Result<(), DriverError> {
-        let config = {
-            let inner = self.inner.lock().unwrap();
-            inner.config.clone()
-        };
-        
-        // Power-up sequence following the working Python script pattern:
-        
-        // 1. Send RESET command (0x06)
+    /// Initialize the ADS1299 chip with raw register values.
+    pub fn initialize_chip(
+        &mut self,
+        config1: u8,
+        config2: u8,
+        config3: u8,
+        config4: u8,
+        loff: u8,
+        misc1: u8,
+        ch_settings: &[(u8, u8)], // List of (channel_address, value)
+        bias_sensp: u8,
+        bias_sensn: u8,
+    ) -> Result<(), DriverError> {
+        // Power-up sequence
         self.send_command(CMD_RESET)?;
-        
-        // 2. Send zeros
-        if let Some(spi) = self.spi.lock().unwrap().as_mut() {
-            spi.write(&[0x00, 0x00, 0x00]).map_err(|e| DriverError::SpiError(format!("SPI write error: {}", e)))?;
-        }
-        
-        // 3. Send SDATAC command to stop continuous data acquisition mode
+        thread::sleep(Duration::from_millis(10)); // Wait for reset
         self.send_command(CMD_SDATAC)?;
-        
-        // Check device ID to verify communication
+        thread::sleep(Duration::from_millis(10)); // Wait for SDATAC
+
+        // Verify communication
         let id = self.read_register(REG_ID_ADDR)?;
         if id != 0x3E {
-            return Err(DriverError::Other(format!("Invalid device ID: 0x{:02X}, expected 0x3E", id)));
+            return Err(DriverError::HardwareNotFound(format!(
+                "Invalid device ID: 0x{:02X}, expected 0x3E",
+                id
+            )));
         }
-        
-        // Setup registers for CH1 mode (working configuration)
-        let _spi = self.spi.lock().unwrap().as_mut().ok_or(DriverError::NotInitialized)?;
 
-        // Write registers in the specific order
-        // Constants are imported from super::registers
+        // Write the raw register values provided by the board driver
+        self.write_register(CONFIG1_ADDR, config1)?;
+        self.write_register(CONFIG2_ADDR, config2)?;
+        self.write_register(CONFIG3_ADDR, config3)?;
+        self.write_register(CONFIG4_ADDR, config4)?;
+        self.write_register(LOFF_SENSP_ADDR, loff)?;
+        self.write_register(MISC1_ADDR, misc1)?;
 
-        // Calculate masks based on config
-        let active_ch_mask = config.channels.iter().fold(0, |mask, &ch| mask | (1 << ch));
-        // Use the fully qualified path to call these functions
-        let gain_mask = super::registers::gain_to_reg_mask(config.gain as f32)?;
-        let sps_mask = super::registers::sps_to_reg_mask(config.sample_rate)?;
-
-        // Write registers
-        self.write_register(CONFIG1_ADDR, CONFIG1_REG | sps_mask)?;
-        self.write_register(CONFIG2_ADDR, CONFIG2_REG)?;
-        self.write_register(CONFIG3_ADDR, CONFIG3_REG)?;
-        self.write_register(CONFIG4_ADDR, CONFIG4_REG)?;
-        self.write_register(LOFF_SENSP_ADDR, LOFF_SESP_REG)?; // Assuming LOFF is off
-        self.write_register(MISC1_ADDR, MISC1_REG)?;
-        // Turn off all channels first
-        for ch in 0..8 { // Assuming 8 channels max for ADS1299
-            self.write_register(CH1SET_ADDR + ch, CHN_OFF)?;
+        // Configure each channel
+        for &(addr, value) in ch_settings {
+            self.write_register(addr, value)?;
         }
-        // Turn on configured channels with correct gain
-        for &ch in &config.channels {
-            if ch < 8 { // Ensure channel index is valid
-                 self.write_register(CH1SET_ADDR + ch as u8, CHN_REG | gain_mask)?;
-            } else {
-                 log::warn!("Channel index {} out of range (0-7), skipping configuration.", ch);
-            }
-        }
-        // Configure bias based on active channels
-        self.write_register(BIAS_SENSP_ADDR, active_ch_mask as u8)?;
-        self.write_register(BIAS_SENSN_ADDR, BIAS_SENSN_REG_MASK)?;
 
-        // Add register dump for verification (optional but helpful)
+        // Configure bias sense registers
+        self.write_register(BIAS_SENSP_ADDR, bias_sensp)?;
+        self.write_register(BIAS_SENSN_ADDR, bias_sensn)?;
+
+        // Optional: Dump registers for verification
         log::info!("----Register Dump After Configuration----");
         let names = ["ID", "CONFIG1", "CONFIG2", "CONFIG3", "LOFF", "CH1SET", "CH2SET", "CH3SET", "CH4SET", "CH5SET", "CH6SET", "CH7SET", "CH8SET", "BIAS_SENSP", "BIAS_SENSN", "LOFF_SENSP", "LOFF_SENSN", "LOFF_FLIP", "LOFF_STATP", "LOFF_STATN", "GPIO", "MISC1", "MISC2", "CONFIG4"];
         for reg in 0..=0x17 {
-            match self.read_register(reg as u8) {
-                Ok(val) => log::info!("Reg 0x{:02X} ({:<12}): 0x{:02X}", reg, names.get(reg).unwrap_or(&"Unknown"), val),
-                Err(e) => log::error!("Failed to read register 0x{:02X}: {}", reg, e),
+            if let Ok(val) = self.read_register(reg as u8) {
+                log::info!("Reg 0x{:02X} ({:<12}): 0x{:02X}", reg, names.get(reg).unwrap_or(&"Unknown"), val);
             }
         }
         log::info!("----End Register Dump----");
-        
-        // Wait for configuration to settle
-        thread::sleep(Duration::from_millis(10));
-        
+
         // Update status
         {
             let mut inner = self.inner.lock().unwrap();
             inner.status = DriverStatus::Ok;
         }
-        
+
         Ok(())
     }
 
@@ -288,6 +275,15 @@ impl Ads1299Driver {
 
 // Implement the AdcDriver trait
 impl crate::types::AdcDriver for Ads1299Driver {
+    fn initialize(&mut self) -> Result<(), DriverError> {
+        // This driver is meant to be initialized by a board-level driver
+        // by calling `initialize_chip` with raw register values.
+        // Direct initialization is not supported as it lacks board-specific context.
+        Err(DriverError::ConfigurationError(
+            "Ads1299Driver cannot be initialized directly. Use a board driver like ElataV1 or ElataV2.".to_string()
+        ))
+    }
+
     fn acquire(&mut self, tx: Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
         info!("ADS1299 synchronous acquisition started");
 
@@ -325,10 +321,10 @@ impl crate::types::AdcDriver for Ads1299Driver {
                         samples.push(sample);
                     }
 
-                    let packet = Packet {
+                    let packet = Packet::RawI32(PacketData {
                         header: PacketHeader::default(), // TODO: Populate header properly
                         samples,
-                    };
+                    });
 
                     if tx.send(BridgeMsg::Data(packet)).is_err() {
                         warn!("ADS1299 bridge channel closed");

@@ -1,8 +1,6 @@
-use eeg_types::plugin::EegPlugin;
-use pipeline::data::Packet;
+use pipeline::data::{Packet, PacketData};
 use pipeline::stage::{Stage, StageContext};
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
-use std::any::Any;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -15,6 +13,7 @@ pub struct BrainWavesFftPlugin {
     channel_buffers: Vec<Vec<f32>>,
     fft_planner: Arc<dyn Fft<f32>>,
     num_channels: usize,
+    #[allow(dead_code)]
     sample_rate: f32,
 }
 
@@ -39,11 +38,11 @@ impl Stage for BrainWavesFftPlugin {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, pipeline::error::StageError> {
-        if let Ok(packet) = packet.downcast::<Packet<f32>>() {
-            let samples_per_channel = packet.samples.len() / self.num_channels;
+    ) -> Result<Option<Packet>, pipeline::error::StageError> {
+        if let Packet::Voltage(packet_data) = packet {
+            let samples_per_channel = packet_data.samples.len() / self.num_channels;
             if samples_per_channel == 0 {
                 return Ok(None);
             }
@@ -51,7 +50,7 @@ impl Stage for BrainWavesFftPlugin {
             for ch in 0..self.num_channels {
                 let start = ch * samples_per_channel;
                 let end = start + samples_per_channel;
-                if let Some(channel_samples) = packet.samples.get(start..end) {
+                if let Some(channel_samples) = packet_data.samples.get(start..end) {
                     self.channel_buffers[ch].extend_from_slice(channel_samples);
                 }
             }
@@ -81,7 +80,7 @@ impl Stage for BrainWavesFftPlugin {
                 }
             }
 
-            Ok(Some(packet as Box<dyn Any + Send>))
+            Ok(Some(Packet::Voltage(packet_data)))
         } else {
             Ok(None)
         }

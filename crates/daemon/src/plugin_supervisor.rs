@@ -4,9 +4,7 @@
 //! lifecycle of all registered EEG plugins.
 
 use anyhow::Result;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
-use std::thread::{self, JoinHandle};
-use log::{info, error};
+use std::thread::{JoinHandle};
 
 use eeg_types::plugin::EegPlugin;
 use pipeline::stage::Stage;

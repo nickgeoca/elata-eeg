@@ -10,9 +10,10 @@ brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 [dependencies]
 anyhow = "1.0" # Added for error handling
 tracing = "0.1" # Added for structured logging
-eeg_sensor = { path = "../sensors" }
+boards = { path = "../boards", features = ["elata_v1", "elata_v2"] }
 eeg_types = { path = "../eeg_types" }
 pipeline = { path = "../pipeline" }
+sensors = { path = "../sensors" }
 csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
 basic_voltage_filter_plugin = { path = "../../plugins/basic_voltage_filter" }
 brain_waves_fft_plugin = { path = "../../plugins/brain_waves_fft", optional = true }
@@ -32,11 +33,13 @@ crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = "3.8"
+tokio = { version = "1", features = ["full"] }
 tokio-test = "0.4"
 bytes = "1.0"
 tokio-tungstenite = { version = "0.23.1", features = ["native-tls"] }
 crossbeam-channel = "0.5"
 tokio-stream = { version = "0.1", features = ["net"] }
+async-trait = "0.1"
 
 [[bin]]
 name = "eeg_daemon"

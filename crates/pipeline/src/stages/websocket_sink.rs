@@ -1,14 +1,14 @@
 //! WebSocket sink stage for broadcasting EEG data.
 
 use crate::config::StageConfig;
+use crate::data::Packet;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Drains, Stage, StageContext};
-use crate::data::Packet;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use serde::Deserialize;
-use std::any::Any;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use tungstenite::{accept, Message};
 use tracing::{info, warn};
@@ -42,7 +42,7 @@ impl StageFactory for WebsocketSinkFactory {
 /// A sink stage that broadcasts incoming data to connected WebSocket clients.
 pub struct WebsocketSink {
     id: String,
-    clients: Arc<Mutex<Vec<mpsc::Sender<String>>>>,
+    clients: Arc<Mutex<Vec<Sender<String>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -55,13 +55,13 @@ fn default_addr() -> String {
     "127.0.0.1:9001".to_string()
 }
 
-fn accept_loop(addr: SocketAddr, clients: Arc<Mutex<Vec<mpsc::Sender<String>>>>) {
+fn accept_loop(addr: SocketAddr, clients: Arc<Mutex<Vec<Sender<String>>>>) {
     let listener = TcpListener::bind(&addr).expect("Failed to bind");
     info!("WebSocket sink listening on: {}", addr);
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let (tx, rx) = mpsc::channel();
+                let (tx, rx) = unbounded();
                 clients.lock().unwrap().push(tx);
                 thread::spawn(move || handle_connection(stream, rx));
             }
@@ -72,7 +72,7 @@ fn accept_loop(addr: SocketAddr, clients: Arc<Mutex<Vec<mpsc::Sender<String>>>>)
     }
 }
 
-fn handle_connection(stream: TcpStream, rx: mpsc::Receiver<String>) {
+fn handle_connection(stream: TcpStream, rx: Receiver<String>) {
     let mut websocket = match accept(stream) {
         Ok(ws) => ws,
         Err(e) => {
@@ -102,11 +102,11 @@ impl Stage for WebsocketSink {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        if let Some(packet) = packet.downcast_ref::<Packet<f32>>() {
-            let json = serde_json::to_string(packet).unwrap();
+    ) -> Result<Option<Packet>, StageError> {
+        if let Packet::Voltage(packet) = packet {
+            let json = serde_json::to_string(&packet).unwrap();
             let mut clients = self.clients.lock().unwrap();
             // The `retain` method is used to keep only the clients that are still active.
             clients.retain(|tx| tx.send(json.clone()).is_ok());

@@ -51,8 +51,6 @@ pub fn read_data_from_spi<T: crate::ads1299::spi::SpiDevice + ?Sized>(spi: &mut 
     // Perform SPI transfer with retry logic
     const MAX_RETRIES: usize = 3;
     let mut retry_count = 0;
-    let mut last_error = None;
-    
     while retry_count < MAX_RETRIES {
         match spi.transfer(&mut read_buffer, &write_buffer) {
             Ok(_) => {
@@ -75,18 +73,17 @@ pub fn read_data_from_spi<T: crate::ads1299::spi::SpiDevice + ?Sized>(spi: &mut 
             },
             Err(e) => {
                 retry_count += 1;
-                last_error = Some(e);
                 
                 if retry_count < MAX_RETRIES {
                     log::warn!("SPI transfer error (attempt {}/{}): {}, retrying...",
-                              retry_count, MAX_RETRIES, last_error.as_ref().unwrap());
+                              retry_count, MAX_RETRIES, e);
                     // Small delay before retry
                     std::thread::sleep(std::time::Duration::from_millis(1));
                 } else {
                     log::error!("SPI transfer failed after {} attempts: {}",
-                               MAX_RETRIES, last_error.as_ref().unwrap());
+                               MAX_RETRIES, e);
                     return Err(DriverError::IoError(format!("SPI transfer error after {} retries: {}",
-                                MAX_RETRIES, last_error.unwrap())));
+                                MAX_RETRIES, e)));
                 }
             }
         }

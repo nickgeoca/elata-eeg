@@ -18,7 +18,7 @@ bash stop.sh
 # Term 1, sensors
 cd crates/sensors; cargo build
 # Term 2, device daemon
-cd crates/device; cargo build; cargo run
+cd crates/daemon; cargo build; cargo run
 # Term 3, kiosk
 cd kiosk; npm run dev
 ```
@@ -95,41 +95,54 @@ bash rebuild.sh
 
 ---
 
-## System Architecture (v2.0)
+## System Architecture (v3.0)
 
-The system is built around a flexible, asynchronous pipeline architecture defined in the `crates/pipeline` crate. This design allows for modular, reusable processing stages that can be chained together to form complex data processing workflows.
+The system is architected as a set of modular crates, each with a distinct responsibility. This separation of concerns ensures the system is extensible, maintainable, and testable.
 
-For a detailed breakdown of the architecture, see the [Pipeline Implementation Plan (v2)](todo/implementation_plan_v2.md).
+```mermaid
+graph TD
+    subgraph eeg_types
+        direction LR
+        A[eeg_types]
+    end
 
+    subgraph sensors
+        direction LR
+        B[sensors]
+    end
+
+    subgraph boards
+        direction LR
+        C[boards]
+    end
+
+    subgraph pipeline
+        direction LR
+        D[pipeline]
+    end
+
+    subgraph daemon
+        direction LR
+        E[daemon]
+    end
+
+    A --> B
+    A --> C
+    A --> D
+    B --> C
+    C --> E
+    D --> E
 ```
- [Sensor Driver]
-       |
-       | Packet<i32> + Arc<SensorMeta>
-       v
-+----------------+
-| ToVoltage Stage|
-+----------------+
-       |
-       | Packet<f32> + Arc<SensorMeta>
-       v
-+----------------+
-|  Filter Stage  |
-+----------------+
-       |
-       | Packet<f32> + Arc<SensorMeta>
-       v
-+----------------+
-|   Sink Stage   |
-| (e.g., CSV, WS)|
-+----------------+
-```
 
-**Key Concepts:**
+| Layer          | Owns                                                                            | Depends on                        | Notes                                   |
+| -------------- | ------------------------------------------------------------------------------- | --------------------------------- | --------------------------------------- |
+| **eeg\_types** | `Packet`, `ChannelId`, `AdcConfig`, error enums                                 | —                                 | Pure data; zero hardware.               |
+| **sensors**    | Register maps, low-level SPI/I²C for a single *chip*                            | `eeg_types`                       | Tiny, reusable; feature-gated per chip. |
+| **boards**     | Glue code that unites one or more chips into a *PCB* driver (`impl EegDriver`)  | `sensors`, `eeg_types`            | Where board-specific init lives.        |
+| **pipeline**   | DSP graph, sinks, UI API                                                        | `eeg_types`                       | Hardware-agnostic.                      |
+| **daemon**     | CLI, config parsing, picks one board driver and pumps packets into the pipeline | `boards`, `pipeline`, `eeg_types` | The only binary crate.                  |
 
--   **`Packet<T>`**: The fundamental unit of data transfer, containing a batch of samples of type `T`.
--   **`SensorMeta`**: A self-describing metadata struct that travels with each packet, providing information about the data source (e.g., sample rate, voltage reference). It is wrapped in an `Arc` for efficient sharing.
--   **`Stage<In, Out>`**: An async trait representing a single processing step in the pipeline. Stages are chained together manually or by a pipeline builder.
--   **Decoupling**: The architecture decouples hardware-specific code (in sensor drivers) from generic data processing logic (in stages), promoting modularity and testability.
+This layered architecture ensures that there are no circular dependencies, making the codebase easier to manage and scale.
 
 ---
 
@@ -169,12 +182,12 @@ For a detailed breakdown of the architecture, see the [Pipeline Implementation P
    
    # Or build individual crates
    cd crates/sensors && cargo build
-   cd crates/device && cargo build
+   cd crates/daemon && cargo build
    ```
 
 2. **Run the device daemon**
    ```bash
-   cd crates/device
+   cd crates/daemon
    cargo run
    ```
 

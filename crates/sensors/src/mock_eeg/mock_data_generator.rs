@@ -17,6 +17,7 @@ pub fn current_timestamp_micros() -> Result<u64, DriverError> {
 }
 
 // Same one as the ADS1299
+#[allow(dead_code)]
 fn convert_sample_to_voltage(sample_value: i32, gain: u8, use_4_5v_ref: bool) -> f32 {
     // Factor for converting to voltage: 2^23 (full scale of 24-bit ADC with sign bit)
     const FACTOR: f64 = 8_388_608.0; // 2^23
@@ -77,6 +78,7 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<i
     
 
     // Define constants
+    #[allow(dead_code)]
     const BYTES_PER_SAMPLE: usize = 3; // Assuming 24-bit samples (i24)
 
     let t_secs = relative_micros as f32 / 1_000_000.0;
@@ -134,6 +136,7 @@ pub struct EegGenerator {
     // Band amplitudes vary by channel
     channel_weights: Vec<[f32; 5]>,
     // For alpha bursts
+    #[allow(dead_code)]
     alpha_burst_counter: Vec<i32>,
     // Add phase accumulators for line noise
     line_noise_50hz_phase: Vec<f32>,

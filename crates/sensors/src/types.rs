@@ -3,24 +3,66 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::Sender;
+use crossbeam_channel::Sender;
 use eeg_types::{BridgeMsg, SensorError as EegSensorError};
+
+/// Configuration for ADC/sensor drivers
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChipConfig {
+    /// List of active channels for this chip (0-indexed for this chip)
+    pub channels: Vec<u8>,
+    /// Gain setting for all channels on this chip
+    pub gain: f32,
+    /// SPI bus for this chip
+    #[serde(default = "default_spi_bus")]
+    pub spi_bus: u8,
+    /// SPI chip select for this chip
+    #[serde(default = "default_cs_pin")]
+    pub cs_pin: u8,
+    /// DRDY pin for this chip
+    #[serde(default = "default_drdy_pin")]
+    pub drdy_pin: u8,
+}
+
+fn default_spi_bus() -> u8 { 0 }
+fn default_cs_pin() -> u8 { 0 }
+fn default_drdy_pin() -> u8 { 25 }
+
+impl Default for ChipConfig {
+    fn default() -> Self {
+        Self {
+            channels: (0..8).collect(),
+            gain: 1.0,
+            spi_bus: default_spi_bus(),
+            cs_pin: default_cs_pin(),
+            drdy_pin: default_drdy_pin(),
+        }
+    }
+}
 
 /// Configuration for ADC/sensor drivers
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AdcConfig {
     /// Target sample rate in Hz
     pub sample_rate: u32,
-    /// List of active channels (0-indexed)
-    pub channels: Vec<u8>,
-    /// Gain setting for all channels
-    pub gain: f32,
     /// Type of board driver to use
     pub board_driver: DriverType,
     /// Number of samples to batch together
     pub batch_size: usize,
     /// Reference voltage for ADC conversion
     pub vref: f32,
+    /// Configuration for each chip on the board.
+    /// If empty, the legacy `channels` and `gain` fields are used for a single-chip board.
+    #[serde(default)]
+    pub chips: Vec<ChipConfig>,
+    /// (Legacy) List of active channels (0-indexed)
+    #[serde(default)]
+    pub channels: Vec<u8>,
+    /// (Legacy) Gain setting for all channels
+    #[serde(default)]
+    pub gain: f32,
 }
 
 pub use eeg_types::DriverType;
@@ -34,6 +76,7 @@ impl Default for AdcConfig {
             board_driver: DriverType::MockEeg,
             batch_size: 1,
             vref: 4.5,
+            chips: vec![],
         }
     }
 }
@@ -59,7 +102,7 @@ use pipeline::data::Packet;
 #[derive(Debug)]
 pub enum DriverEvent {
     /// New data is available
-    Data(Packet<i32>),
+    Data(Packet),
     /// Driver status changed
     StatusChange(DriverStatus),
     /// An error occurred
@@ -118,6 +161,9 @@ impl Error for DriverError {}
 
 /// Trait that all sensor drivers must implement
 pub trait AdcDriver: Send + Sync + 'static {
+    /// Initialize the driver and underlying hardware.
+    fn initialize(&mut self) -> Result<(), DriverError>;
+
     /// Start data acquisition (new synchronous method)
     fn acquire(
         &mut self,
@@ -133,18 +179,4 @@ pub trait AdcDriver: Send + Sync + 'static {
 
     /// Shutdown the driver and clean up resources
     fn shutdown(&mut self) -> Result<(), DriverError>;
-}
-
-/// Factory function to create drivers based on configuration
-pub fn create_driver(config: AdcConfig) -> Result<Box<dyn AdcDriver>, Box<dyn Error>> {
-    match config.board_driver {
-        DriverType::Ads1299 => {
-            let driver = crate::ads1299::driver::Ads1299Driver::new(config)?;
-            Ok(Box::new(driver))
-        }
-        DriverType::MockEeg => {
-            let driver = crate::mock_eeg::driver::MockDriver::new(config)?;
-            Ok(Box::new(driver))
-        }
-    }
 }

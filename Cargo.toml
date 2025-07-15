@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/device",
+    "crates/daemon",
     "crates/sensors",
     "crates/eeg_types",
     "crates/pipeline",
     "plugins/basic_voltage_filter",
     "plugins/csv_recorder",
     "plugins/brain_waves_fft",
+    "crates/boards",
 ]
 
 [workspace.dependencies]

@@ -8,7 +8,7 @@ use pipeline::data::Packet;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum BridgeMsg {
     /// Contains a packet of sensor data.
-    Data(Packet<i32>),
+    Data(Packet),
     /// Signals that an error occurred in the sensor driver.
     Error(SensorError),
 }

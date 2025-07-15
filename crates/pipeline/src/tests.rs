@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use crate::control::{ControlCommand, PipelineEvent};
 use crate::runtime::RuntimeMsg;
-use std::any::Any;
-use std::sync::mpsc;
+use crossbeam_channel;
 use std::thread;
 
 #[test]
@@ -45,8 +44,8 @@ fn test_full_static_pipeline() {
     let config: SystemConfig = serde_json::from_str(config_json).unwrap();
 
     // 3. Create channels for the runtime
-    let (tx, rx) = mpsc::channel::<RuntimeMsg<Box<dyn Any + Send>>>();
-    let (event_tx, event_rx) = mpsc::channel::<PipelineEvent>();
+    let (tx, rx) = crossbeam_channel::unbounded::<RuntimeMsg>();
+    let (event_tx, event_rx) = crossbeam_channel::unbounded::<PipelineEvent>();
 
     // 4. Build the graph
     let graph = crate::graph::PipelineGraph::build(

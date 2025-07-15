@@ -60,7 +60,7 @@ impl Debug for ControlCommand {
 }
 
 /// Events sent from the pipeline back to the control plane (e.g., the `device` crate).
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum PipelineEvent {
     /// Acknowledges that the pipeline has completed its shutdown sequence.
     ShutdownAck,

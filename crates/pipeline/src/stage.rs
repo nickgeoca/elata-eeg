@@ -1,9 +1,9 @@
 //! Core definitions for pipeline stages.
 
 use crate::control::{ControlCommand, PipelineEvent};
+use crate::data::Packet;
 use crate::error::StageError;
-use std::any::Any;
-use std::sync::mpsc::Sender;
+use crossbeam_channel::Sender;
 
 /// A context object passed to each stage's `process` method.
 ///
@@ -31,16 +31,16 @@ impl StageContext {
 ///
 /// A stage is a component that receives packets of one type (`I`), processes
 /// them, and outputs packets of another type (`O`). It can also respond to
-pub trait Stage: Send + Sync + Any {
+pub trait Stage: Send + Sync {
     /// A unique identifier for this stage instance.
     fn id(&self) -> &str;
 
     /// Processes an input packet and returns an optional output packet.
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError>;
+    ) -> Result<Option<Packet>, StageError>;
 
     /// Handles a control command sent to the pipeline.
     /// The default implementation does nothing, allowing stages to opt-in.
@@ -80,9 +80,9 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+    ) -> Result<Option<Packet>, StageError> {
         (**self).process(packet, ctx)
     }
 

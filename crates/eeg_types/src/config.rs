@@ -57,7 +57,11 @@ impl Default for FilterConfig {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DriverType {
-    /// ADS1299 EEG chip driver
+    /// Elata V1 board (8-channel)
+    ElataV1,
+    /// Elata V2 board (32-channel)
+    ElataV2,
+    /// ADS1299 EEG chip driver (for direct use)
     Ads1299,
     /// Mock driver for testing
     MockEeg,

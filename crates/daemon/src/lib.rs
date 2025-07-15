@@ -3,4 +3,3 @@ pub mod config;
 pub mod driver_handler;
 pub mod pid_manager;
 pub mod plugin_supervisor;
-pub mod elata_emu_v1;

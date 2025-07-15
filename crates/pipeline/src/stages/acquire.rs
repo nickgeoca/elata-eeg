@@ -2,11 +2,11 @@
 
 use crate::config::StageConfig;
 use crate::control::ControlCommand;
+use crate::data::Packet;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
 use serde::Deserialize;
-use std::any::Any;
 use tracing::debug;
 
 /// A source stage that generates mock raw EEG data.
@@ -51,9 +51,9 @@ impl Stage for Acquire {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+    ) -> Result<Option<Packet>, StageError> {
         // In this test setup, the Acquire stage is just a pass-through.
         // The test itself is the source of the data.
         debug!("Acquire stage passing packet through.");

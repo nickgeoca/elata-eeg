@@ -6,7 +6,6 @@ use crate::registry::StageFactory;
 use crate::stage::{Drains, Stage, StageContext};
 use crate::data::Packet;
 use serde::Deserialize;
-use std::any::Any;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -56,10 +55,10 @@ impl Stage for CsvSink {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
-        if let Some(packet) = packet.downcast_ref::<Packet<f32>>() {
+    ) -> Result<Option<Packet>, StageError> {
+        if let Packet::Voltage(packet) = packet {
             let mut writer_guard = self.writer.lock().unwrap();
             if let Some(writer) = writer_guard.as_mut() {
                 for sample in &packet.samples {

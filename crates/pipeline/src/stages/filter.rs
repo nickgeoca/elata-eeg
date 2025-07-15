@@ -1,10 +1,10 @@
 //! A placeholder for a filter stage.
 
 use crate::config::StageConfig;
+use crate::data::Packet;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
-use std::any::Any;
 
 /// A placeholder filter stage.
 #[derive(Default)]
@@ -29,9 +29,9 @@ impl Stage for Filter {
 
     fn process(
         &mut self,
-        packet: Box<dyn Any + Send>,
+        packet: Packet,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+    ) -> Result<Option<Packet>, StageError> {
         Ok(Some(packet))
     }
 }
