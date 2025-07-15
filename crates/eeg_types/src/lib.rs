@@ -6,8 +6,10 @@
 pub mod event;
 pub mod plugin;
 pub mod config;
+pub mod data;
 
 // Re-export commonly used types
 pub use event::*;
 pub use plugin::*;
 pub use config::*;
+pub use data::*;

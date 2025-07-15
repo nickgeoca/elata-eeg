@@ -1,81 +1,82 @@
-//! Voltage conversion stage for converting raw ADC values to voltages
+//! Converts raw i32 ADC samples into f32 voltage values.
 
-use crate::{
-    data::{Packet, RawEegPacket, VoltageEegPacket},
-    error::StageError,
-    stage::{StageContext},
-    stage_def,
-};
-use serde_json::Value;
-use std::sync::atomic::{AtomicU32, Ordering};
-use tracing::trace;
+use crate::config::StageConfig;
+use crate::error::StageError;
+use crate::registry::StageFactory;
+use crate::stage::{Stage, StageContext};
+use async_trait::async_trait;
+use eeg_types::Packet;
+use std::sync::Arc;
 
-stage_def! {
-    name: ToVoltageStage,
-    inputs: RawEegPacket,
-    outputs: VoltageEegPacket,
+/// A factory for creating `ToVoltage` stages.
+#[derive(Default)]
+pub struct ToVoltageFactory;
 
-    /// config
-    params: {
-        vref: f32 = 4.5,
-        adc_bits: u8 = 24,
-        yield_threshold: u32 = 64,
-    },
+#[async_trait]
+impl StageFactory<f32, f32> for ToVoltageFactory {
+    async fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage<f32, f32>>, StageError> {
+        Ok(Box::new(ToVoltage {
+            id: config.name.clone(),
+            ..Default::default()
+        }))
+    }
+}
 
-    /// state
-    fields: {
-        scale: AtomicU32, // Pre-computed for the hot loop
-    },
+/// A pipeline stage that converts raw integer samples to voltage values.
+pub struct ToVoltage {
+    id: String,
+    cached_meta_ptr: usize,
+    cached_scale_factor: f32,
+    cached_offset: i32,
+}
 
-    /// init
-    init: |params| {
-        let max_value = (1 << (params.adc_bits - 1)) - 1;
-        let scale = params.vref / max_value as f32;
-        // The macro expects an instance of the stage struct containing the `fields`
-        // to be returned. The `params` are added automatically.
-        (scale: AtomicU32::new(scale.to_bits()))
-    },
+impl Default for ToVoltage {
+    fn default() -> Self {
+        Self {
+            id: "default".to_string(),
+            cached_meta_ptr: 0,
+            cached_scale_factor: 1.0,
+            cached_offset: 0,
+        }
+    }
+}
 
-    /// process here (single packet at a time)
-    process: |self, pkt: Packet<RawEegPacket>, _ctx: &mut StageContext<_, _>| -> Result<Packet<VoltageEegPacket>, StageError> {
-        let scale = f32::from_bits(self.scale.load(Ordering::Acquire));
+#[async_trait]
+impl Stage<f32, f32> for ToVoltage {
+    fn id(&self) -> &str {
+        &self.id
+    }
 
-        let voltage_samples: Vec<f32> = pkt.samples.samples
-            .iter()
-            .map(|&raw| (raw as f32) * scale)
+    async fn process(
+        &mut self,
+        packet: Packet<f32>,
+        _ctx: &mut StageContext,
+    ) -> Result<Option<Packet<f32>>, StageError> {
+        let meta_ptr = Arc::as_ptr(&packet.header.meta) as usize;
+
+        if self.cached_meta_ptr != meta_ptr {
+            let meta = &packet.header.meta;
+            let full_scale_range = if meta.is_twos_complement {
+                1i32 << (meta.adc_bits - 1)
+            } else {
+                1i32 << meta.adc_bits
+            };
+            self.cached_scale_factor = (meta.v_ref / meta.gain) / full_scale_range as f32;
+            self.cached_offset = meta.offset_code;
+            self.cached_meta_ptr = meta_ptr;
+        }
+
+        let samples_f32: Vec<f32> = packet
+            .samples
+            .into_iter()
+            .map(|raw_sample| (raw_sample as i32 - self.cached_offset) as f32 * self.cached_scale_factor)
             .collect();
 
-        // construct and return this
-        Ok(Packet::new(
-            pkt.header,
-            VoltageEegPacket { samples: voltage_samples },
-            pkt.pool(), // Re-using the memory pool handle
-        ))
-    },
+        let output_packet = Packet {
+            header: packet.header,
+            samples: samples_f32,
+        };
 
-    /// Optional custom logic for handling parameter updates from control messages.
-    update_param: |self, key: &str, val: Value| {
-        match key {
-            "vref" => {
-                let new_vref = val.as_f64().map(|v| v as f32).ok_or_else(|| StageError::BadParam(key.into()))?;
-                // `self.adc_bits` is available because it's a param
-                let max_value = (1 << (self.adc_bits - 1)) - 1;
-                let new_scale = new_vref / max_value as f32;
-                self.scale.store(new_scale.to_bits(), Ordering::Release);
-                trace!("Updated scale to {}", new_scale);
-            }
-            "adc_bits" => {
-                let new_adc_bits = val.as_u64().map(|v| v as u8).ok_or_else(|| StageError::BadParam(key.into()))?;
-                self.adc_bits = new_adc_bits;
-                // We need to recalculate the scale when adc_bits changes too
-                let vref = f32::from_bits(self.vref.to_bits());
-                let max_value = (1 << (new_adc_bits - 1)) - 1;
-                let new_scale = vref / max_value as f32;
-                self.scale.store(new_scale.to_bits(), Ordering::Release);
-                trace!("Updated adc_bits to {} and recalculated scale", new_adc_bits);
-            }
-            _ => return Err(StageError::BadParam(key.into())),
-        }
-        Ok(())
+        Ok(Some(output_packet))
     }
 }

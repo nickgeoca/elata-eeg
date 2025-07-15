@@ -147,3 +147,138 @@ The new pipeline system replaces the event-bus-based plugin architecture with ex
 - Visual pipeline editor
 - Advanced error recovery strategies
 - Performance optimizations for high-throughput scenarios
+
+
+# Misc
+### What your current code already does
+
+| Feature                                        | Status in the code you showed                                                                                                                                                                                       |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Fan-out / TEE**                              | **Built-in.** Every stage publishes with a `tokio::sync::broadcast::Sender`.  Each downstream edge simply calls `sender.subscribe()` to get its own `Receiver`.  That *is* the TEE. No extra stage required.        |
+| **Multiple downstream consumers per stage**    | **Works today.**  You can point two, three, or twenty child stages at the same parent—each gets its own subscription and sees every packet.                                                                         |
+| **Multiple independent sensors (roots)**       | **Also supported.**  A “sensor” is just another source stage with its own broadcast channel.  Nothing stops you from instantiating `ads1299_board_1`, `ads1299_board_2`, etc., inside the same `PipelineRuntime`.   |
+| **Cross-sensor fusion**                        | **Not yet first-class.**  You’d need to write an explicit *fan-in* stage (e.g., `AlignAndZip`) that takes two receivers in its `inputs: [...]` array, waits for matching timestamps, and outputs a combined packet. |
+| **Hot reconfig / prune / shared-prefix reuse** | **Planned, not implemented.**  The code you posted sets up the pieces (`shutdown_rx`, multi-input vector), but you still have to add ref-counting and the control-plane walker to make dynamic attach/detach safe.  |
+
+---
+
+### How to use it as a TEE right now
+
+```toml
+# pipeline.toml
+[[stages]]
+name  = "adc"
+type  = "Ads1299Source"
+params = { board = 0 }
+
+[[stages]]
+name   = "plotter"
+type   = "GuiSink"
+inputs = ["adc"]          # <-- subscribe to adc
+
+[[stages]]
+name   = "recorder"
+type   = "CsvSink"
+inputs = ["adc"]          # <-- another independent subscribe
+```
+
+At runtime:
+
+```
+adc ─► broadcast ─┬► plotter
+                  └► recorder
+```
+
+Nothing extra to configure; the dispatcher gives each sink its own buffer.
+
+---
+
+### Adding a second sensor
+
+```toml
+[[stages]]
+name  = "adc1"
+type  = "Ads1299Source"
+params = { board = 0 }
+
+[[stages]]
+name  = "adc2"
+type  = "Ads1299Source"
+params = { board = 1 }
+
+# Separate plots / logs
+[[stages]]  # GUI
+name   = "plot1"
+type   = "GuiSink"
+inputs = ["adc1"]
+
+[[stages]]  # CSV
+name   = "rec1"
+type   = "CsvSink"
+inputs = ["adc1"]
+
+[[stages]]  # GUI
+name   = "plot2"
+type   = "GuiSink"
+inputs = ["adc2"]
+
+[[stages]]  # CSV
+name   = "rec2"
+type   = "CsvSink"
+inputs = ["adc2"]
+```
+
+That spawns two completely independent tee chains inside the same runtime.
+
+---
+
+### If you need a **combined** stream
+
+1. **Create a fan-in stage**:
+
+```rust
+pub struct AlignAndZip { /* … */ }
+
+#[async_trait]
+impl Stage<Packet<f32>, Packet<Combined>> for AlignAndZip {
+    async fn process(&mut self,
+        packet: Packet<f32>,
+        ctx: &mut StageContext,
+        port: usize) -> Result<Option<Packet<Combined>>, StageError> {
+        // store per-port packet until you have one from each;
+        // then emit fused packet
+    }
+}
+```
+
+2. Wire it in the config:
+
+```toml
+[[stages]]
+name   = "zip"
+type   = "AlignAndZip"
+inputs = ["adc1", "adc2"]
+
+[[stages]]
+name   = "plot_zip"
+type   = "GuiSink"
+inputs = ["zip"]
+```
+
+Now you have both per-sensor sinks *and* a fused stream, all still with one broadcast per edge.
+
+---
+
+### Bottom line
+
+* **TEE-friendliness:** already there—every stage’s broadcast sender *is* a tee.
+* **Multi-sensor:** just declare more source stages; they coexist fine.
+* **Next step (only if needed):** write small fan-in/zip stages for cross-sensor DSP, or move on to the control-plane/ref-count work if you truly need live graph mutation.
+
+So yes—your current architecture is well-suited to simple fan-out and multiple sensors without adding a single line of boilerplate.
+
+# Two Architectures
+| Decision                              | Payoff                                                                                                                                                                                                          | Cost                                               |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| **Static, config-driven graph**       | • Zero runtime headaches: start, run, stop.<br>• Easier to test—build once, exhaustively verify paths.<br>• Simple tee fan-out already lets you display *and* record simultaneously.                            | • Config changes require a restart (milliseconds). |
+| **Arc-meta, self-describing packets** | • Every stage stays stateless (no global sensor table).<br>• Multi-sensor always correct—no “channel-1 belongs to which board?” bugs.<br>• Future proof: a dynamic runtime just passes the same packets around. | • 8–16 bytes extra pointer per packet (tiny)       |

@@ -10,6 +10,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 tracing = { workspace = true }
+crossbeam-channel = "0.5"
 log = { workspace = true }
 eeg_types = { path = "../eeg_types" }
 thiserror = "1.0"
@@ -26,9 +27,12 @@ futures-util = "0.3" # For WebSocket stream handling
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
+proptest = "1.0"
+futures = "0.3"
 
 [features]
 default = []
+meta-tags = []
 rtrb = ["dep:rtrb"] # Enable rtrb queue backend
 loom = ["dep:loom"] # Enable loom testing
 

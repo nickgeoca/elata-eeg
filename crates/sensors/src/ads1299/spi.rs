@@ -154,3 +154,32 @@ pub fn write_register<T: SpiDevice + ?Sized>(spi: &mut T, register: u8, value: u
 
     Ok(())
 }
+/// Waits for a falling edge interrupt on the DRDY pin with a specified timeout.
+///
+/// This function is a synchronous, blocking call that waits for the DRDY signal
+/// from the ADS1299, indicating that new data is ready.
+///
+/// # Returns
+/// - `Ok(true)` if the interrupt was received within the timeout.
+/// - `Ok(false)` if the timeout occurred.
+/// - `Err(DriverError)` if there was a GPIO error.
+pub fn wait_irq(
+    pin: &mut dyn InputPinDevice,
+    timeout: std::time::Duration,
+) -> Result<bool, crate::types::DriverError> {
+    match pin.poll_interrupt(true, Some(timeout)) {
+        Ok(Some(event)) if event.trigger == Trigger::FallingEdge => Ok(true),
+        Ok(Some(_)) => {
+            // Unexpected trigger, but we'll treat it as a timeout for simplicity
+            Ok(false)
+        }
+        Ok(None) => {
+            // Timeout
+            Ok(false)
+        }
+        Err(e) => {
+            error!("DRDY pin poll_interrupt error: {}", e);
+            Err(crate::types::DriverError::GpioError(e.to_string()))
+        }
+    }
+}

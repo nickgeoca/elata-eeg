@@ -14,17 +14,17 @@ pub const BIAS_SENS_OFF_MASK: u8 = 0x00;
 
 // Register Addresses
 pub const REG_ID_ADDR    : u8 = 0x00;
-pub const CONFIG1_ADDR   : u8 = 0x01; pub const config1_reg: u8 = 0x90;
-pub const CONFIG2_ADDR   : u8 = 0x02; pub const config2_reg: u8 = 0xD0 | DC_TEST;
-pub const CONFIG3_ADDR   : u8 = 0x03; pub const config3_reg: u8 = 0x60 | BIASREF_INT | PD_BIAS | PD_REFBUF;
+pub const CONFIG1_ADDR   : u8 = 0x01; pub const CONFIG1_REG: u8 = 0x90;
+pub const CONFIG2_ADDR   : u8 = 0x02; pub const CONFIG2_REG: u8 = 0xD0 | DC_TEST;
+pub const CONFIG3_ADDR   : u8 = 0x03; pub const CONFIG3_REG: u8 = 0x60 | BIASREF_INT | PD_BIAS | PD_REFBUF;
 pub const LOFF_ADDR      : u8 = 0x04;
-pub const CH1SET_ADDR    : u8 = 0x05; pub const chn_reg    : u8 = 0x00 | MUX_NORMAL;
-                                      pub const chn_off    : u8 = 0x00 | POWER_OFF_CH;
-pub const BIAS_SENSP_ADDR: u8 = 0x0D; pub const bias_sensp_reg_mask : u8 = BIAS_SENS_OFF_MASK;
-pub const BIAS_SENSN_ADDR: u8 = 0x0E; pub const bias_sensn_reg_mask : u8 = BIAS_SENS_OFF_MASK;
-pub const LOFF_SENSP_ADDR: u8 = 0x0F; pub const loff_sesp_reg: u8 = 0x00;
-pub const MISC1_ADDR     : u8 = 0x15; pub const misc1_reg   : u8 = 0x00 | SRB1;
-pub const CONFIG4_ADDR   : u8 = 0x17; pub const config4_reg : u8 = 0x00;
+pub const CH1SET_ADDR    : u8 = 0x05; pub const CHN_REG    : u8 = 0x00 | MUX_NORMAL;
+                                      pub const CHN_OFF    : u8 = 0x00 | POWER_OFF_CH;
+pub const BIAS_SENSP_ADDR: u8 = 0x0D; pub const BIAS_SENSP_REG_MASK : u8 = BIAS_SENS_OFF_MASK;
+pub const BIAS_SENSN_ADDR: u8 = 0x0E; pub const BIAS_SENSN_REG_MASK : u8 = BIAS_SENS_OFF_MASK;
+pub const LOFF_SENSP_ADDR: u8 = 0x0F; pub const LOFF_SESP_REG: u8 = 0x00;
+pub const MISC1_ADDR     : u8 = 0x15; pub const MISC1_REG   : u8 = 0x00 | SRB1;
+pub const CONFIG4_ADDR   : u8 = 0x17; pub const CONFIG4_REG : u8 = 0x00;
 
 // ADS1299 Commands
 pub const CMD_WAKEUP: u8 = 0x02;

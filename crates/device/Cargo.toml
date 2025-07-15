@@ -10,11 +10,13 @@ brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 [dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = "0.7" # Added for CancellationToken
+tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1" # Added for async trait support
 anyhow = "1.0" # Added for error handling
 tracing = "0.1" # Added for structured logging
 eeg_sensor = { path = "../sensors" }
 eeg_types = { path = "../eeg_types" }
+pipeline = { path = "../pipeline" }
 csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
 basic_voltage_filter_plugin = { path = "../../plugins/basic_voltage_filter" }
 brain_waves_fft_plugin = { path = "../../plugins/brain_waves_fft", optional = true }
@@ -30,11 +32,15 @@ log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
+crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = "3.8"
 tokio-test = "0.4"
 bytes = "1.0"
+tokio-tungstenite = { version = "0.23.1", features = ["native-tls"] }
+crossbeam-channel = "0.5"
+tokio-stream = { version = "0.1", features = ["net"] }
 
 [[bin]]
 name = "eeg_daemon"

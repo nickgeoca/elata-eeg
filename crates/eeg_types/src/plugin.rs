@@ -9,7 +9,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 use anyhow::Result;
 
-use crate::event::{SensorEvent, EventFilter, event_matches_filter};
+use crate::event::{SensorEvent, EventFilter};
 
 /// Configuration trait that all plugin configurations must implement
 pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {

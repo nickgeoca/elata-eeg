@@ -1,60 +1,75 @@
-//! Basic pipeline example demonstrating the new architecture
+//! Basic pipeline example demonstrating the new, simplified architecture.
 
 use std::sync::Arc;
-use pipeline::{
-    PipelineConfig, PipelineRuntime, StageRegistry,
-    register_builtin_stages,
-};
+use eeg_types::data::{Packet, PacketHeader, SensorMeta};
+use pipeline::control::PipelineEvent;
+use pipeline::stage::{Stage, StageContext};
+use pipeline::stages::to_voltage::ToVoltage;
+use pipeline::error::StageError;
+use tokio::sync::mpsc;
+
+// A simple stage that doubles each sample.
+struct DoublerStage;
+
+#[async_trait::async_trait]
+impl Stage<f32, f32> for DoublerStage {
+    fn id(&self) -> &str {
+        "DoublerStage"
+    }
+
+    async fn process(&mut self, packet: Packet<f32>, _ctx: &mut StageContext) -> Result<Option<Packet<f32>>, StageError> {
+        let samples = packet.samples.into_iter().map(|s| s * 2.0).collect();
+        Ok(Some(Packet {
+            header: packet.header,
+            samples,
+        }))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logging (commented out for now)
-    // tracing_subscriber::fmt::init();
+    println!("Basic Pipeline Example");
+    println!("======================");
 
-    println!("Pipeline Graph Architecture Example");
-    println!("===================================");
+    // 1. Create a test packet of raw ADC counts
+    let sensor_meta = Arc::new(SensorMeta {
+        schema_ver: 2,
+        source_type: "mock".to_string(),
+        v_ref: 2.5,
+        adc_bits: 24,
+        gain: 1.0,
+        sample_rate: 250,
+        offset_code: 0,
+        is_twos_complement: true,
+    });
 
-    // Create stage registry and register built-in stages
-    let mut registry = StageRegistry::new();
-    register_builtin_stages(&mut registry);
+    let input_packet = Packet {
+        header: PacketHeader {
+            ts_ns: 0,
+            batch_size: 4,
+            meta: sensor_meta,
+        },
+        samples: vec![1000.0, 2000.0, -1000.0, -2000.0],
+    };
+    println!("Input Samples: {:?}", input_packet.samples);
 
-    println!("Registered stage types: {:?}", registry.stage_types());
 
-    // Load pipeline configuration
-    let config_json = include_str!("../../../examples/pipeline-config.json");
-    let config = PipelineConfig::from_json(config_json)?;
+    // 2. Instantiate the stages
+    let mut to_voltage_stage = ToVoltage::default();
+    let mut doubler_stage = DoublerStage;
+    let (event_tx, _) = mpsc::channel::<PipelineEvent>(10);
+    let mut ctx = StageContext::new(event_tx);
 
-    println!("Loaded pipeline: {}", config.metadata.name);
-    println!("Pipeline stages: {}", config.stages.len());
+    // 3. Manually process the packet through the pipeline
+    // Stage 1: Convert ADC counts to voltage
+    let voltage_packet = to_voltage_stage.process(input_packet, &mut ctx).await?.unwrap();
+    println!("After ToVoltage: {:?}", voltage_packet.samples);
 
-    // Validate the configuration
-    config.validate()?;
-    println!("Pipeline configuration is valid");
+    // Stage 2: Double the voltage values
+    let final_packet = doubler_stage.process(voltage_packet, &mut ctx).await?.unwrap();
+    println!("After Doubler:   {:?}", final_packet.samples);
 
-    // Get topological order
-    let topo_order = config.topological_order()?;
-    println!("Execution order: {:?}", 
-             topo_order.iter().map(|s| &s.name).collect::<Vec<_>>());
-
-    // Create runtime
-    let mut runtime = PipelineRuntime::new(Arc::new(registry));
-
-    // Load the pipeline
-    runtime.load_pipeline(&config).await?;
-    println!("Pipeline loaded successfully");
-
-    // Note: We don't actually start the pipeline in this example
-    // because the stages would try to process real data
-    println!("Pipeline ready to start (not starting in this example)");
-
-    // Show pipeline graph information
-    if let Some(graph) = runtime.graph().await {
-        let graph_guard = graph.read().await;
-        let stats = graph_guard.stats();
-        println!("Graph stats: {:?}", stats);
-    }
-
-    println!("Example completed successfully!");
+    println!("\nExample completed successfully!");
 
     Ok(())
 }

@@ -1,25 +1,29 @@
 //! Built-in pipeline stages
 
+use crate::registry::StageRegistry;
+
 pub mod acquire;
-pub mod to_voltage;
-pub mod filter;
-pub mod websocket_sink;
 pub mod csv_sink;
+pub mod filter;
+pub mod test_stage;
+pub mod to_voltage;
+pub mod websocket_sink;
 
-// Re-export stage implementations
-pub use acquire::*;
-pub use to_voltage::*;
-pub use filter::*;
-pub use websocket_sink::*;
-pub use csv_sink::*;
+pub use acquire::AcquireFactory;
+pub use csv_sink::CsvSinkFactory;
+pub use filter::FilterFactory;
+pub use test_stage::StatefulTestStage;
+pub use to_voltage::ToVoltageFactory;
+pub use websocket_sink::WebsocketSinkFactory;
 
-use crate::stage::StageRegistry;
-
-/// Register all built-in stages with the registry
-pub fn register_builtin_stages(registry: &mut StageRegistry) {
-    // registry.register(AcquireStageFactory::new());
-    // registry.register(ToVoltageStageFactory::new());
-    // registry.register(FilterStageFactory::new()); // This is now auto-registered
-    // registry.register(WebSocketSinkFactory::new());
-    // registry.register(CsvSinkFactory::new());
+/// Registers all built-in stages with the provided registry.
+pub fn register_builtin_stages(registry: &mut StageRegistry<f32, f32>) {
+    registry.register("acquire", AcquireFactory::default());
+    registry.register("to_voltage", ToVoltageFactory::default());
+    registry.register("filter", FilterFactory::default());
+    registry.register("csv_sink", CsvSinkFactory::default());
+    registry.register(
+        "websocket_sink",
+        WebsocketSinkFactory::default(),
+    );
 }

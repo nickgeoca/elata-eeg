@@ -1,6 +1,5 @@
 //! Configuration types for the EEG daemon system
 
-use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// Basic daemon configuration that plugins might need

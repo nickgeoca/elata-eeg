@@ -2,7 +2,7 @@ use std::f32::consts::PI;
 use rand::Rng;
 use log::{debug, trace};
 use lazy_static::lazy_static;
-use super::super::types::{AdcConfig, AdcData, DriverError};
+use super::super::types::{AdcConfig, DriverError};
 
 /// Helper function to get current timestamp in microseconds
 ///
@@ -54,80 +54,61 @@ fn convert_sample_to_voltage(sample_value: i32, gain: u8, use_4_5v_ref: bool) ->
 /// Each channel's sine wave frequency is defined by:
 ///     channel 0: 2 Hz, channel 1: 6 Hz, channel 2: 10 Hz, etc.
 /// (i.e., channel i gets 2 + 4*i Hz).
-pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> Vec<AdcData> {
+pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> Vec<i32> {
     let t_secs = relative_micros as f32 / 1_000_000.0;
     trace!("Generating sample at t={} secs", t_secs);
 
     // Scale factor for converting sine wave (-1.0 to 1.0) to 24-bit range
     const AMPLITUDE: f32 = 2000.0 * 256.0; // Scale for 24-bit range
-    let timestamp = relative_micros;
 
-    config.channels.iter().enumerate().map(|(i, &channel)| {
+    config.channels.iter().enumerate().map(|(i, _channel)| {
         let freq = 2.0 + (i as f32) * 4.0; // 2 Hz for ch0, 6 Hz for ch1, etc.
         let angle = 2.0 * PI * freq * t_secs;
         let waveform = angle.sin();
-        let raw_value = (waveform * AMPLITUDE) as i32;
-        let voltage = convert_sample_to_voltage(raw_value, config.gain as u8, (config.vref - 4.5).abs() < f32::EPSILON);
-        
-        AdcData {
-            channel,
-            raw_value,
-            voltage,
-            timestamp,
-        }
+        (waveform * AMPLITUDE) as i32
     }).collect()
 }
 
 /// Helper function to generate more realistic EEG-like data with multiple frequency bands.
 /// This implementation creates synthetic EEG data with delta, theta, alpha, beta, and gamma
 /// components, as well as simulated line noise at 50Hz and 60Hz.
-pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<AdcData> {
-    use rand::Rng;
-    use std::f32::consts::PI;
+pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<i32> {
     
+    
+
     // Define constants
     const BYTES_PER_SAMPLE: usize = 3; // Assuming 24-bit samples (i24)
-    
+
     let t_secs = relative_micros as f32 / 1_000_000.0;
     trace!("Generating EEG sample at t={} secs", t_secs);
-    
+
     // Create or get the EEG generator
     // We use a static mutex to ensure thread safety and preserve state between calls
     lazy_static! {
         static ref EEG_GENERATORS: std::sync::Mutex<std::collections::HashMap<u32, EegGenerator>> =
             std::sync::Mutex::new(std::collections::HashMap::new());
     }
-    
+
     // Get or create an EEG generator for this sample rate and channel count
     let mut generators = EEG_GENERATORS.lock().unwrap();
     let generator_key = config.sample_rate;
-    
+
     if !generators.contains_key(&generator_key) {
         debug!("Creating new EEG generator for sample rate {} Hz", config.sample_rate);
         generators.insert(generator_key, EegGenerator::new(config.sample_rate, config.channels.len()));
     }
-    
+
     // Get a mutable reference to the generator
     let gen = generators.get_mut(&generator_key).unwrap();
-    
+
     // Update the time for all channels
     for chan_idx in 0..gen.num_channels {
         gen.t[chan_idx] = t_secs;
     }
-    
+
     // Generate samples for each channel
-    let timestamp = relative_micros;
-    
-    config.channels.iter().enumerate().map(|(i, &channel)| {
-        let raw_value = gen.generate_sample(i);
-        let voltage = convert_sample_to_voltage(raw_value, config.gain as u8, (config.vref - 4.5).abs() < f32::EPSILON);
-        
-        AdcData {
-            channel,
-            raw_value,
-            voltage,
-            timestamp,
-        }
+    config.channels.iter().enumerate().map(|(i, _channel)| {
+        gen.generate_sample(i)
     }).collect()
 }
 
@@ -222,7 +203,7 @@ impl EegGenerator {
         let mut line_noise_50hz_phase = vec![0.0; num_channels];
         let mut line_noise_60hz_phase = vec![0.0; num_channels];
         let mut line_noise_amplitude = vec![0.0; num_channels];
-        let mut alpha_burst_counter = vec![0; num_channels];
+        let alpha_burst_counter = vec![0; num_channels];
         
         for i in 0..num_channels {
             delta_phase[i] = rng.gen::<f32>() * 2.0 * PI;

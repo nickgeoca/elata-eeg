@@ -62,6 +62,12 @@ pub enum StageError {
     Backpressure(&'static str),
     #[error("bad param {0}")]
     BadParam(String),
+    #[error("stage type not found: {0}")]
+    NotFound(String),
+    #[error("invalid configuration: {0}")]
+    BadConfig(String),
+    #[error("pipeline is not ready: {0}")]
+    NotReady(String),
     #[error("fatal hw error: {0}")]
     Fatal(String),
     #[error("stage is busy and cannot perform the requested operation")]
@@ -72,4 +78,6 @@ pub enum StageError {
     InvalidContext(String),
     #[error("IO error: {0}")]
     Io(String),
+    #[error("JSON serialization/deserialization error: {0}")]
+    JsonError(#[from] serde_json::Error),
 }

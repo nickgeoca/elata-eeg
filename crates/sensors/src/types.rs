@@ -2,7 +2,9 @@
 
 use std::error::Error;
 use std::fmt;
-use tokio::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::Sender;
+use eeg_types::{BridgeMsg, SensorError as EegSensorError};
 
 /// Configuration for ADC/sensor drivers
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -23,6 +25,19 @@ pub struct AdcConfig {
 
 pub use eeg_types::DriverType;
 
+impl Default for AdcConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 250,
+            channels: (0..8).collect(),
+            gain: 1.0,
+            board_driver: DriverType::MockEeg,
+            batch_size: 1,
+            vref: 4.5,
+        }
+    }
+}
+
 /// Status of a sensor driver
 #[derive(Debug, Clone, PartialEq)]
 pub enum DriverStatus {
@@ -39,32 +54,23 @@ pub enum DriverStatus {
 }
 
 /// Events emitted by sensor drivers
-#[derive(Debug, Clone)]
+use eeg_types::Packet;
+
+#[derive(Debug)]
 pub enum DriverEvent {
     /// New data is available
-    Data(Vec<AdcData>),
+    Data(Packet<i32>),
     /// Driver status changed
     StatusChange(DriverStatus),
     /// An error occurred
     Error(String),
 }
 
-/// Raw data from an ADC channel
-#[derive(Debug, Clone)]
-pub struct AdcData {
-    /// Channel number (0-indexed)
-    pub channel: u8,
-    /// Raw ADC value
-    pub raw_value: i32,
-    /// Voltage value (converted from raw)
-    pub voltage: f32,
-    /// Timestamp in microseconds since epoch
-    pub timestamp: u64,
-}
-
 /// Errors that can occur in sensor drivers
 #[derive(Debug, Clone)]
 pub enum DriverError {
+    /// A sensor-specific error.
+    SensorError(EegSensorError),
     /// Hardware communication error
     HardwareError(String),
     /// Invalid configuration
@@ -92,6 +98,7 @@ pub enum DriverError {
 impl fmt::Display for DriverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            DriverError::SensorError(e) => write!(f, "Sensor error: {}", e),
             DriverError::HardwareError(msg) => write!(f, "Hardware error: {}", msg),
             DriverError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
             DriverError::SpiError(msg) => write!(f, "SPI error: {}", msg),
@@ -110,34 +117,34 @@ impl fmt::Display for DriverError {
 impl Error for DriverError {}
 
 /// Trait that all sensor drivers must implement
-#[async_trait::async_trait]
 pub trait AdcDriver: Send + Sync + 'static {
-    /// Start data acquisition
-    async fn start_acquisition(&mut self) -> Result<(), DriverError>;
-    
-    /// Stop data acquisition
-    async fn stop_acquisition(&mut self) -> Result<(), DriverError>;
-    
+    /// Start data acquisition (new synchronous method)
+    fn acquire(
+        &mut self,
+        tx: Sender<BridgeMsg>,
+        stop_flag: &AtomicBool,
+    ) -> Result<(), EegSensorError>;
+
     /// Get current driver status
-    async fn get_status(&self) -> DriverStatus;
-    
+    fn get_status(&self) -> DriverStatus;
+
     /// Get current configuration
-    async fn get_config(&self) -> Result<AdcConfig, DriverError>;
-    
+    fn get_config(&self) -> Result<AdcConfig, DriverError>;
+
     /// Shutdown the driver and clean up resources
-    async fn shutdown(&mut self) -> Result<(), DriverError>;
+    fn shutdown(&mut self) -> Result<(), DriverError>;
 }
 
 /// Factory function to create drivers based on configuration
-pub async fn create_driver(config: AdcConfig) -> Result<(Box<dyn AdcDriver>, mpsc::Receiver<DriverEvent>), Box<dyn Error>> {
+pub fn create_driver(config: AdcConfig) -> Result<Box<dyn AdcDriver>, Box<dyn Error>> {
     match config.board_driver {
         DriverType::Ads1299 => {
-            let (driver, rx) = crate::ads1299::driver::Ads1299Driver::new(config, 1000)?;
-            Ok((Box::new(driver), rx))
+            let driver = crate::ads1299::driver::Ads1299Driver::new(config)?;
+            Ok(Box::new(driver))
         }
         DriverType::MockEeg => {
-            let (driver, rx) = crate::mock_eeg::driver::MockDriver::new(config, 1000)?;
-            Ok((Box::new(driver), rx))
+            let driver = crate::mock_eeg::driver::MockDriver::new(config)?;
+            Ok(Box::new(driver))
         }
     }
 }

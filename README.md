@@ -95,37 +95,41 @@ bash rebuild.sh
 
 ---
 
-## System Architecture (v0.6)
+## System Architecture (v2.0)
+
+The system is built around a flexible, asynchronous pipeline architecture defined in the `crates/pipeline` crate. This design allows for modular, reusable processing stages that can be chained together to form complex data processing workflows.
+
+For a detailed breakdown of the architecture, see the [Pipeline Implementation Plan (v2)](todo/implementation_plan_v2.md).
 
 ```
-EEG Electrodes
-     |
-     | (analog signals)
-     v
-[ADS1299 Board] --SPI--> [Sensors Crate] --AdcData--> [Device Daemon]
-                              |                            |
-                              |                            v
-                              |                      [Plugin Manager]
-                              |                            |
-                              |                            v
-                              |                      [Active Plugin]
-                              |                            |
-                              v                            v
-                        [Raw Data Stream]           [Processed Data]
-                                                          |
-                                                          v
-                                                   [Kiosk WebSocket]
-                                                          |
-                                                          v
-                                                   [Next.js Frontend]
+ [Sensor Driver]
+       |
+       | Packet<i32> + Arc<SensorMeta>
+       v
++----------------+
+| ToVoltage Stage|
++----------------+
+       |
+       | Packet<f32> + Arc<SensorMeta>
+       v
++----------------+
+|  Filter Stage  |
++----------------+
+       |
+       | Packet<f32> + Arc<SensorMeta>
+       v
++----------------+
+|   Sink Stage   |
+| (e.g., CSV, WS)|
++----------------+
 ```
 
-**Key Components:**
-- **Sensors Crate** (`crates/sensors/`): Pure hardware interface, no DSP logic
-- **Device Daemon** (`crates/device/`): Orchestrates sensor and single active plugin
-- **Plugin System**: Each plugin contains its own DSP logic and UI components
-- **Kiosk**: Next.js application that loads plugin UIs dynamically
-- **Single Plugin Model**: Only one plugin active at a time for simplicity
+**Key Concepts:**
+
+-   **`Packet<T>`**: The fundamental unit of data transfer, containing a batch of samples of type `T`.
+-   **`SensorMeta`**: A self-describing metadata struct that travels with each packet, providing information about the data source (e.g., sample rate, voltage reference). It is wrapped in an `Arc` for efficient sharing.
+-   **`Stage<In, Out>`**: An async trait representing a single processing step in the pipeline. Stages are chained together manually or by a pipeline builder.
+-   **Decoupling**: The architecture decouples hardware-specific code (in sensor drivers) from generic data processing logic (in stages), promoting modularity and testability.
 
 ---
 

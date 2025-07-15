@@ -1,19 +1,24 @@
 use std::error::Error;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::thread;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
-use log::{info, warn, error, debug};
+use log::{info, error, debug};
 
 use eeg_sensor::{
-    create_driver, AdcConfig, AdcData, AdcDriver, DriverError, DriverEvent, DriverStatus,
+    create_driver, AdcConfig, AdcDriver, DriverError, DriverStatus,
 };
+use eeg_types::{BridgeMsg, SensorError};
+use eeg_types::Packet;
 
 pub struct EegSystem {
-    driver: Box<dyn AdcDriver>,
+    driver: Arc<tokio::sync::Mutex<Box<dyn AdcDriver>>>,
     processing_task: Option<JoinHandle<()>>,
-    tx: mpsc::Sender<AdcData>,
-    event_rx: Option<mpsc::Receiver<DriverEvent>>,
+    sensor_thread: Option<thread::JoinHandle<Result<(), SensorError>>>,
+    stop_flag: Arc<AtomicBool>,
+    tx: mpsc::Sender<i32>,
     cancel_token: CancellationToken,
 }
 
@@ -21,17 +26,18 @@ impl EegSystem {
     /// Creates an EEG processing system without starting it
     pub async fn new(
         config: AdcConfig
-    ) -> Result<(Self, mpsc::Receiver<AdcData>), Box<dyn Error>> {
+    ) -> Result<(Self, mpsc::Receiver<i32>), Box<dyn Error>> {
         info!("Creating new EegSystem with config");
-        let (driver, event_rx) = create_driver(config).await?;
-        let (tx, rx) = mpsc::channel(100);
+        let driver = create_driver(config)?;
+        let (tx, rx) = mpsc::channel(1024);
         let cancel_token = CancellationToken::new();
 
         let system = Self {
-            driver,
+            driver: Arc::new(tokio::sync::Mutex::new(driver)),
             processing_task: None,
+            sensor_thread: None,
+            stop_flag: Arc::new(AtomicBool::new(false)),
             tx,
-            event_rx: Some(event_rx),
             cancel_token,
         };
 
@@ -44,23 +50,8 @@ impl EegSystem {
     }
 
     /// Internal helper to initialize or reinitialize the driver and processing task
-    async fn initialize_processing(&mut self, config: AdcConfig) -> Result<(), Box<dyn Error>> {
+    async fn initialize_processing(&mut self, _config: AdcConfig) -> Result<(), Box<dyn Error>> {
         info!("Initializing EEG processing with config");
-        
-        // Validate configuration
-        if config.channels.is_empty() {
-            error!("Cannot initialize with zero channels");
-            return Err(Box::new(DriverError::ConfigurationError(
-                "Cannot initialize with zero channels".into()
-            )));
-        }
-
-        if config.sample_rate == 0 {
-            error!("Invalid sample rate: 0");
-            return Err(Box::new(DriverError::ConfigurationError(
-                "Sample rate must be greater than 0".into()
-            )));
-        }
 
         // Cancel any existing processing task gracefully
         if self.processing_task.is_some() {
@@ -69,62 +60,49 @@ impl EegSystem {
             self.cancel_token = CancellationToken::new();
         }
 
-        // Start acquisition
-        self.driver.start_acquisition().await?;
+        let (std_tx, std_rx) = std::sync::mpsc::channel::<BridgeMsg>();
+        let (bridge_tx, mut bridge_rx) = mpsc::channel::<BridgeMsg>(1024);
 
-        // Take ownership of the event receiver
-        let mut event_rx = self.event_rx.take().expect("Event receiver should exist");
+        let driver = self.driver.clone();
+        let stop_flag = self.stop_flag.clone();
+        self.sensor_thread = Some(thread::spawn(move || {
+            let mut driver_guard = driver.blocking_lock();
+            driver_guard.acquire(std_tx, &stop_flag)
+        }));
 
-        // Start the processing task
+        tokio::spawn(async move {
+            while let Ok(msg) = std_rx.recv() {
+                if bridge_tx.send(msg).await.is_err() {
+                    break;
+                }
+            }
+        });
+
         let tx = self.tx.clone();
-        // Clone the cancellation token for the task
         let cancel_token = self.cancel_token.clone();
 
         self.processing_task = Some(tokio::spawn(async move {
-            // Create a select future that will complete when either:
-            // 1. We receive an event from the driver
-            // 2. The cancellation token is triggered
             loop {
                 tokio::select! {
-                    // Check if cancellation was requested
                     _ = cancel_token.cancelled() => {
                         break;
                     }
-                    // Process events from the driver
-                    event_opt = event_rx.recv() => {
-                        match event_opt {
-                            Some(event) => {
-                                match event {
-                                    DriverEvent::Data(data_batch) => {
-                                        // Forward each AdcData directly to the output channel
-                                        for data in data_batch {
-                                            if let Err(e) = tx.send(data).await {
-                                                eprintln!("Error sending data: {}", e);
-                                                // Continue processing - don't break on send errors
-                                            }
-                                        }
-                                    }
-                                    DriverEvent::StatusChange(status) => {
-                                        if status == DriverStatus::Stopped {
-                                            break;
-                                        }
-                                        
-                                        // Log status changes but don't forward them
-                                        println!("Driver status changed: {:?}", status);
-                                    }
-                                    DriverEvent::Error(err_msg) => {
-                                        eprintln!("Driver error: {}", err_msg);
-                                        // Note: We can't send errors through AdcData channel
-                                        // Errors will be handled by the device daemon
+                    Some(msg) = bridge_rx.recv() => {
+                        match msg {
+                            BridgeMsg::Data(packet) => {
+                                for sample in packet.samples {
+                                    if tx.send(sample).await.is_err() {
+                                        eprintln!("Error sending data");
+                                        break;
                                     }
                                 }
                             }
-                            None => {
-                                // Channel closed, exit the task
-                                break;
+                            BridgeMsg::Error(e) => {
+                                eprintln!("Sensor error: {}", e);
                             }
                         }
                     }
+                    else => break,
                 }
             }
         }));
@@ -136,18 +114,16 @@ impl EegSystem {
     /// Stop the data acquisition & gracefully cancel the background task
     pub async fn stop(&mut self) -> Result<(), Box<dyn Error>> {
         debug!("Stopping EEG system");
-        self.driver.stop_acquisition().await?;
-        
+        self.stop_flag.store(true, Ordering::Relaxed);
+
+        if let Some(handle) = self.sensor_thread.take() {
+            handle.join().unwrap()?;
+        }
+
         if let Some(task) = self.processing_task.take() {
             debug!("Cancelling processing task");
             self.cancel_token.cancel();
-            
-            match tokio::time::timeout(Duration::from_millis(500), task).await {
-                Ok(_) => debug!("Processing task stopped gracefully"),
-                Err(_) => warn!("Processing task didn't complete in time, forcing abort"),
-            }
-            
-            self.cancel_token = CancellationToken::new();
+            task.await?;
         }
         
         Ok(())
@@ -159,21 +135,20 @@ impl EegSystem {
         self.stop().await?;
         
         // Create new driver with updated configuration
-        let (new_driver, new_event_rx) = create_driver(config.clone()).await?;
-        self.driver = new_driver;
-        self.event_rx = Some(new_event_rx);
+        let new_driver = create_driver(config.clone())?;
+        self.driver = Arc::new(tokio::sync::Mutex::new(new_driver));
         
         self.initialize_processing(config).await
     }
 
     /// Retrieve the current driver status
     pub async fn driver_status(&self) -> DriverStatus {
-        self.driver.get_status().await
+        self.driver.lock().await.get_status()
     }
 
     /// Retrieve the driver's configuration
     pub async fn driver_config(&self) -> Result<AdcConfig, DriverError> {
-        self.driver.get_config().await
+        self.driver.lock().await.get_config()
     }
 
     /// Completely shut down the EEG system and clean up resources
@@ -182,7 +157,7 @@ impl EegSystem {
         
         let shutdown_future = async {
             self.stop().await?;
-            self.driver.shutdown().await.map_err(|e| Box::new(e) as Box<dyn Error>)
+            self.driver.lock().await.shutdown().map_err(|e| Box::new(e) as Box<dyn Error>)
         };
         
         match tokio::time::timeout(

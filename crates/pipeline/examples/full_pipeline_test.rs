@@ -1,69 +1,100 @@
-//! Full pipeline test demonstrating actual data flow
+//! A test demonstrating a multi-stage pipeline using `tokio::mpsc` channels.
 
 use std::sync::Arc;
-use std::time::Duration;
-use pipeline::{
-    PipelineConfig, PipelineRuntime, StageRegistry,
-    register_builtin_stages,
-};
+use tokio::sync::mpsc;
+use eeg_types::data::{Packet, PacketHeader, SensorMeta};
+use pipeline::control::PipelineEvent;
+use pipeline::stage::{Stage, StageContext};
+use pipeline::stages::to_voltage::ToVoltage;
+use pipeline::error::StageError;
+
+/// A simple stage that multiplies every sample by a given factor.
+struct MultiplierStage {
+    factor: f32,
+}
+
+#[async_trait::async_trait]
+impl Stage<f32, f32> for MultiplierStage {
+    fn id(&self) -> &str {
+        "MultiplierStage"
+    }
+
+    async fn process(&mut self, packet: Packet<f32>, _ctx: &mut StageContext) -> Result<Option<Packet<f32>>, StageError> {
+        let samples = packet.samples.into_iter().map(|s| s * self.factor).collect();
+        Ok(Some(Packet {
+            header: packet.header,
+            samples,
+        }))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    tracing_subscriber::fmt::init();
-    
-    println!("Full Pipeline Data Flow Test");
-    println!("============================");
+    println!("Full Pipeline Test with Channels");
+    println!("================================");
 
-    // Create stage registry and register built-in stages
-    let mut registry = StageRegistry::new();
-    register_builtin_stages(&mut registry);
+    // 1. Create channels for communication between stages
+    let (tx1, mut rx1) = mpsc::channel::<Packet<f32>>(10);
+    let (tx2, mut rx2) = mpsc::channel::<Packet<f32>>(10);
+    let (tx3, mut rx3) = mpsc::channel::<Packet<f32>>(10);
+    let (event_tx, mut _event_rx) = mpsc::channel::<PipelineEvent>(10);
 
-    // Load pipeline configuration
-    let config_json = include_str!("../../../examples/pipeline-config.json");
-    let config = PipelineConfig::from_json(config_json)?;
+    // 2. Spawn a task to generate input data
+    tokio::spawn(async move {
+        let sensor_meta = Arc::new(SensorMeta {
+            schema_ver: 2,
+            source_type: "mock".to_string(),
+            v_ref: 2.5,
+            adc_bits: 24,
+            gain: 1.0,
+            sample_rate: 250,
+            offset_code: 0,
+            is_twos_complement: true,
+        });
+        let packet = Packet {
+            header: PacketHeader { ts_ns: 0, batch_size: 4, meta: sensor_meta },
+            samples: vec![1000.0, 2000.0, -1000.0, -2000.0],
+        };
+        println!("Input -> {:?}", packet.samples);
+        tx1.send(packet).await.unwrap();
+    });
 
-    println!("Loaded pipeline: {}", config.metadata.name);
-    println!("Pipeline stages: {}", config.stages.len());
-
-    // Validate the configuration
-    config.validate()?;
-    println!("Pipeline configuration is valid");
-
-    // Create runtime
-    let mut runtime = PipelineRuntime::new(Arc::new(registry));
-
-    // Load the pipeline
-    runtime.load_pipeline(&config).await?;
-    println!("Pipeline loaded successfully");
-
-    // Start the pipeline
-    println!("Starting pipeline...");
-    match runtime.start().await {
-        Ok(()) => println!("Pipeline started!"),
-        Err(e) => {
-            println!("Failed to start pipeline: {}", e);
-            return Err(e.into());
+    // 3. Spawn tasks for each stage in the pipeline
+    // Stage 1: ToVoltage
+    tokio::spawn({
+        let event_tx = event_tx.clone();
+        async move {
+            let mut stage = ToVoltage::default();
+            let mut ctx = StageContext::new(event_tx);
+            while let Some(packet) = rx1.recv().await {
+                if let Ok(Some(out_packet)) = stage.process(packet, &mut ctx).await {
+                    println!("ToVoltage -> {:?}", out_packet.samples);
+                    tx2.send(out_packet).await.unwrap();
+                }
+            }
         }
+    });
+
+    // Stage 2: Multiplier
+    tokio::spawn(async move {
+        let mut stage = MultiplierStage { factor: 10.0 };
+        let mut ctx = StageContext::new(event_tx);
+        while let Some(packet) = rx2.recv().await {
+            if let Ok(Some(out_packet)) = stage.process(packet, &mut ctx).await {
+                println!("Multiplier -> {:?}", out_packet.samples);
+                tx3.send(out_packet).await.unwrap();
+            }
+        }
+    });
+
+    // 4. Receive the final output
+    if let Some(final_packet) = rx3.recv().await {
+        println!("\nFinal Output: {:?}", final_packet.samples);
+        // Expected: (1000 * scale * 10), (2000 * scale * 10), etc.
+        // This just verifies the pipeline ran.
+        assert_eq!(final_packet.samples.len(), 4);
     }
 
-    // Let it run for a few seconds to process some data
-    println!("Running pipeline for 3 seconds...");
-    tokio::time::sleep(Duration::from_secs(3)).await;
-
-    // Stop the pipeline
-    println!("Stopping pipeline...");
-    runtime.stop().await?;
-    println!("Pipeline stopped");
-
-    // Show final metrics
-    let metrics = runtime.metrics().await;
-    println!("Final metrics:");
-    println!("  Items processed: {}", metrics.items_processed);
-    println!("  Errors: {}", metrics.error_count);
-    println!("  Uptime: {}ms", metrics.uptime_ms);
-
-    println!("Full pipeline test completed successfully!");
-
+    println!("\nTest completed successfully!");
     Ok(())
 }

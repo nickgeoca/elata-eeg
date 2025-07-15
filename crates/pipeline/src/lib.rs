@@ -5,25 +5,24 @@
 //! data flow contracts.
 
 pub mod stage;
+pub mod control;
 pub mod graph;
 pub mod config;
 pub mod runtime;
 pub mod stages;
 pub mod error;
 pub mod data;
-pub mod queue;
-pub mod control;
-#[macro_use]
-pub mod macros;
+pub mod registry;
+// #[macro_use]
+// pub mod macros;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export commonly used types
+pub use control::*;
 pub use stage::*;
-pub use graph::*;
-pub use config::*;
-pub use runtime::*;
 pub use stages::*;
 pub use error::*;
 pub use data::*;
+pub use registry::*;

@@ -83,6 +83,12 @@ pub struct FftConfig {
     pub window_function: String,
 }
 
+/// Commands sent from the WebSocket client to the device daemon.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", tag = "cmd")]
+pub enum WsControlCommand {
+    SetTestState { value: u32 },
+}
 
 /// System status and control events
 #[derive(Debug, Clone)]
