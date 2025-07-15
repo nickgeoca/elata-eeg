@@ -4,11 +4,12 @@ use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
-use log::{info, warn, debug, error};
+use log::{info, warn, debug};
 use lazy_static::lazy_static;
 
 use crate::types::{AdcConfig, AdcDriver, DriverStatus, DriverError, DriverType};
-use eeg_types::{Packet, PacketHeader, SensorMeta, BridgeMsg, SensorError};
+use eeg_types::{BridgeMsg, SensorError};
+use pipeline::data::{Packet, PacketHeader, SensorMeta};
 use super::error::HardwareLockGuard;
 use super::registers::{
     CMD_RESET, CMD_SDATAC, REG_ID_ADDR,

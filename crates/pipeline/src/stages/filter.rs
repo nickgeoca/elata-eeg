@@ -4,16 +4,14 @@ use crate::config::StageConfig;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
-use async_trait::async_trait;
-use eeg_types::Packet;
+use std::any::Any;
 
 /// A placeholder filter stage.
 #[derive(Default)]
 pub struct FilterFactory;
 
-#[async_trait]
-impl StageFactory<f32, f32> for FilterFactory {
-    async fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage<f32, f32>>, StageError> {
+impl StageFactory for FilterFactory {
+    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
         Ok(Box::new(Filter {
             id: config.name.clone(),
         }))
@@ -24,17 +22,16 @@ pub struct Filter {
     id: String,
 }
 
-#[async_trait]
-impl Stage<f32, f32> for Filter {
+impl Stage for Filter {
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<f32>,
+        packet: Box<dyn Any + Send>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet<f32>>, StageError> {
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
         Ok(Some(packet))
     }
 }

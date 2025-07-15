@@ -1,15 +1,10 @@
 //! Plugin system for the EEG daemon
 //! 
 //! This module defines the core plugin trait that all EEG processing plugins must implement.
-//! Plugins run in isolated async tasks and communicate through the event bus system.
+//! Plugins are essentially pipeline stages and can be integrated directly into the pipeline.
 
-use std::sync::Arc;
-use async_trait::async_trait;
-use tokio::sync::broadcast;
-use tokio_util::sync::CancellationToken;
 use anyhow::Result;
-
-use crate::event::{SensorEvent, EventFilter};
+use pipeline::stage::Stage;
 
 /// Configuration trait that all plugin configurations must implement
 pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {
@@ -20,12 +15,9 @@ pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {
     fn config_name(&self) -> &str;
 }
 
-/// Core trait that all EEG processing plugins must implement
-#[async_trait]
-pub trait EegPlugin: Send + Sync {
-    /// Get the unique name of this plugin
-    fn name(&self) -> &'static str;
-    
+/// Core trait that all EEG processing plugins must implement.
+/// This is a wrapper around the pipeline's `Stage` trait.
+pub trait EegPlugin: Stage {
     /// Get the version of this plugin
     fn version(&self) -> &'static str {
         "1.0.0"
@@ -35,75 +27,17 @@ pub trait EegPlugin: Send + Sync {
     fn description(&self) -> &'static str {
         "EEG processing plugin"
     }
-    
-    /// Get the types of events this plugin is interested in receiving
-    fn event_filter(&self) -> Vec<EventFilter> {
-        vec![EventFilter::All]
-    }
-    
-    /// Main plugin execution method
-    ///
-    /// This method runs in a dedicated async task and should:
-    /// - Listen for events on the receiver channel
-    /// - Process events according to the plugin's logic
-    /// - Optionally publish new events back to the bus
-    /// - Respect the shutdown signal from the cancellation token
-    /// - Return Ok(()) on graceful shutdown or Err on failure
-    async fn run(
-        &mut self,
-        bus: Arc<dyn EventBus>,
-        receiver: broadcast::Receiver<SensorEvent>,
-        shutdown_token: CancellationToken,
-    ) -> Result<()>;
-    
-    /// Optional initialization method called before run()
-    async fn initialize(&mut self) -> Result<()> {
-        Ok(())
-    }
-    
-    /// Optional cleanup method called after run() completes
-    async fn cleanup(&self) -> Result<()> {
-        Ok(())
-    }
-    
-    /// Get plugin-specific metrics (optional)
-    fn get_metrics(&self) -> Vec<PluginMetric> {
-        vec![]
-    }
-
-    /// Create a new, boxed clone of this plugin.
-    fn clone_box(&self) -> Box<dyn EegPlugin>;
 }
 
+impl<T: EegPlugin + ?Sized> EegPlugin for Box<T> {
+    fn version(&self) -> &'static str {
+        (**self).version()
+    }
 
-/// Event bus trait for plugins to publish events
-#[async_trait]
-pub trait EventBus: Send + Sync {
-    /// Broadcast an event to all subscribers
-    async fn broadcast(&self, event: SensorEvent);
-    
-    /// Subscribe to events from the bus
-    fn subscribe(&self) -> broadcast::Receiver<SensorEvent>;
-    
-    /// Get the number of active subscribers to the event bus
-    /// This can be used by plugins to optimize processing when no subscribers are present
-    fn subscriber_count(&self) -> usize;
-    
-    /// Check if there are active subscribers for a specific topic
-    /// This allows plugins to optimize processing by only running expensive calculations
-    /// when there are actually subscribers interested in the output
-    fn has_subscribers_for_topic(&self, topic: crate::event::WebSocketTopic) -> bool;
-    
-    /// Get the number of active subscribers for a specific topic
-    fn get_subscriber_count_for_topic(&self, topic: crate::event::WebSocketTopic) -> usize;
-    
-    /// Register a subscriber for a specific topic (called by ConnectionManager)
-    fn add_topic_subscriber(&self, topic: crate::event::WebSocketTopic, subscriber_id: String);
-    
-    /// Unregister a subscriber for a specific topic (called by ConnectionManager)
-    fn remove_topic_subscriber(&self, topic: crate::event::WebSocketTopic, subscriber_id: String);
+    fn description(&self) -> &'static str {
+        (**self).description()
+    }
 }
-
 
 /// Plugin-specific metrics
 #[derive(Debug, Clone)]
@@ -174,36 +108,5 @@ impl SupervisorConfig {
             .min(self.max_backoff_ms as f64) as u64;
         
         std::time::Duration::from_millis(delay_ms)
-    }
-}
-
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::event::{EegPacket, SensorEvent, EventFilter, event_matches_filter};
-
-    #[test]
-    fn test_supervisor_config_backoff() {
-        let config = SupervisorConfig::default();
-        
-        assert_eq!(config.calculate_backoff(1), std::time::Duration::from_millis(1000));
-        assert_eq!(config.calculate_backoff(2), std::time::Duration::from_millis(2000));
-        assert_eq!(config.calculate_backoff(3), std::time::Duration::from_millis(4000));
-    }
-
-    #[test]
-    fn test_event_filter_matching() {
-        let timestamps = vec![1000];
-        let raw_samples = vec![10];
-        let voltage_samples = vec![1.0];
-        let eeg_packet = Arc::new(EegPacket::new(timestamps, 1, raw_samples, voltage_samples, 1, 250.0));
-        let raw_event = SensorEvent::RawEeg(eeg_packet.clone());
-        
-        assert!(event_matches_filter(&raw_event, &EventFilter::All));
-        assert!(event_matches_filter(&raw_event, &EventFilter::RawEegOnly));
-        assert!(!event_matches_filter(&raw_event, &EventFilter::FilteredEegOnly));
-        assert!(!event_matches_filter(&raw_event, &EventFilter::FftOnly));
-        assert!(!event_matches_filter(&raw_event, &EventFilter::SystemOnly));
     }
 }

@@ -20,6 +20,9 @@ pub enum PipelineError {
     #[error("Channel error: {0}")]
     ChannelError(String),
 
+    #[error("Send error: {0}")]
+    SendError(String),
+
     #[error("Runtime error in stage '{stage_name}': {message}")]
     RuntimeError { stage_name: String, message: String },
 
@@ -49,6 +52,15 @@ pub enum PipelineError {
 
     #[error("Generic error: {0}")]
     Other(#[from] anyhow::Error),
+}
+
+impl From<StageError> for PipelineError {
+    fn from(err: StageError) -> Self {
+        PipelineError::RuntimeError {
+            stage_name: "unknown".to_string(), // Or find a way to pass the stage name
+            message: err.to_string(),
+        }
+    }
 }
 
 /// Result type for pipeline operations

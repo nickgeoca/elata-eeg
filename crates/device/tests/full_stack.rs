@@ -191,10 +191,12 @@ async fn test_full_stack_command_and_shutdown() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // 3. Verify the pipeline emits the correct event
-    let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
-        .await
-        .expect("Timeout waiting for event")
-        .expect("Failed to receive event because channel was closed");
+    let event = tokio::task::spawn_blocking(move || {
+        event_rx.recv_timeout(Duration::from_secs(2))
+    })
+    .await
+    .expect("Event receive task panicked")
+    .expect("Timeout waiting for event");
 
     assert_eq!(event, PipelineEvent::TestStateChanged(42));
 

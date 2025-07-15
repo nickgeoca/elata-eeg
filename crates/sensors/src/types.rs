@@ -54,7 +54,7 @@ pub enum DriverStatus {
 }
 
 /// Events emitted by sensor drivers
-use eeg_types::Packet;
+use pipeline::data::Packet;
 
 #[derive(Debug)]
 pub enum DriverEvent {

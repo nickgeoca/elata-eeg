@@ -5,9 +5,7 @@
 use crate::control::{ControlCommand, PipelineEvent};
 use crate::error::StageError;
 use crate::stage::{Stage, StageContext};
-use async_trait::async_trait;
-use eeg_types::Packet;
-use serde_json::Value;
+use std::any::Any;
 
 /// A pipeline stage with an internal, modifiable state for testing.
 #[derive(Debug)]
@@ -28,29 +26,28 @@ impl StatefulTestStage {
 
 // This stage is a simple pass-through. Its main purpose is to test control-plane functionality.
 // We use `serde_json::Value` as a generic data container.
-#[async_trait]
-impl Stage<Value, Value> for StatefulTestStage {
+impl Stage for StatefulTestStage {
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<Value>,
+        packet: Box<dyn Any + Send>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet<Value>>, StageError> {
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
         // Pass data through unmodified
         Ok(Some(packet))
     }
 
-    async fn control(
+    fn control(
         &mut self,
         cmd: &ControlCommand,
         ctx: &mut StageContext,
     ) -> Result<(), StageError> {
         if let ControlCommand::SetTestState(new_state) = cmd {
             self.state = *new_state;
-            ctx.emit_event(PipelineEvent::TestStateChanged(self.state)).await?;
+            ctx.emit_event(PipelineEvent::TestStateChanged(self.state))?;
         }
         Ok(())
     }

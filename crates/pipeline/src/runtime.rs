@@ -1,116 +1,93 @@
 //! Pipeline runtime for executing pipeline graphs.
 
-use crate::config::SystemConfig;
 use crate::control::{ControlCommand, PipelineEvent};
-use crate::error::StageError;
+use crate::error::PipelineError;
 use crate::graph::PipelineGraph;
-use crate::registry::StageRegistry;
-use crate::stage::StageContext;
-use tokio::sync::mpsc::{Receiver, Sender};
-use eeg_types::Packet;
-use std::sync::Arc;
+use std::any::Any;
+use std::sync::mpsc::{Receiver, Sender, RecvTimeoutError, TryRecvError};
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::info;
 
-/// Runs the pipeline in a synchronous loop, processing data and control messages.
+/// A unified message type for the pipeline runtime.
+/// This enum encapsulates both data packets and control commands,
+/// allowing them to be sent through a single channel.
+pub enum RuntimeMsg {
+    Data(Box<dyn Any + Send>),
+    Ctrl(ControlCommand),
+}
+
+/// The synchronous pipeline execution loop.
 ///
-/// This function is the core of the synchronous pipeline execution model. It builds a
-/// pipeline graph from the provided configuration and then enters a `select!` loop
-/// to react to incoming data from the sensor bridge and control commands.
+/// This function takes ownership of the pipeline graph and runs a polling loop
+/// to process incoming messages. It is designed to be executed in its own thread.
 ///
 /// # Arguments
-/// * `config` - The system configuration for building the pipeline.
-/// * `registry` - The registry of available pipeline stages.
-/// * `data_rx` - The channel for receiving `BridgeMsg` from the sensor bridge.
-/// * `control_rx` - The channel for receiving `ControlCommand` messages.
+/// * `rx` - The receiver for `RuntimeMsg`.
+/// * `event_tx` - The sender for `PipelineEvent`.
+/// * `graph` - The `PipelineGraph` to execute.
 ///
 /// # Returns
-/// `Ok(())` if the pipeline shuts down gracefully, or a `StageError` if an
-/// unrecoverable error occurs.
-pub async fn run<T>(
-    config: SystemConfig,
-    registry: Arc<StageRegistry<T, T>>,
-    mut data_rx: Receiver<Packet<T>>,
-    mut control_rx: Receiver<ControlCommand>,
+/// `Ok(())` on graceful shutdown, or a `PipelineError` if something goes wrong.
+pub fn run(
+    runtime_rx: Receiver<RuntimeMsg>,
     event_tx: Sender<PipelineEvent>,
-) -> Result<(), StageError>
-where
-    T: Clone + Send + 'static,
-{
-    info!("Initializing synchronous pipeline runtime...");
-    let context = StageContext::new(event_tx.clone());
-    let mut graph = PipelineGraph::build(&config, &registry, context)
-        .await
-        .map_err(|e| StageError::BadConfig(e.to_string()))?;
-    info!("Pipeline graph built successfully.");
+    mut graph: PipelineGraph,
+) -> Result<(), PipelineError> {
+    graph.context.event_tx = event_tx.clone();
+    let mut topo = graph.topology_sort(); // Pre-compute the execution order.
+    let mut draining = false;
 
-    let mut running = true;
     loop {
-        tokio::select! {
-            Some(cmd) = control_rx.recv() => {
-                if matches!(cmd, ControlCommand::Shutdown) {
-                    info!("Shutdown command received, exiting pipeline loop.");
-                    break;
+        // Block on the external channel with a timeout
+        match runtime_rx.recv_timeout(Duration::from_millis(2)) {
+            Ok(RuntimeMsg::Ctrl(ControlCommand::Shutdown)) => {
+                info!("Shutdown command received, starting graceful drain...");
+                draining = true;
+            }
+            Ok(RuntimeMsg::Ctrl(cmd)) => {
+                info!("Received control command: {:?}", cmd);
+                graph.handle_control_command(&cmd)?;
+                if graph.topo_dirty {
+                    info!("Topology may have changed, re-computing...");
+                    topo = graph.topology_sort();
+                    graph.topo_dirty = false;
                 }
-                handle_control_cmd(cmd, &mut graph).await;
-            },
-            Some(packet) = data_rx.recv() => {
-                handle_data_msg(packet, &mut graph).await;
-            },
-            else => {
-                info!("All channels closed, exiting pipeline loop.");
-                break;
+            }
+            Ok(RuntimeMsg::Data(pkt)) => {
+                if !draining {
+                    graph.push(pkt, &topo)?;
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                // No message, continue.
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                info!("All senders disconnected, initiating shutdown.");
+                draining = true;
             }
         }
-    }
 
-    info!("Pipeline has shut down. Sending acknowledgment.");
-    event_tx
-        .send(PipelineEvent::ShutdownAck)
-        .await
-        .map_err(|e| StageError::SendError(e.to_string()))
-}
+        // Since the internal event channel is removed, we no longer poll it.
+        // All events are now sent directly to the external `event_tx`.
 
-async fn handle_data_msg<T: Clone + Send + 'static>(
-    packet: Packet<T>,
-    graph: &mut PipelineGraph<T>,
-) {
-
-    info!("Received data packet with timestamp: {}", packet.header.ts_ns);
-
-    // This is a simplified approach where we just kick off the process at the entry points.
-    // A more robust runtime would manage a processing loop for all stages.
-    for entry_point_name in &graph.entry_points {
-        if let Some(node) = graph.nodes.get(entry_point_name) {
-            let mut stage = node.stage.lock().await;
-            let mut context = graph.context.clone();
-            match stage.process(packet.clone(), &mut context).await {
-                Ok(Some(output_packet)) => {
-                    if node.tx.send(output_packet).is_err() {
-                        warn!(
-                            "Entry point stage {} has no subscribers, data will be dropped.",
-                            node.name
-                        );
-                    }
-                }
-                Ok(None) => {
-                    // Stage consumed the packet, nothing to forward.
-                }
-                Err(e) => {
-                    warn!(
-                        "Error processing packet in entry point stage {}: {}",
-                        node.name, e
-                    );
+        // Graceful shutdown logic
+        if draining {
+            if let Err(TryRecvError::Empty) = runtime_rx.try_recv() {
+                if graph.is_idle() {
+                    info!("Draining complete. Flushing sinks...");
+                    graph.flush()?; // Use the Drains trait
+                    info!("Sinks flushed. Sending ShutdownAck.");
+                    event_tx
+                        .send(PipelineEvent::ShutdownAck)
+                        .map_err(|e| PipelineError::SendError(e.to_string()))?;
+                    break; // Exit the loop
                 }
             }
         }
-    }
-}
 
-async fn handle_control_cmd<T: Clone + Send + 'static>(
-    cmd: ControlCommand,
-    graph: &mut PipelineGraph<T>,
-) {
-    info!("Forwarding control command to pipeline graph: {:?}", cmd);
-    graph.forward_control_command(cmd).await;
+        // The loop is now blocked on recv_timeout, so this sleep is no longer needed.
+    }
+
+    info!("Pipeline has shut down gracefully.");
+    Ok(())
 }

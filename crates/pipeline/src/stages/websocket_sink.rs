@@ -3,43 +3,37 @@
 use crate::config::StageConfig;
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Stage, StageContext};
-use async_trait::async_trait;
-use eeg_types::Packet;
-use futures_util::{SinkExt, StreamExt};
+use crate::stage::{Drains, Stage, StageContext};
+use crate::data::Packet;
 use serde::Deserialize;
-use std::net::SocketAddr;
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use std::any::Any;
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::{mpsc, Arc, Mutex};
+use std::thread;
+use tungstenite::{accept, Message};
 use tracing::{info, warn};
 
 /// A factory for creating `WebsocketSink` stages.
 #[derive(Default)]
 pub struct WebsocketSinkFactory;
 
-#[async_trait]
-impl StageFactory<f32, f32> for WebsocketSinkFactory {
-    async fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage<f32, f32>>, StageError> {
+impl StageFactory for WebsocketSinkFactory {
+    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
         let params: WebsocketSinkParams = serde_json::from_value(serde_json::Value::Object(
-            config
-                .params
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            config.params.clone().into_iter().collect(),
         ))?;
         let addr = params
             .addr
             .parse::<SocketAddr>()
             .map_err(|e| StageError::BadParam(format!("Invalid address: {}", e)))?;
 
-        let (tx, _) = broadcast::channel(100);
+        let clients = Arc::new(Mutex::new(Vec::new()));
         let sink = WebsocketSink {
             id: config.name.clone(),
-            tx: Some(tx.clone()),
+            clients: clients.clone(),
         };
 
-        tokio::spawn(accept_loop(addr, tx));
+        thread::spawn(move || accept_loop(addr, clients));
 
         Ok(Box::new(sink))
     }
@@ -48,7 +42,7 @@ impl StageFactory<f32, f32> for WebsocketSinkFactory {
 /// A sink stage that broadcasts incoming data to connected WebSocket clients.
 pub struct WebsocketSink {
     id: String,
-    tx: Option<broadcast::Sender<String>>,
+    clients: Arc<Mutex<Vec<mpsc::Sender<String>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -61,17 +55,25 @@ fn default_addr() -> String {
     "127.0.0.1:9001".to_string()
 }
 
-async fn accept_loop(addr: SocketAddr, tx: broadcast::Sender<String>) {
-    let listener = TcpListener::bind(&addr).await.expect("Failed to bind");
+fn accept_loop(addr: SocketAddr, clients: Arc<Mutex<Vec<mpsc::Sender<String>>>>) {
+    let listener = TcpListener::bind(&addr).expect("Failed to bind");
     info!("WebSocket sink listening on: {}", addr);
-    while let Ok((stream, _)) = listener.accept().await {
-        let rx = tx.subscribe();
-        tokio::spawn(handle_connection(stream, rx));
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let (tx, rx) = mpsc::channel();
+                clients.lock().unwrap().push(tx);
+                thread::spawn(move || handle_connection(stream, rx));
+            }
+            Err(e) => {
+                warn!("Connection failed: {}", e);
+            }
+        }
     }
 }
 
-async fn handle_connection(stream: TcpStream, mut rx: broadcast::Receiver<String>) {
-    let mut ws_stream = match accept_async(stream).await {
+fn handle_connection(stream: TcpStream, rx: mpsc::Receiver<String>) {
+    let mut websocket = match accept(stream) {
         Ok(ws) => ws,
         Err(e) => {
             warn!("WebSocket handshake failed: {}", e);
@@ -79,40 +81,40 @@ async fn handle_connection(stream: TcpStream, mut rx: broadcast::Receiver<String
         }
     };
 
-    loop {
-        tokio::select! {
-            msg = rx.recv() => {
-                match msg {
-                    Ok(msg) => {
-                        if ws_stream.send(Message::Text(msg)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            _ = ws_stream.next() => {
-                break;
-            }
+    for msg in rx {
+        if websocket.send(Message::Text(msg)).is_err() {
+            break;
         }
     }
 }
 
-#[async_trait]
-impl Stage<f32, f32> for WebsocketSink {
+impl Drains for WebsocketSink {
+    fn flush(&mut self) -> std::io::Result<()> {
+        // Data is sent immediately, so there's nothing to flush.
+        Ok(())
+    }
+}
+
+impl Stage for WebsocketSink {
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<f32>,
+        packet: Box<dyn Any + Send>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet<f32>>, StageError> {
-        if let Some(tx) = &self.tx {
-            let json = serde_json::to_string(&packet).unwrap();
-            let _ = tx.send(json);
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+        if let Some(packet) = packet.downcast_ref::<Packet<f32>>() {
+            let json = serde_json::to_string(packet).unwrap();
+            let mut clients = self.clients.lock().unwrap();
+            // The `retain` method is used to keep only the clients that are still active.
+            clients.retain(|tx| tx.send(json.clone()).is_ok());
         }
         Ok(None)
+    }
+
+    fn as_drains(&mut self) -> Option<&mut dyn Drains> {
+        Some(self)
     }
 }

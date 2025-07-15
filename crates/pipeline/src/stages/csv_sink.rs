@@ -3,31 +3,23 @@
 use crate::config::StageConfig;
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Stage, StageContext};
-use async_trait::async_trait;
-use eeg_types::Packet;
+use crate::stage::{Drains, Stage, StageContext};
+use crate::data::Packet;
 use serde::Deserialize;
+use std::any::Any;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 
 /// A factory for creating `CsvSink` stages.
 #[derive(Default)]
 pub struct CsvSinkFactory;
 
-#[async_trait]
-impl StageFactory<f32, f32> for CsvSinkFactory {
-    async fn create(
-        &self,
-        config: &StageConfig,
-    ) -> Result<Box<dyn Stage<f32, f32>>, StageError> {
+impl StageFactory for CsvSinkFactory {
+    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
         let params: CsvSinkParams = serde_json::from_value(serde_json::Value::Object(
-            config
-                .params
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            config.params.clone().into_iter().collect(),
         ))?;
         let path = PathBuf::from(params.path);
         let file = File::create(&path)
@@ -57,24 +49,39 @@ fn default_path() -> String {
     "output.csv".to_string()
 }
 
-#[async_trait]
-impl Stage<f32, f32> for CsvSink {
+impl Stage for CsvSink {
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<f32>,
+        packet: Box<dyn Any + Send>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet<f32>>, StageError> {
-        let mut writer_guard = self.writer.lock().await;
-        if let Some(writer) = writer_guard.as_mut() {
-            for sample in &packet.samples {
-                writeln!(writer, "{},{}", packet.header.ts_ns, sample)
-                    .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+        if let Some(packet) = packet.downcast_ref::<Packet<f32>>() {
+            let mut writer_guard = self.writer.lock().unwrap();
+            if let Some(writer) = writer_guard.as_mut() {
+                for sample in &packet.samples {
+                    writeln!(writer, "{},{}", packet.header.ts_ns, sample)
+                        .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
+                }
             }
         }
         Ok(None)
+    }
+
+    fn as_drains(&mut self) -> Option<&mut dyn Drains> {
+        Some(self)
+    }
+}
+
+impl Drains for CsvSink {
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut writer_guard = self.writer.lock().unwrap();
+        if let Some(writer) = writer_guard.as_mut() {
+            writer.flush()?;
+        }
+        Ok(())
     }
 }

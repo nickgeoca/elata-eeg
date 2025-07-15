@@ -9,7 +9,8 @@ use lazy_static::lazy_static;
 
 use crate::types::{AdcConfig, DriverStatus, DriverError, DriverType};
 use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
-use eeg_types::{Packet, PacketHeader, SensorMeta, BridgeMsg, SensorError};
+use eeg_types::{BridgeMsg, SensorError};
+use pipeline::data::{Packet, PacketHeader, SensorMeta};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {

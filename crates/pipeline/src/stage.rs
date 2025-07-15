@@ -2,9 +2,8 @@
 
 use crate::control::{ControlCommand, PipelineEvent};
 use crate::error::StageError;
-use async_trait::async_trait;
-use tokio::sync::mpsc::Sender;
-use eeg_types::Packet;
+use std::any::Any;
+use std::sync::mpsc::Sender;
 
 /// A context object passed to each stage's `process` method.
 ///
@@ -21,10 +20,9 @@ impl StageContext {
     }
 
     /// Emits an event to the main control loop.
-    pub async fn emit_event(&self, event: PipelineEvent) -> Result<(), StageError> {
+    pub fn emit_event(&self, event: PipelineEvent) -> Result<(), StageError> {
         self.event_tx
             .send(event)
-            .await
             .map_err(|e| StageError::SendError(e.to_string()))
     }
 }
@@ -33,22 +31,20 @@ impl StageContext {
 ///
 /// A stage is a component that receives packets of one type (`I`), processes
 /// them, and outputs packets of another type (`O`). It can also respond to
-/// control commands.
-#[async_trait]
-pub trait Stage<I = f32, O = f32>: Send + Sync {
+pub trait Stage: Send + Sync + Any {
     /// A unique identifier for this stage instance.
     fn id(&self) -> &str;
 
     /// Processes an input packet and returns an optional output packet.
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<I>,
+        packet: Box<dyn Any + Send>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Packet<O>>, StageError>;
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError>;
 
     /// Handles a control command sent to the pipeline.
     /// The default implementation does nothing, allowing stages to opt-in.
-    async fn control(
+    fn control(
         &mut self,
         _cmd: &ControlCommand,
         _ctx: &mut StageContext,
@@ -57,7 +53,52 @@ pub trait Stage<I = f32, O = f32>: Send + Sync {
     }
 
     /// Called when the stage is being shut down.
-    async fn shutdown(&mut self, _ctx: &mut StageContext) -> Result<(), StageError> {
+    fn shutdown(&mut self, _ctx: &mut StageContext) -> Result<(), StageError> {
         Ok(()) // Default implementation does nothing.
+    }
+
+    /// Returns this stage as a mutable `Drains` trait object if it implements it.
+    fn as_drains(&mut self) -> Option<&mut dyn Drains> {
+        None
+    }
+}
+
+/// A trait for stages that need to flush internal buffers before shutdown.
+///
+/// This is typically implemented by "sink" stages that write to files or network
+/// sockets, ensuring that all data is persisted before the pipeline terminates.
+pub trait Drains {
+    /// Flushes any internal buffers to their destination.
+    fn flush(&mut self) -> std::io::Result<()>;
+}
+
+// Implement `Stage` for `Box<dyn Stage>` to allow for dynamic dispatch.
+impl<T: Stage + ?Sized> Stage for Box<T> {
+    fn id(&self) -> &str {
+        (**self).id()
+    }
+
+    fn process(
+        &mut self,
+        packet: Box<dyn Any + Send>,
+        ctx: &mut StageContext,
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+        (**self).process(packet, ctx)
+    }
+
+    fn control(
+        &mut self,
+        cmd: &ControlCommand,
+        ctx: &mut StageContext,
+    ) -> Result<(), StageError> {
+        (**self).control(cmd, ctx)
+    }
+
+    fn shutdown(&mut self, ctx: &mut StageContext) -> Result<(), StageError> {
+        (**self).shutdown(ctx)
+    }
+
+    fn as_drains(&mut self) -> Option<&mut dyn Drains> {
+        (**self).as_drains()
     }
 }

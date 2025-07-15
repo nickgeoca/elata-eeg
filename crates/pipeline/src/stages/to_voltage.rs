@@ -4,17 +4,16 @@ use crate::config::StageConfig;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
-use async_trait::async_trait;
-use eeg_types::Packet;
+use crate::data::Packet;
+use std::any::Any;
 use std::sync::Arc;
 
 /// A factory for creating `ToVoltage` stages.
 #[derive(Default)]
 pub struct ToVoltageFactory;
 
-#[async_trait]
-impl StageFactory<f32, f32> for ToVoltageFactory {
-    async fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage<f32, f32>>, StageError> {
+impl StageFactory for ToVoltageFactory {
+    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
         Ok(Box::new(ToVoltage {
             id: config.name.clone(),
             ..Default::default()
@@ -41,42 +40,44 @@ impl Default for ToVoltage {
     }
 }
 
-#[async_trait]
-impl Stage<f32, f32> for ToVoltage {
+impl Stage for ToVoltage {
     fn id(&self) -> &str {
         &self.id
     }
 
-    async fn process(
+    fn process(
         &mut self,
-        packet: Packet<f32>,
+        packet: Box<dyn Any + Send>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet<f32>>, StageError> {
-        let meta_ptr = Arc::as_ptr(&packet.header.meta) as usize;
+    ) -> Result<Option<Box<dyn Any + Send>>, StageError> {
+        if let Some(packet) = packet.downcast_ref::<Packet<i32>>() {
+            let meta_ptr = Arc::as_ptr(&packet.header.meta) as usize;
 
-        if self.cached_meta_ptr != meta_ptr {
-            let meta = &packet.header.meta;
-            let full_scale_range = if meta.is_twos_complement {
-                1i32 << (meta.adc_bits - 1)
-            } else {
-                1i32 << meta.adc_bits
+            if self.cached_meta_ptr != meta_ptr {
+                let meta = &packet.header.meta;
+                let full_scale_range = if meta.is_twos_complement {
+                    1i32 << (meta.adc_bits - 1)
+                } else {
+                    1i32 << meta.adc_bits
+                };
+                self.cached_scale_factor = (meta.v_ref / meta.gain) / full_scale_range as f32;
+                self.cached_offset = meta.offset_code;
+                self.cached_meta_ptr = meta_ptr;
+            }
+
+            let samples_f32: Vec<f32> = packet
+                .samples
+                .iter()
+                .map(|&raw_sample| (raw_sample - self.cached_offset) as f32 * self.cached_scale_factor)
+                .collect();
+
+            let output_packet = Packet {
+                header: packet.header.clone(),
+                samples: samples_f32,
             };
-            self.cached_scale_factor = (meta.v_ref / meta.gain) / full_scale_range as f32;
-            self.cached_offset = meta.offset_code;
-            self.cached_meta_ptr = meta_ptr;
+
+            return Ok(Some(Box::new(output_packet)));
         }
-
-        let samples_f32: Vec<f32> = packet
-            .samples
-            .into_iter()
-            .map(|raw_sample| (raw_sample as i32 - self.cached_offset) as f32 * self.cached_scale_factor)
-            .collect();
-
-        let output_packet = Packet {
-            header: packet.header,
-            samples: samples_f32,
-        };
-
-        Ok(Some(output_packet))
+        Ok(None)
     }
 }
