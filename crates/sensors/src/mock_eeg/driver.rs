@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
-use crossbeam_channel::Sender;
 use std::thread;
 use std::time::Duration;
 use log::{info, warn, debug};
@@ -114,8 +113,6 @@ impl MockDriver {
             offset_code: 0,
             is_twos_complement: true,
             channel_names,
-            #[cfg(feature = "meta-tags")]
-            tags: Default::default(),
         });
 
         let inner = MockInner {

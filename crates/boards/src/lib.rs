@@ -20,8 +20,10 @@ pub fn create_driver(config: AdcConfig) -> Result<Box<dyn AdcDriver>, Box<dyn Er
             let driver = elata_v2::ElataV2Driver::new(config)?;
             Ok(Box::new(driver))
         }
-        // Note: The Ads1299 and MockEeg drivers are now internal to the sensors crate
-        // and are not directly exposed by the boards crate.
+        #[cfg(feature = "mock_eeg")]
+        DriverType::MockEeg => Ok(Box::new(sensors::raw::mock_eeg::MockDriver::new(config)?)),
+        // Note: The Ads1299 driver is now internal to the sensors crate
+        // and is not directly exposed by the boards crate.
         _ => Err(Box::new(sensors::DriverError::ConfigurationError(
             "Unsupported or disabled board driver type".to_string(),
         ))),

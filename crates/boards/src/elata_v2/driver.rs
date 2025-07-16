@@ -1,49 +1,69 @@
+use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
-use std::thread::{JoinHandle};
-use std::time::Duration;
-use crossbeam_channel::{select, bounded, Sender};
-use log::{info, error, warn};
-use thread_priority::{ThreadPriority};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use sensors::{AdcConfig, AdcDriver, DriverError, DriverStatus, raw::ads1299::Ads1299Driver};
+use crossbeam_channel::{bounded, select, Sender};
+use log::{error, info, warn};
+use rppal::gpio::{Gpio, OutputPin};
+use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
+use thread_priority::ThreadPriority;
+use sensors::ads1299::registers::CMD_RESET;
+
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::Packet;
-use sensors::ads1299::registers::{
-    self, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG,
-    MISC1_REG, BIAS_SENSN_REG_MASK, CH1SET_ADDR,
+use pipeline::data::{Packet, PacketData};
+use sensors::{
+    ads1299::registers::{
+        self, BIAS_SENSN_REG_MASK, BIAS_SENSP_REG_MASK, CH1SET_ADDR, CHN_OFF, CHN_REG, CMD_RDATAC, PD_BIAS,
+        CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG, CONFIG4_REG,
+        LOFF_SESP_REG, MISC1_REG,
+    },
+    AdcConfig, AdcDriver, DriverError, DriverStatus,
+    raw::ads1299::Ads1299Driver,
 };
 
+const NUM_CHIPS: usize = 2;
+const START_PIN: u8 = 22; // GPIO for START pulse
+
 pub struct ElataV2Driver {
-    chip1: Ads1299Driver,
-    chip2: Ads1299Driver,
+    chip_drivers: Vec<Ads1299Driver>,
+    start_pin: OutputPin,
     status: Arc<Mutex<DriverStatus>>,
     config: AdcConfig,
 }
 
 impl ElataV2Driver {
     pub fn new(config: AdcConfig) -> Result<Self, Box<dyn Error>> {
-        if config.chips.len() != 2 {
-            return Err(Box::new(DriverError::ConfigurationError(
-                "ElataV2Driver requires exactly two chip configurations".to_string(),
-            )));
+        if config.chips.len() != NUM_CHIPS {
+            return Err(Box::new(DriverError::ConfigurationError(format!(
+                "ElataV2Driver requires exactly {} chip configurations",
+                NUM_CHIPS
+            ))));
         }
 
-        // Create a config for the first chip
-        let mut chip1_config = config.clone();
-        chip1_config.chips = vec![config.chips[0].clone()];
-        chip1_config.channels = chip1_config.chips[0].channels.clone(); // Keep legacy field in sync
-        let chip1 = Ads1299Driver::new(chip1_config)?;
+        let spi_config = Spi::new(
+            Bus::Spi0,
+            SlaveSelect::Ss1,
+            128_000, // 2.048MHz/16 = 128kHz
+            Mode::Mode1,
+        )?;
+        info!("SPI configured - Mode: {:?}, Speed: {:?} Hz, CS: {:?}",
+            spi_config.mode(), spi_config.clock_speed(), SlaveSelect::Ss1);
+        let spi = Arc::new(Mutex::new(spi_config));
 
-        // Create a config for the second chip
-        let mut chip2_config = config.clone();
-        chip2_config.chips = vec![config.chips[1].clone()];
-        chip2_config.channels = chip2_config.chips[0].channels.clone(); // Keep legacy field in sync
-        let chip2 = Ads1299Driver::new(chip2_config)?;
+        let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
+        for chip_config in config.chips.iter() {
+            let driver = Ads1299Driver::new(chip_config.clone(), spi.clone())?;
+            chip_drivers.push(driver);
+        }
+
+        let mut start_pin = Gpio::new()?.get(START_PIN)?.into_output();
+        start_pin.set_low(); // Prepare for START pulse
 
         Ok(Self {
-            chip1,
-            chip2,
+            chip_drivers,
+            start_pin,
             status: Arc::new(Mutex::new(DriverStatus::Stopped)),
             config,
         })
@@ -52,58 +72,71 @@ impl ElataV2Driver {
 
 impl AdcDriver for ElataV2Driver {
     fn initialize(&mut self) -> Result<(), DriverError> {
-        info!("Initializing ElataV2 board...");
+        info!("Initializing ElataV2 board with {} chips...", NUM_CHIPS);
 
-        // --- Common Settings ---
         let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
         let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
-        let active_ch_mask = self.config.channels.iter().fold(0, |acc, &ch| acc | (1 << (ch % 8)));
 
-        // --- Chip 1 Setup (Master, Daisy-Chain Enabled) ---
-        let config1_chip1 = CONFIG1_REG | sps_mask | 0x40; // Set DAISY_EN bit
-        let ch_settings_chip1: Vec<(u8, u8)> = (0..8)
-            .map(|i| (CH1SET_ADDR + i, if self.config.channels.contains(&i) { CHN_REG | gain_mask } else { CHN_OFF }))
-            .collect();
+        for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
+            info!("Initializing Chip {}...", i);
+            let chip_info = &self.config.chips[i];
 
-        self.chip1.initialize_chip(
-            config1_chip1,
-            CONFIG2_REG,
-            CONFIG3_REG,
-            CONFIG4_REG,
-            LOFF_SESP_REG,
-            MISC1_REG,
-            &ch_settings_chip1,
-            active_ch_mask,
-            BIAS_SENSN_REG_MASK,
-        )?;
-        info!("Chip 1 initialized.");
+            // --- Register Settings ---
+            let config1 = CONFIG1_REG | sps_mask; // Use external clock
+            let mut config3 = CONFIG3_REG;
+            let mut bias_sensp = 0x00;
+            let mut bias_sensn = 0x00;
 
-        // --- Chip 2 Setup (Slave) ---
-        let config1_chip2 = CONFIG1_REG | sps_mask; // DAISY_EN is 0
-        let ch_settings_chip2: Vec<(u8, u8)> = (0..8)
-            .map(|i| (CH1SET_ADDR + i, if self.config.channels.contains(&(i + 8)) { CHN_REG | gain_mask } else { CHN_OFF }))
-            .collect();
-        
-        let active_ch_mask_chip2 = self.config.channels.iter()
-            .filter(|&&ch| ch >= 8)
-            .fold(0, |acc, &ch| acc | (1 << (ch % 8)));
+            if i == 0 { // Board 0 is the bias master
+                config3 |= PD_BIAS; // Enable bias buffer
+                bias_sensp = BIAS_SENSP_REG_MASK; // Use all channels for bias
+                bias_sensn = BIAS_SENSN_REG_MASK;
+            } else { // Other boards are slaves
+                config3 &= !PD_BIAS; // Disable bias buffer
+            }
 
-        self.chip2.initialize_chip(
-            config1_chip2,
-            CONFIG2_REG,
-            CONFIG3_REG,
-            CONFIG4_REG,
-            LOFF_SESP_REG,
-            MISC1_REG,
-            &ch_settings_chip2,
-            active_ch_mask_chip2,
-            BIAS_SENSN_REG_MASK,
-        )?;
-        info!("Chip 2 initialized.");
+            let ch_settings: Vec<(u8, u8)> = (0..8)
+                .map(|ch_idx| {
+                    let channel_id = ch_idx + (i as u8 * 8);
+                    let setting = if chip_info.channels.contains(&channel_id) {
+                        CHN_REG | gain_mask
+                    } else {
+                        CHN_OFF
+                    };
+                    (CH1SET_ADDR + ch_idx, setting)
+                })
+                .collect();
 
-        // Put chips in standby after initialization
-        self.chip1.send_command(sensors::ads1299::registers::CMD_STANDBY)?;
-        self.chip2.send_command(sensors::ads1299::registers::CMD_STANDBY)?;
+            let active_ch_mask = chip_info.channels.iter().fold(0, |acc, &ch| acc | (1 << (ch % 8)));
+
+            chip.initialize_chip(
+                config1,
+                CONFIG2_REG,
+                config3,
+                CONFIG4_REG,
+                LOFF_SESP_REG,
+                MISC1_REG,
+                &ch_settings,
+                active_ch_mask,
+                bias_sensp,
+                bias_sensn,
+            )?;
+            
+            // Register dump for verification
+            info!("---- Chip {} Register Dump ----", i);
+            for reg in 0x00..=0x17 {
+                let val = chip.read_register(reg)?;
+                info!("Reg 0x{:02X}: 0x{:02X}", reg, val);
+            }
+            
+            chip.send_command(CMD_STANDBY)?;
+            info!("Chip {} initialized and in standby.", i);
+
+            if i == 0 {
+                // Add a small delay to allow the second chip to stabilize
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
 
         info!("ElataV2 board initialized successfully.");
         Ok(())
@@ -115,94 +148,108 @@ impl AdcDriver for ElataV2Driver {
         stop_flag: &AtomicBool,
     ) -> Result<(), SensorError> {
         *self.status.lock().unwrap() = DriverStatus::Running;
-        // Use bounded channels for backpressure
-        let (tx1, rx1) = bounded::<BridgeMsg>(10);
-        let (tx2, rx2) = bounded::<BridgeMsg>(10);
+        let (data_tx, data_rx) = bounded::<Packet>(NUM_CHIPS * 2); // Bounded channel for backpressure
 
-        let stop_flag1 = Arc::new(AtomicBool::new(false));
-        let stop_flag2 = Arc::new(AtomicBool::new(false));
+        // --- Wake up and start all chips ---
+        for chip in self.chip_drivers.iter_mut() {
+            chip.send_command(CMD_WAKEUP)?;
+            chip.send_command(CMD_RDATAC)?;
+        }
 
-        let mut chip1 = self.chip1.clone();
-        let thread_stop_flag1 = stop_flag1.clone();
-        let thread_handle1: JoinHandle<Result<(), SensorError>> = std::thread::spawn(move || {
-            if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
-                warn!("Failed to set thread priority for chip 1: {:?}", e);
-            }
-            chip1.acquire(tx1, &thread_stop_flag1)
-        });
+        // --- Synchronize with START pulse ---
+        thread::sleep(Duration::from_micros(4)); // Wait for t_CLK * 2
+        self.start_pin.set_high();
+        info!("START pulse sent. Acquisition running.");
 
-        let mut chip2 = self.chip2.clone();
-        let thread_stop_flag2 = stop_flag2.clone();
-        let thread_handle2: JoinHandle<Result<(), SensorError>> = std::thread::spawn(move || {
-            if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
-                warn!("Failed to set thread priority for chip 2: {:?}", e);
-            }
-            chip2.acquire(tx2, &thread_stop_flag2)
-        });
+        // --- Spawn acquisition threads ---
+        let mut handles: Vec<JoinHandle<Result<(), SensorError>>> = Vec::new();
+        let thread_stop_flag = Arc::new(AtomicBool::new(false));
 
-        // Time-gated data merging loop
-        let merge_timeout = Duration::from_millis(5); // Max wait for the second packet
+        for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
+            let mut chip_clone = chip.clone();
+            let thread_tx = data_tx.clone();
+            let stop = thread_stop_flag.clone();
+            let handle = thread::Builder::new()
+                .name(format!("chip_{}_acq", i))
+                .spawn(move || {
+                    if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
+                        warn!("[Chip {}] Failed to set thread priority: {:?}", i, e);
+                    }
+                    chip_clone.acquire_raw(thread_tx, &stop, i as u8)
+                })
+                .unwrap();
+            handles.push(handle);
+        }
+
+        // --- Data merging loop ---
+        let merge_timeout = Duration::from_millis(
+            (1.0 / self.config.sample_rate as f32 * 1000.0 * 2.0) as u64,
+        );
 
         while !stop_flag.load(Ordering::Relaxed) {
-            select! {
-                recv(rx1) -> msg1 => {
-                    match msg1 {
-                        Ok(BridgeMsg::Data(packet1)) => {
-                            // Received from chip 1, now wait for chip 2
-                            select! {
-                                recv(rx2) -> msg2 => {
-                                    match msg2 {
-                                        Ok(BridgeMsg::Data(packet2)) => {
-                                            // Both packets received, merge and send
-                                            if let (Packet::RawI32(mut data1), Packet::RawI32(data2)) = (packet1, packet2) {
-                                                data1.samples.extend(data2.samples);
-                                                if tx.send(BridgeMsg::Data(Packet::RawI32(data1))).is_err() {
-                                                    break;
-                                                }
-                                            } else {
-                                                error!("Mismatched packet types from chips during merge.");
-                                            }
-                                        },
-                                        Ok(BridgeMsg::Error(e)) => error!("Chip 2 error: {:?}", e),
-                                        Err(_) => break, // Channel disconnected
-                                    }
-                                },
-                                default(merge_timeout) => {
-                                    warn!("Timed out waiting for chip 2 packet. Discarding chip 1 packet.");
-                                }
-                            }
-                        },
-                        Ok(BridgeMsg::Error(e)) => error!("Chip 1 error: {:?}", e),
-                        Err(_) => break, // Channel disconnected
-                    }
-                },
-                recv(rx2) -> msg2 => {
-                     match msg2 {
-                        Ok(BridgeMsg::Data(_)) => {
-                            // This case should ideally not happen if chip 1 is master
-                            warn!("Received packet from chip 2 before chip 1. Discarding.");
-                        },
-                        Ok(BridgeMsg::Error(e)) => error!("Chip 2 error: {:?}", e),
-                        Err(_) => break, // Channel disconnected
-                    }
-                },
-                default(Duration::from_secs(1)) => {
-                    // Heartbeat to check stop_flag if no data is coming in
-                    if stop_flag.load(Ordering::Relaxed) {
+            let mut packet_buffer: HashMap<u8, Vec<i32>> = HashMap::with_capacity(NUM_CHIPS);
+            let first_packet_deadline = Instant::now() + merge_timeout;
+
+            // Collect packets from all chips
+            while packet_buffer.len() < NUM_CHIPS {
+                let timeout = first_packet_deadline.saturating_duration_since(Instant::now());
+                if timeout.is_zero() {
+                    warn!("Timed out waiting for a full frame of packets.");
+                    break;
+                }
+
+                select! {
+                    recv(data_rx) -> msg => {
+                        if let Ok(Packet::RawI32(packet_data)) = msg {
+                            // The chip_id is passed in the timestamp field of the header
+                            let chip_id = packet_data.header.ts_ns as u8;
+                            packet_buffer.insert(chip_id, packet_data.samples);
+                        } else {
+                            break; // Channel disconnected
+                        }
+                    },
+                    default(timeout) => {
+                        warn!("Timed out waiting for packet. Buffer has {}/{} packets.", packet_buffer.len(), NUM_CHIPS);
                         break;
                     }
                 }
             }
+
+            if packet_buffer.len() == NUM_CHIPS {
+                // Packets are collected, merge them in order
+                let mut merged_samples = Vec::with_capacity(8 * NUM_CHIPS);
+                let final_header = Default::default();
+
+                for i in 0..NUM_CHIPS {
+                    if let Some(samples) = packet_buffer.get(&(i as u8)) {
+                        if i == 0 {
+                            // This is a hack until the packet format is updated
+                            // final_header = packet_buffer.get(&0).unwrap().header.clone();
+                        }
+                        merged_samples.extend_from_slice(samples);
+                    } else {
+                        error!("Logic error: Missing packet for chip {} in buffer.", i);
+                        continue; // Skip this frame
+                    }
+                }
+
+                let merged_packet = Packet::RawI32(PacketData {
+                    header: final_header,
+                    samples: merged_samples,
+                });
+
+                if tx.send(BridgeMsg::Data(merged_packet)).is_err() {
+                    break; // Upstream channel closed
+                }
+            }
         }
 
-        stop_flag1.store(true, Ordering::Relaxed);
-        stop_flag2.store(true, Ordering::Relaxed);
-
-        if let Err(e) = thread_handle1.join().unwrap() {
-             error!("Chip 1 acquisition thread failed: {:?}", e);
-        }
-        if let Err(e) = thread_handle2.join().unwrap() {
-             error!("Chip 2 acquisition thread failed: {:?}", e);
+        // --- Shutdown threads ---
+        thread_stop_flag.store(true, Ordering::Relaxed);
+        for handle in handles {
+            if let Err(e) = handle.join().unwrap() {
+                error!("Acquisition thread failed: {:?}", e);
+            }
         }
 
         *self.status.lock().unwrap() = DriverStatus::Stopped;
@@ -218,9 +265,16 @@ impl AdcDriver for ElataV2Driver {
     }
 
     fn shutdown(&mut self) -> Result<(), DriverError> {
-        self.chip1.shutdown()?;
-        self.chip2.shutdown()?;
+        info!("Shutting down ElataV2 board...");
+        for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
+            info!("Sending SDATAC and STANDBY to chip {}", i);
+            chip.send_command(CMD_SDATAC)?;
+            chip.send_command(CMD_STANDBY)?;
+            chip.shutdown()?;
+        }
         *self.status.lock().unwrap() = DriverStatus::NotInitialized;
+        info!("ElataV2 board shut down.");
         Ok(())
     }
 }
+

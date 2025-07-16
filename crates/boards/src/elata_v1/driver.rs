@@ -1,5 +1,6 @@
 use eeg_types::{BridgeMsg, SensorError};
 use log::info;
+use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use sensors::{
     ads1299::{
         driver::Ads1299Driver,
@@ -10,7 +11,7 @@ use sensors::{
     },
     AdcConfig, AdcDriver, DriverError, DriverStatus, DriverType,
 };
-use std::sync::atomic::AtomicBool;
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use crossbeam_channel::Sender;
 
 pub struct ElataV1Driver {
@@ -22,7 +23,9 @@ impl ElataV1Driver {
     pub fn new(config: AdcConfig) -> Result<Self, DriverError> {
         let mut v1_config = config.clone();
         v1_config.board_driver = DriverType::Ads1299;
-        let inner = Ads1299Driver::new(v1_config)?;
+        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, 1_000_000, Mode::Mode1)?;
+        let spi = Arc::new(Mutex::new(spi));
+        let inner = Ads1299Driver::new(v1_config, spi)?;
         Ok(Self { inner, config })
     }
 }
@@ -58,8 +61,9 @@ impl AdcDriver for ElataV1Driver {
             LOFF_SESP_REG,
             MISC1_REG,
             &ch_settings,
-            active_ch_mask,
+            active_ch_mask, // bias_sensp
             BIAS_SENSN_REG_MASK,
+            active_ch_mask,
         )?;
 
         self.inner

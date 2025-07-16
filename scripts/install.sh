@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# TODO add this for the clocking echo "dtoverlay=gpclk,gpio=4,clkfreq=2048000" | sudo tee -a /boot/config.txt
+
 # Version information
 EEG_INSTALL_VERSION="1.0.0"
 

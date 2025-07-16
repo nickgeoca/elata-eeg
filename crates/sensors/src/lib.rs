@@ -1,5 +1,6 @@
 pub mod types;
 pub mod ads1299;
+#[cfg(feature = "mock_eeg")]
 pub mod mock_eeg;
 
 // Re-export the main types that users need
@@ -10,7 +11,15 @@ pub mod raw {
     pub mod ads1299 {
         pub use crate::ads1299::driver::Ads1299Driver;
     }
+    #[cfg(feature = "mock_eeg")]
     pub mod mock_eeg {
         pub use crate::mock_eeg::driver::MockDriver;
+    }
+}
+use eeg_types::SensorError;
+
+impl From<DriverError> for SensorError {
+    fn from(e: DriverError) -> Self {
+        SensorError::DriverError(e.to_string())
     }
 }

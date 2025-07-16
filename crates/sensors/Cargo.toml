@@ -37,4 +37,5 @@ crossbeam-channel = "0.5"
 
 [features]
 ads1299 = []
+mock_eeg = []
 default = ["ads1299"]

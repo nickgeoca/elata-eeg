@@ -9,8 +9,9 @@ brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 
 [dependencies]
 anyhow = "1.0" # Added for error handling
+clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1" # Added for structured logging
-boards = { path = "../boards", features = ["elata_v1", "elata_v2"] }
+boards = { path = "../boards", features = ["elata_v2", "mock_eeg"] }
 eeg_types = { path = "../eeg_types" }
 pipeline = { path = "../pipeline" }
 sensors = { path = "../sensors" }
@@ -30,6 +31,7 @@ nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
 crossbeam-channel = "0.5"
+rppal = { version = "0.22.1", features = ["hal"] }
 
 [dev-dependencies]
 tempfile = "3.8"

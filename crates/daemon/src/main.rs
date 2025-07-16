@@ -1,5 +1,6 @@
 use adc_daemon::plugin_supervisor::PluginSupervisor;
 use boards::create_driver;
+use clap::{Arg, Command};
 use sensors::{AdcConfig, DriverType};
 use eeg_types::BridgeMsg;
 use sensors::types::ChipConfig;
@@ -16,6 +17,15 @@ use std::thread;
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Parse command line arguments
+    let matches = Command::new("eeg_daemon")
+        .about("EEG data acquisition daemon")
+        .arg(Arg::new("mock")
+            .long("mock")
+            .action(clap::ArgAction::SetTrue)
+            .help("Use mock EEG data instead of real hardware"))
+        .get_matches();
+
     // Initialize logging
     env_logger::init();
     tracing::info!("EEG Daemon starting...");
@@ -64,7 +74,8 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let sensor_thread_handle = {
         // TODO: Load this from a config file
-        let adc_config = AdcConfig {
+        // TODO: Load this from a config file
+        let mut adc_config = AdcConfig {
             board_driver: DriverType::ElataV2,
             chips: vec![
                 ChipConfig {
@@ -79,12 +90,16 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     gain: 24.0,
                     spi_bus: 0,
                     cs_pin: 1,
-                    drdy_pin: 25,
+                    drdy_pin: 26, // Use a different DRDY pin for the second chip
                 },
             ],
             ..Default::default()
         };
-        let mut driver = create_driver(adc_config).unwrap();
+        if matches.get_flag("mock") {
+            adc_config.board_driver = DriverType::MockEeg;
+        }
+        let mut driver = create_driver(adc_config)
+            .expect("Failed to create driver - check board driver type is supported");
         driver.initialize().unwrap();
         let stop_flag_clone = stop_flag.clone();
         thread::spawn(move || {
@@ -98,7 +113,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 
     // --- Main Event Loop ---
-    let mut shutdown_initiated = false;
+    let shutdown_initiated = false;
     loop {
         select! {
             recv(bridge_rx) -> bridge_msg => {
@@ -128,9 +143,6 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
                     Ok(PipelineEvent::TestStateChanged(val)) => {
                         tracing::info!("Test state changed to: {}", val);
-                    }
-                    Ok(_) => {
-                        tracing::debug!("Received unhandled pipeline event");
                     }
                     Err(_) => {
                         tracing::info!("Event channel disconnected.");

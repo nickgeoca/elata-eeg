@@ -28,5 +28,9 @@ pub enum SensorError {
     /// The sensor was disconnected.
     #[error("Sensor disconnected")]
     Disconnected,
+    /// A driver-level error.
+    #[error("Driver error: {0}")]
+    DriverError(String),
 }
+
 use serde::{Deserialize, Serialize};

@@ -10,8 +10,11 @@ pipeline = { path = "../pipeline" }
 log = "0.4"
 crossbeam-channel = "0.5"
 thread-priority = "0.3"
+rppal = { version = "0.22.1", features = ["hal"] }
+thiserror = "1.0"
 
 [features]
 elata_v1 = ["sensors/ads1299"]
 elata_v2 = ["sensors/ads1299"]
-default = ["elata_v1", "elata_v2"]
+mock_eeg = ["sensors/mock_eeg"]
+default = ["elata_v2"]
