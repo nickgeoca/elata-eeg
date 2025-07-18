@@ -1,4 +1,5 @@
 use eeg_types::{BridgeMsg, SensorError};
+use pipeline::data::SensorMeta;
 use log::info;
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use sensors::{
@@ -6,13 +7,13 @@ use sensors::{
         driver::Ads1299Driver,
         registers::{
             self, BIAS_SENSN_REG_MASK, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG,
-            CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR,
+            CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR, CMD_RDATAC, CMD_START, CMD_WAKEUP,
         },
     },
-    AdcConfig, AdcDriver, DriverError, DriverStatus, DriverType,
+    AdcConfig, AdcDriver, DriverError, DriverStatus,
 };
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
-use crossbeam_channel::Sender;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use flume::Sender;
 
 pub struct ElataV1Driver {
     inner: Ads1299Driver,
@@ -21,11 +22,23 @@ pub struct ElataV1Driver {
 
 impl ElataV1Driver {
     pub fn new(config: AdcConfig) -> Result<Self, DriverError> {
-        let mut v1_config = config.clone();
-        v1_config.board_driver = DriverType::Ads1299;
-        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, 1_000_000, Mode::Mode1)?;
+        let chip_config = config.chips.get(0).ok_or_else(|| {
+            DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
+        })?;
+
+        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, 1_000_000, Mode::Mode1)
+            .map_err(|e| DriverError::SpiError(e.to_string()))?;
         let spi = Arc::new(Mutex::new(spi));
-        let inner = Ads1299Driver::new(v1_config, spi)?;
+
+        let sensor_meta = Arc::new(SensorMeta {
+            v_ref: config.vref,
+            gain: config.gain,
+            sample_rate: config.sample_rate,
+            adc_bits: 24, // ADS1299 is a 24-bit ADC
+            ..Default::default()
+        });
+
+        let inner = Ads1299Driver::new(chip_config.clone(), spi, sensor_meta)?;
         Ok(Self { inner, config })
     }
 }
@@ -33,6 +46,10 @@ impl ElataV1Driver {
 impl AdcDriver for ElataV1Driver {
     fn initialize(&mut self) -> Result<(), DriverError> {
         info!("Initializing ElataV1 board...");
+
+        // Reset the chip first to ensure it's in a known state
+        self.inner.send_command(sensors::ads1299::registers::CMD_RESET)?;
+        std::thread::sleep(std::time::Duration::from_millis(10)); // Wait for reset
 
         let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
         let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
@@ -78,7 +95,36 @@ impl AdcDriver for ElataV1Driver {
         tx: Sender<BridgeMsg>,
         stop_flag: &AtomicBool,
     ) -> Result<(), SensorError> {
-        self.inner.acquire(tx, stop_flag)
+        // Wake up the chip and start data acquisition
+        self.inner.send_command(CMD_WAKEUP)
+            .map_err(|e| SensorError::HardwareFault(format!("Failed to send WAKEUP: {}", e)))?;
+        self.inner.send_command(CMD_START)
+            .map_err(|e| SensorError::HardwareFault(format!("Failed to send START: {}", e)))?;
+        self.inner.send_command(CMD_RDATAC)
+            .map_err(|e| SensorError::HardwareFault(format!("Failed to send RDATAC: {}", e)))?;
+        info!("ElataV1 board is now acquiring data.");
+
+        // Create a channel to bridge packets from the acquisition loop to the main pipeline
+        let (packet_tx, packet_rx) = flume::unbounded::<pipeline::data::PacketOwned>();
+        let stop_flag_arc = Arc::new(AtomicBool::new(stop_flag.load(Ordering::Relaxed)));
+
+        // Spawn a dedicated thread to forward packets.
+        let bridge_tx = tx.clone();
+        let bridge_thread = std::thread::spawn(move || {
+            while let Ok(packet) = packet_rx.recv() {
+                if bridge_tx.send(BridgeMsg::Data(packet.into())).is_err() {
+                    break;
+                }
+            }
+        });
+
+        // Run the acquisition loop directly in the current thread.
+        let result = self.inner.acquire_raw(packet_tx, &stop_flag_arc, 0);
+
+        // Wait for the bridge thread to finish.
+        let _ = bridge_thread.join();
+
+        result
     }
 
     fn get_status(&self) -> DriverStatus {

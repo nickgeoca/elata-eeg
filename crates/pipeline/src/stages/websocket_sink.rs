@@ -1,11 +1,11 @@
 //! WebSocket sink stage for broadcasting EEG data.
 
 use crate::config::StageConfig;
-use crate::data::Packet;
+use crate::data::{PacketOwned, PacketView, RtPacket};
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Drains, Stage, StageContext};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use flume::{unbounded, Receiver, Sender};
 use serde::Deserialize;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -22,20 +22,7 @@ impl StageFactory for WebsocketSinkFactory {
         let params: WebsocketSinkParams = serde_json::from_value(serde_json::Value::Object(
             config.params.clone().into_iter().collect(),
         ))?;
-        let addr = params
-            .addr
-            .parse::<SocketAddr>()
-            .map_err(|e| StageError::BadParam(format!("Invalid address: {}", e)))?;
-
-        let clients = Arc::new(Mutex::new(Vec::new()));
-        let sink = WebsocketSink {
-            id: config.name.clone(),
-            clients: clients.clone(),
-        };
-
-        thread::spawn(move || accept_loop(addr, clients));
-
-        Ok(Box::new(sink))
+        Ok(Box::new(WebsocketSink::new(config.name.clone(), params)?))
     }
 }
 
@@ -45,10 +32,29 @@ pub struct WebsocketSink {
     clients: Arc<Mutex<Vec<Sender<String>>>>,
 }
 
+impl WebsocketSink {
+    pub fn new(id: String, params: WebsocketSinkParams) -> Result<Self, StageError> {
+        let addr = params
+            .addr
+            .parse::<SocketAddr>()
+            .map_err(|e| StageError::BadParam(format!("Invalid address: {}", e)))?;
+
+        let clients = Arc::new(Mutex::new(Vec::new()));
+        let sink = Self {
+            id,
+            clients: clients.clone(),
+        };
+
+        thread::spawn(move || accept_loop(addr, clients));
+
+        Ok(sink)
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct WebsocketSinkParams {
+pub struct WebsocketSinkParams {
     #[serde(default = "default_addr")]
-    addr: String,
+    pub addr: String,
 }
 
 fn default_addr() -> String {
@@ -102,15 +108,25 @@ impl Stage for WebsocketSink {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        if let Packet::Voltage(packet) = packet {
-            let json = serde_json::to_string(&packet).unwrap();
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        // Use PacketView to inspect the packet type without a deep copy.
+        if let PacketView::Voltage { .. } = PacketView::from(&*packet) {
+            // To serialize, we need an owned packet.
+            // Try to consume the Arc. If we can't (i.e., it's part of a fan-out),
+            // then perform an explicit deep clone.
+            let owned_packet = match Arc::try_unwrap(packet) {
+                Ok(rt_packet) => PacketOwned::from(rt_packet),
+                Err(arc) => PacketOwned::from(arc.deep_clone()),
+            };
+
+            let json = serde_json::to_string(&owned_packet).unwrap();
             let mut clients = self.clients.lock().unwrap();
             // The `retain` method is used to keep only the clients that are still active.
             clients.retain(|tx| tx.send(json.clone()).is_ok());
         }
+        // This is a sink, so we consume the packet and don't forward it.
         Ok(None)
     }
 

@@ -4,15 +4,14 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{bounded, select, Sender};
+use flume::Sender;
 use log::{error, info, warn};
 use rppal::gpio::{Gpio, OutputPin};
 use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use thread_priority::ThreadPriority;
-use sensors::ads1299::registers::CMD_RESET;
 
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{Packet, PacketData};
+use pipeline::data::{PacketOwned, PacketData, SensorMeta};
 use sensors::{
     ads1299::registers::{
         self, BIAS_SENSN_REG_MASK, BIAS_SENSP_REG_MASK, CH1SET_ADDR, CHN_OFF, CHN_REG, CMD_RDATAC, PD_BIAS,
@@ -20,7 +19,7 @@ use sensors::{
         LOFF_SESP_REG, MISC1_REG,
     },
     AdcConfig, AdcDriver, DriverError, DriverStatus,
-    raw::ads1299::Ads1299Driver,
+    ads1299::driver::Ads1299Driver,
 };
 
 const NUM_CHIPS: usize = 2;
@@ -54,7 +53,14 @@ impl ElataV2Driver {
 
         let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
         for chip_config in config.chips.iter() {
-            let driver = Ads1299Driver::new(chip_config.clone(), spi.clone())?;
+            let sensor_meta = Arc::new(SensorMeta {
+                v_ref: config.vref,
+                gain: config.gain,
+                sample_rate: config.sample_rate,
+                adc_bits: 24, // ADS1299 is a 24-bit ADC
+                ..Default::default()
+            });
+            let driver = Ads1299Driver::new(chip_config.clone(), spi.clone(), sensor_meta)?;
             chip_drivers.push(driver);
         }
 
@@ -148,7 +154,7 @@ impl AdcDriver for ElataV2Driver {
         stop_flag: &AtomicBool,
     ) -> Result<(), SensorError> {
         *self.status.lock().unwrap() = DriverStatus::Running;
-        let (data_tx, data_rx) = bounded::<Packet>(NUM_CHIPS * 2); // Bounded channel for backpressure
+        let (data_tx, data_rx) = flume::bounded::<PacketOwned>(NUM_CHIPS * 2); // Bounded channel for backpressure
 
         // --- Wake up and start all chips ---
         for chip in self.chip_drivers.iter_mut() {
@@ -168,14 +174,14 @@ impl AdcDriver for ElataV2Driver {
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
             let mut chip_clone = chip.clone();
             let thread_tx = data_tx.clone();
-            let stop = thread_stop_flag.clone();
+            let stop_clone = thread_stop_flag.clone();
             let handle = thread::Builder::new()
                 .name(format!("chip_{}_acq", i))
                 .spawn(move || {
                     if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
                         warn!("[Chip {}] Failed to set thread priority: {:?}", i, e);
                     }
-                    chip_clone.acquire_raw(thread_tx, &stop, i as u8)
+                    chip_clone.acquire_raw(thread_tx, &stop_clone, i as u8)
                 })
                 .unwrap();
             handles.push(handle);
@@ -198,21 +204,22 @@ impl AdcDriver for ElataV2Driver {
                     break;
                 }
 
-                select! {
-                    recv(data_rx) -> msg => {
-                        if let Ok(Packet::RawI32(packet_data)) = msg {
-                            // The chip_id is passed in the timestamp field of the header
-                            let chip_id = packet_data.header.ts_ns as u8;
-                            packet_buffer.insert(chip_id, packet_data.samples);
-                        } else {
-                            break; // Channel disconnected
-                        }
-                    },
-                    default(timeout) => {
-                        warn!("Timed out waiting for packet. Buffer has {}/{} packets.", packet_buffer.len(), NUM_CHIPS);
-                        break;
-                    }
-                }
+                // TODO: Re-enable select! macro once the compilation issue is resolved.
+                // flume::select! {
+                //     recv(data_rx) -> msg => {
+                //         if let Ok(PacketOwned::RawI32(packet_data)) = msg {
+                //             // The chip_id is passed in the timestamp field of the header
+                //             let chip_id = packet_data.header.ts_ns as u8;
+                //             packet_buffer.insert(chip_id, packet_data.samples);
+                //         } else {
+                //             break; // Channel disconnected
+                //         }
+                //     },
+                //     default(timeout) => {
+                //         warn!("Timed out waiting for packet. Buffer has {}/{} packets.", packet_buffer.len(), NUM_CHIPS);
+                //         break;
+                //     }
+                // }
             }
 
             if packet_buffer.len() == NUM_CHIPS {
@@ -233,7 +240,7 @@ impl AdcDriver for ElataV2Driver {
                     }
                 }
 
-                let merged_packet = Packet::RawI32(PacketData {
+                let merged_packet = PacketOwned::RawI32(PacketData {
                     header: final_header,
                     samples: merged_samples,
                 });

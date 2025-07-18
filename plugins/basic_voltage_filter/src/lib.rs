@@ -1,7 +1,8 @@
-use pipeline::control::ControlCommand;
-use pipeline::data::{Packet, PacketData};
+use pipeline::data::{PacketData, RtPacket};
 use pipeline::error::StageError;
 use pipeline::stage::{Stage, StageContext};
+use pipeline::control::ControlCommand;
+use std::sync::Arc;
 use uuid::Uuid;
 
 mod dsp;
@@ -40,11 +41,11 @@ impl Stage for BasicVoltageFilterPlugin {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        match packet {
-            Packet::RawI32(data) => {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        match &*packet {
+            RtPacket::RawI32(data) => {
                 let vref = 4.5;
                 let gain = 24.0;
 
@@ -76,12 +77,12 @@ impl Stage for BasicVoltageFilterPlugin {
                     }
                 }
 
-                let new_packet = Packet::Voltage(PacketData {
-                    header: data.header,
-                    samples: voltage_samples,
+                let new_packet = RtPacket::Voltage(PacketData {
+                    header: data.header.clone(),
+                    samples: (voltage_samples, data.samples.allocator().clone()).into(),
                 });
 
-                Ok(Some(new_packet))
+                Ok(Some(Arc::new(new_packet)))
             }
             // Pass through other packet types without modification
             _ => Ok(Some(packet)),

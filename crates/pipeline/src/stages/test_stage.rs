@@ -3,9 +3,10 @@
 //! A simple pipeline stage for testing state changes via control commands.
 
 use crate::control::{ControlCommand, PipelineEvent};
-use crate::data::Packet;
+use crate::data::RtPacket;
 use crate::error::StageError;
 use crate::stage::{Stage, StageContext};
+use std::sync::Arc;
 
 /// A pipeline stage with an internal, modifiable state for testing.
 #[derive(Debug)]
@@ -33,9 +34,9 @@ impl Stage for StatefulTestStage {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
         // Pass data through unmodified
         Ok(Some(packet))
     }

@@ -1,13 +1,14 @@
 //! Basic pipeline example demonstrating the new, simplified architecture.
 
 use std::sync::Arc;
-use pipeline::data::{Packet, PacketData, PacketHeader, SensorMeta};
+use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
+use pipeline::data::{RtPacket, PacketData, PacketHeader, SensorMeta};
 use pipeline::config::StageConfig;
 use pipeline::control::PipelineEvent;
 use pipeline::stage::{Stage, StageContext};
 use pipeline::stages::to_voltage::ToVoltageFactory;
 use pipeline::error::StageError;
-use crossbeam_channel as mpsc;
+use flume as mpsc;
 use pipeline::registry::StageFactory;
 
 // A simple stage that doubles each sample.
@@ -20,17 +21,20 @@ impl Stage for DoublerStage {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        if let Packet::Voltage(mut packet_data) = packet {
-            for sample in &mut packet_data.samples {
-                *sample *= 2.0;
-            }
-            Ok(Some(Packet::Voltage(packet_data)))
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        if let RtPacket::Voltage(packet_data) = &*packet {
+            let mut new_samples = RecycledF32Vec::new(_ctx.allocator.clone());
+            new_samples.extend(packet_data.samples.iter().map(|s| s * 2.0));
+            let new_packet_data = PacketData {
+                header: packet_data.header.clone(),
+                samples: new_samples,
+            };
+            Ok(Some(Arc::new(RtPacket::Voltage(new_packet_data))))
         } else {
             Err(StageError::BadConfig(
-                "Expected Packet::Voltage".to_string(),
+                "Expected RtPacket::Voltage".to_string(),
             ))
         }
     }
@@ -42,6 +46,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Create a test packet of raw ADC counts
     let sensor_meta = Arc::new(SensorMeta {
+        sensor_id: 0,
+        meta_rev: 1,
         schema_ver: 2,
         source_type: "mock".to_string(),
         v_ref: 2.5,
@@ -55,15 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tags: Default::default(),
     });
 
-    let input_packet = Packet::RawI32(PacketData {
+    let allocator = Arc::new(PacketAllocator::with_capacity(1, 1, 1, 4));
+    let mut samples = RecycledI32Vec::new(allocator.clone());
+    samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
+    let input_packet = Arc::new(RtPacket::RawI32(PacketData {
         header: PacketHeader {
             ts_ns: 0,
             batch_size: 4,
             meta: sensor_meta.clone(),
         },
-        samples: vec![1000i32, 2000, -1000, -2000],
-    });
-    if let Packet::RawI32(d) = &input_packet {
+        samples,
+    }));
+    if let RtPacket::RawI32(d) = &*input_packet {
         println!("Input Samples: {:?}", d.samples);
     }
 
@@ -77,20 +86,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let mut doubler_stage = DoublerStage;
     let (event_tx, _) = mpsc::unbounded::<PipelineEvent>();
-    let mut ctx = StageContext::new(event_tx);
+    let mut ctx = StageContext::new(event_tx, allocator.clone());
 
     // 3. Manually process the packet through the pipeline
     // Stage 1: Convert ADC counts to voltage
     let voltage_output = to_voltage_stage.process(input_packet, &mut ctx)?;
     let voltage_packet = voltage_output.unwrap();
-    if let Packet::Voltage(d) = &voltage_packet {
+    if let RtPacket::Voltage(d) = &*voltage_packet {
         println!("After ToVoltage: {:?}", d.samples);
     }
 
     // Stage 2: Double the voltage values
     let final_output = doubler_stage.process(voltage_packet, &mut ctx)?;
     let final_packet = final_output.unwrap();
-    if let Packet::Voltage(d) = &final_packet {
+    if let RtPacket::Voltage(d) = &*final_packet {
         println!("After Doubler:   {:?}", d.samples);
     }
 

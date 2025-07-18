@@ -1,17 +1,17 @@
 //! A test demonstrating a multi-stage synchronous pipeline.
 
-use pipeline::data::{Packet, PacketHeader, SensorMeta};
+use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
 use pipeline::config::{StageConfig, SystemConfig};
-use pipeline::control::{ControlCommand, PipelineEvent};
+use pipeline::data::{PacketData, PacketHeader, RtPacket, SensorMeta};
+use pipeline::control::{PipelineEvent};
 use pipeline::error::StageError;
+use pipeline::executor::Executor;
 use pipeline::graph::PipelineGraph;
 use pipeline::registry::{StageFactory, StageRegistry};
-use pipeline::runtime::{run, RuntimeMsg};
 use pipeline::stage::{Stage, StageContext};
 use serde_json::json;
-use crossbeam_channel::{self as mpsc, Sender};
+use flume::{self as mpsc, Sender};
 use std::sync::Arc;
-use std::thread;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
 
@@ -47,18 +47,22 @@ impl Stage for MultiplierStage {
 
     fn process(
         &mut self,
-        packet: Packet,
-        _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
+        packet: Arc<RtPacket>,
+        ctx: &mut StageContext,
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
         info!("MultiplierStage processing packet");
-        if let Packet::Voltage(mut packet_data) = packet {
-            for sample in &mut packet_data.samples {
-                *sample *= self.factor;
-            }
-            Ok(Some(Packet::Voltage(packet_data)))
+        if let RtPacket::Voltage(packet_data) = &*packet {
+            let mut new_samples = RecycledF32Vec::new(ctx.allocator.clone());
+            new_samples.extend(packet_data.samples.iter().map(|s| s * self.factor));
+
+            let new_packet_data = PacketData {
+                header: packet_data.header.clone(),
+                samples: new_samples,
+            };
+            Ok(Some(Arc::new(RtPacket::Voltage(new_packet_data))))
         } else {
             Err(StageError::BadConfig(
-                "Expected Packet::Voltage".to_string(),
+                "Expected RtPacket::Voltage".to_string(),
             ))
         }
     }
@@ -99,10 +103,10 @@ impl Stage for TestSink {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        if let Packet::Voltage(packet_data) = packet {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        if let RtPacket::Voltage(packet_data) = &*packet {
             self.output_tx.send(packet_data.samples.len()).unwrap();
         }
         Ok(None) // Sinks consume the packet
@@ -165,18 +169,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ]
     }))?;
 
-    // 3. Create channels for the pipeline runtime
-    let (runtime_tx, runtime_rx) = mpsc::unbounded::<RuntimeMsg>();
-    let (event_tx, event_rx) = mpsc::unbounded::<PipelineEvent>();
-    let context = StageContext::new(event_tx.clone());
+    // 3. Build the pipeline graph
+    let (event_tx, _event_rx) = mpsc::unbounded::<PipelineEvent>();
+    let test_allocator = Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024));
+    let graph =
+        PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()))?;
 
-    // 4. Build the pipeline graph
-    let graph = PipelineGraph::build(&config, &registry, context)?;
+    // 4. Create and start the executor
+    let (executor, input_tx) = Executor::new(graph);
 
-    // 5. Spawn the pipeline runtime in a dedicated thread
-    let pipeline_handle = thread::spawn(move || run(runtime_rx, event_tx, graph));
-
-    // 6. Send a large number of packets into the pipeline
+    // 5. Send a large number of packets into the pipeline
     let num_packets = 1_000;
     let samples_per_packet = 4;
     let total_samples_sent = num_packets * samples_per_packet;
@@ -187,18 +189,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     for i in 0..num_packets {
-        let packet = Packet::RawI32(pipeline::data::PacketData {
+        let mut samples = RecycledI32Vec::new(test_allocator.clone());
+        samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
+        let packet = RtPacket::RawI32(PacketData {
             header: PacketHeader {
                 ts_ns: i as u64,
                 batch_size: samples_per_packet as u32,
                 meta: Arc::new(SensorMeta::default()),
             },
-            samples: vec![1000i32, 2000, -1000, -2000],
+            samples,
         });
-        runtime_tx.send(RuntimeMsg::Data(packet))?;
+        input_tx.send(Arc::new(packet))?;
     }
 
-    // 7. Wait for the final output from the TestSink
+    // 6. Wait for the final output from the TestSink
     let mut total_samples_received = 0;
     for _ in 0..num_packets {
         total_samples_received += output_rx.recv()?;
@@ -207,20 +211,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("\nTotal samples received: {}", total_samples_received);
     assert_eq!(total_samples_sent, total_samples_received);
 
-    // 8. Shut down the pipeline
+    // 7. Shut down the pipeline
     info!("Shutting down pipeline...");
-    runtime_tx.send(RuntimeMsg::Ctrl(ControlCommand::Shutdown))?;
-
-    // 9. Wait for shutdown confirmation
-    loop {
-        if let Ok(PipelineEvent::ShutdownAck) = event_rx.recv() {
-            info!("Shutdown acknowledged.");
-            break;
-        }
-    }
-
-    // 10. Join the pipeline thread
-    pipeline_handle.join().unwrap()?;
+    executor.stop();
 
     info!("\nTest completed successfully!");
     Ok(())

@@ -4,12 +4,12 @@ use crate::config::StageConfig;
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Drains, Stage, StageContext};
-use crate::data::Packet;
+use crate::data::RtPacket;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// A factory for creating `CsvSink` stages.
 #[derive(Default)]
@@ -20,15 +20,7 @@ impl StageFactory for CsvSinkFactory {
         let params: CsvSinkParams = serde_json::from_value(serde_json::Value::Object(
             config.params.clone().into_iter().collect(),
         ))?;
-        let path = PathBuf::from(params.path);
-        let file = File::create(&path)
-            .map_err(|e| StageError::Fatal(format!("Failed to create CSV file {:?}: {}", path, e)))?;
-        let writer = Mutex::new(Some(BufWriter::new(file)));
-
-        Ok(Box::new(CsvSink {
-            id: config.name.clone(),
-            writer,
-        }))
+        Ok(Box::new(CsvSink::new(config.name.clone(), params)?))
     }
 }
 
@@ -38,10 +30,33 @@ pub struct CsvSink {
     writer: Mutex<Option<BufWriter<File>>>,
 }
 
+impl CsvSink {
+    pub fn new(id: String, params: CsvSinkParams) -> Result<Self, StageError> {
+        let path = PathBuf::from(params.path);
+        let file = File::create(&path)
+            .map_err(|e| StageError::Fatal(format!("Failed to create CSV file {:?}: {}", path, e)))?;
+        let mut writer = BufWriter::new(file);
+
+        // Write header
+        let mut header = "timestamp_ns".to_string();
+        for i in 0..params.num_channels {
+            header.push_str(&format!(",ch{}_voltage,ch{}_raw", i, i));
+        }
+        writeln!(writer, "{}", header)
+            .map_err(|e| StageError::Fatal(format!("Failed to write CSV header: {}", e)))?;
+
+        Ok(Self {
+            id,
+            writer: Mutex::new(Some(writer)),
+        })
+    }
+}
+
 #[derive(Debug, Deserialize)]
-struct CsvSinkParams {
+pub struct CsvSinkParams {
     #[serde(default = "default_path")]
-    path: String,
+    pub path: String,
+    pub num_channels: usize,
 }
 
 fn default_path() -> String {
@@ -55,16 +70,18 @@ impl Stage for CsvSink {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        if let Packet::Voltage(packet) = packet {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        if let RtPacket::RawAndVoltage(packet) = &*packet {
             let mut writer_guard = self.writer.lock().unwrap();
             if let Some(writer) = writer_guard.as_mut() {
-                for sample in &packet.samples {
-                    writeln!(writer, "{},{}", packet.header.ts_ns, sample)
-                        .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
+                let mut line = packet.header.ts_ns.to_string();
+                for (raw, voltage) in &*packet.samples {
+                    line.push_str(&format!(",{},{}", voltage, raw));
                 }
+                writeln!(writer, "{}", line)
+                    .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
             }
         }
         Ok(None)

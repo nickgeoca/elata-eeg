@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
-use crossbeam_channel::Sender;
+use flume::Sender;
 use eeg_types::{BridgeMsg, SensorError as EegSensorError};
 
 /// Configuration for ADC/sensor drivers
@@ -97,12 +97,12 @@ pub enum DriverStatus {
 }
 
 /// Events emitted by sensor drivers
-use pipeline::data::Packet;
+use pipeline::data::RtPacket;
 
 #[derive(Debug)]
 pub enum DriverEvent {
     /// New data is available
-    Data(Packet),
+    Data(RtPacket),
     /// Driver status changed
     StatusChange(DriverStatus),
     /// An error occurred

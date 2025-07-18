@@ -11,7 +11,7 @@ brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 anyhow = "1.0" # Added for error handling
 clap = { version = "4.0", features = ["derive"] }
 tracing = "0.1" # Added for structured logging
-boards = { path = "../boards", features = ["elata_v2", "mock_eeg"] }
+boards = { path = "../boards", features = ["elata_v1", "elata_v2", "mock_eeg"] }
 eeg_types = { path = "../eeg_types" }
 pipeline = { path = "../pipeline" }
 sensors = { path = "../sensors" }
@@ -21,6 +21,7 @@ brain_waves_fft_plugin = { path = "../../plugins/brain_waves_fft", optional = tr
 warp = "0.3"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9"
 toml = "0.8" # Added for plugin manifest parsing
 futures-util = "0.3"
 csv = "1.2"
@@ -30,8 +31,8 @@ log = "0.4" # Added for logging
 nix = { version = "0.27", features = ["signal"] }
 uuid = { version = "1.0", features = ["v4"] }
 bytes = "1.0"
-crossbeam-channel = "0.5"
 rppal = { version = "0.22.1", features = ["hal"] }
+flume = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"
@@ -39,10 +40,11 @@ tokio = { version = "1", features = ["full"] }
 tokio-test = "0.4"
 bytes = "1.0"
 tokio-tungstenite = { version = "0.23.1", features = ["native-tls"] }
-crossbeam-channel = "0.5"
+flume = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
 
 [[bin]]
 name = "eeg_daemon"
 path = "src/main.rs"
+

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local};
 use csv::Writer;
 use pipeline::control::{ControlCommand, CustomCommand};
-use pipeline::data::{Packet, PacketData};
+use pipeline::data::RtPacket;
 use pipeline::error::StageError;
 use pipeline::stage::{Stage, StageContext};
 use std::fs::File;
@@ -117,11 +117,11 @@ impl Stage for CsvRecorderPlugin {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        match &packet {
-            Packet::Voltage(data) => {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        match &*packet {
+            RtPacket::Voltage(data) => {
                 let mut state = self.state.lock().unwrap();
                 if state.is_recording {
                     if let Some(writer) = state.writer.as_mut() {

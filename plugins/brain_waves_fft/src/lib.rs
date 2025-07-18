@@ -1,4 +1,4 @@
-use pipeline::data::{Packet, PacketData};
+use pipeline::data::RtPacket;
 use pipeline::stage::{Stage, StageContext};
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use std::sync::Arc;
@@ -38,10 +38,10 @@ impl Stage for BrainWavesFftPlugin {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, pipeline::error::StageError> {
-        if let Packet::Voltage(packet_data) = packet {
+    ) -> Result<Option<Arc<RtPacket>>, pipeline::error::StageError> {
+        if let RtPacket::Voltage(packet_data) = &*packet {
             let samples_per_channel = packet_data.samples.len() / self.num_channels;
             if samples_per_channel == 0 {
                 return Ok(None);
@@ -80,7 +80,7 @@ impl Stage for BrainWavesFftPlugin {
                 }
             }
 
-            Ok(Some(Packet::Voltage(packet_data)))
+            Ok(Some(packet))
         } else {
             Ok(None)
         }

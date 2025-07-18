@@ -33,7 +33,7 @@ lazy_static = "1.4.0"
 serde = { version = "1.0", features = ["derive"] }
 eeg_types = { path = "../eeg_types" }
 pipeline = { path = "../pipeline" }
-crossbeam-channel = "0.5"
+flume = { workspace = true }
 
 [features]
 ads1299 = []

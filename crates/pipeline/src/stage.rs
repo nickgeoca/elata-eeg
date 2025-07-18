@@ -1,9 +1,47 @@
 //! Core definitions for pipeline stages.
 
+use crate::allocator::SharedPacketAllocator;
 use crate::control::{ControlCommand, PipelineEvent};
-use crate::data::Packet;
+use crate::data::RtPacket;
 use crate::error::StageError;
-use crossbeam_channel::Sender;
+use flume::Sender;
+use std::sync::Arc;
+
+/// The possible states of a stage in the pipeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageState {
+    /// The stage is running normally.
+    Running,
+    /// The stage is draining its input queue and will shut down once empty.
+    Draining,
+    /// The stage has been halted and will no longer process packets.
+    Halted,
+}
+
+/// Defines the action to take when a stage encounters a non-fatal error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorAction {
+    /// Shut down the entire pipeline.
+    Fatal,
+    /// Stop sending new packets to this stage and let it finish processing its queue.
+    DrainThenStop,
+    /// Drop the current packet and continue processing.
+    SkipPacket,
+}
+
+/// A policy that determines how a stage should respond to errors.
+pub trait StagePolicy: Send + Sync {
+    /// Called when a processing error occurs.
+    fn on_error(&self) -> ErrorAction;
+}
+
+/// A default policy that treats all errors as fatal.
+pub struct DefaultPolicy;
+impl StagePolicy for DefaultPolicy {
+    fn on_error(&self) -> ErrorAction {
+        ErrorAction::Fatal
+    }
+}
 
 /// A context object passed to each stage's `process` method.
 ///
@@ -12,11 +50,15 @@ use crossbeam_channel::Sender;
 #[derive(Clone)]
 pub struct StageContext {
     pub event_tx: Sender<PipelineEvent>,
+    pub allocator: SharedPacketAllocator,
 }
 
 impl StageContext {
-    pub fn new(event_tx: Sender<PipelineEvent>) -> Self {
-        Self { event_tx }
+    pub fn new(event_tx: Sender<PipelineEvent>, allocator: SharedPacketAllocator) -> Self {
+        Self {
+            event_tx,
+            allocator,
+        }
     }
 
     /// Emits an event to the main control loop.
@@ -38,9 +80,21 @@ pub trait Stage: Send + Sync {
     /// Processes an input packet and returns an optional output packet.
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError>;
+    ) -> Result<Option<Arc<RtPacket>>, StageError>;
+
+    /// Reconfigures the stage with new parameters.
+    ///
+    /// The default implementation returns an error, forcing stages to opt-in
+    /// to live reconfiguration.
+    fn reconfigure(
+        &mut self,
+        _config: &serde_json::Value,
+        _ctx: &mut StageContext,
+    ) -> Result<(), StageError> {
+        Err(StageError::UnsupportedReconfig)
+    }
 
     /// Handles a control command sent to the pipeline.
     /// The default implementation does nothing, allowing stages to opt-in.
@@ -80,10 +134,18 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
 
     fn process(
         &mut self,
-        packet: Packet,
+        packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
         (**self).process(packet, ctx)
+    }
+
+    fn reconfigure(
+        &mut self,
+        config: &serde_json::Value,
+        ctx: &mut StageContext,
+    ) -> Result<(), StageError> {
+        (**self).reconfigure(config, ctx)
     }
 
     fn control(

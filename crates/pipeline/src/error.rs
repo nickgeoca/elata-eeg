@@ -92,6 +92,8 @@ pub enum StageError {
     Io(String),
     #[error("JSON serialization/deserialization error: {0}")]
     JsonError(String),
+    #[error("live reconfiguration is not supported by this stage")]
+    UnsupportedReconfig,
 }
 
 impl From<serde_json::Error> for StageError {

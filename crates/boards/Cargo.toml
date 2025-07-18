@@ -8,7 +8,7 @@ eeg_types = { path = "../eeg_types" }
 sensors = { path = "../sensors" }
 pipeline = { path = "../pipeline" }
 log = "0.4"
-crossbeam-channel = "0.5"
+flume = { workspace = true }
 thread-priority = "0.3"
 rppal = { version = "0.22.1", features = ["hal"] }
 thiserror = "1.0"

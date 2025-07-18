@@ -1,7 +1,8 @@
 //! Converts raw i32 ADC samples into f32 voltage values.
 
+use crate::allocator::RecycledI32F32TupleVec;
 use crate::config::StageConfig;
-use crate::data::{Packet, PacketData};
+use crate::data::{PacketData, PacketView, RtPacket};
 use crate::error::StageError;
 use crate::registry::StageFactory;
 use crate::stage::{Stage, StageContext};
@@ -13,28 +14,32 @@ pub struct ToVoltageFactory;
 
 impl StageFactory for ToVoltageFactory {
     fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
-        Ok(Box::new(ToVoltage {
-            id: config.name.clone(),
-            ..Default::default()
-        }))
+        let v_ref = config.params["vref"]
+            .as_f64()
+            .ok_or_else(|| StageError::BadConfig("Missing vref".to_string()))? as f32;
+        let adc_bits = config.params["adc_bits"]
+            .as_u64()
+            .ok_or_else(|| StageError::BadConfig("Missing adc_bits".to_string()))? as u8;
+
+        Ok(Box::new(ToVoltage::new(config.name.clone(), v_ref, adc_bits)))
     }
 }
 
-/// A pipeline stage that converts raw integer samples to voltage values.
 pub struct ToVoltage {
     id: String,
-    cached_meta_ptr: usize,
-    cached_scale_factor: f32,
-    cached_offset: i32,
+    v_ref: f32,
+    adc_bits: u8,
+    scale_factor: f32,
 }
 
-impl Default for ToVoltage {
-    fn default() -> Self {
+impl ToVoltage {
+    pub fn new(id: String, v_ref: f32, adc_bits: u8) -> Self {
+        let full_scale_range = (1i64 << (adc_bits - 1)) as f32;
         Self {
-            id: "default".to_string(),
-            cached_meta_ptr: 0,
-            cached_scale_factor: 1.0,
-            cached_offset: 0,
+            id,
+            v_ref,
+            adc_bits,
+            scale_factor: v_ref / full_scale_range,
         }
     }
 }
@@ -46,37 +51,29 @@ impl Stage for ToVoltage {
 
     fn process(
         &mut self,
-        packet: Packet,
-        _ctx: &mut StageContext,
-    ) -> Result<Option<Packet>, StageError> {
-        if let Packet::RawI32(packet) = packet {
-            let meta_ptr = Arc::as_ptr(&packet.header.meta) as usize;
+        pkt: Arc<RtPacket>,
+        ctx: &mut StageContext,
+    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        let view = PacketView::from(&*pkt);
 
-            if self.cached_meta_ptr != meta_ptr {
-                let meta = &packet.header.meta;
-                let full_scale_range = if meta.is_twos_complement {
-                    1i32 << (meta.adc_bits - 1)
-                } else {
-                    1i32 << meta.adc_bits
-                };
-                self.cached_scale_factor = (meta.v_ref / meta.gain) / full_scale_range as f32;
-                self.cached_offset = meta.offset_code;
-                self.cached_meta_ptr = meta_ptr;
+        if let PacketView::RawI32 { header, data } = view {
+            let mut samples_both =
+                RecycledI32F32TupleVec::with_capacity(ctx.allocator.clone(), data.len());
+
+            for &raw_sample in data.iter() {
+                let voltage = raw_sample as f32 * self.scale_factor;
+                samples_both.push((raw_sample, voltage));
             }
 
-            let samples_f32: Vec<f32> = packet
-                .samples
-                .iter()
-                .map(|&raw_sample| (raw_sample - self.cached_offset) as f32 * self.cached_scale_factor)
-                .collect();
-
             let output_packet = PacketData {
-                header: packet.header.clone(),
-                samples: samples_f32,
+                header: header.clone(),
+                samples: samples_both,
             };
 
-            return Ok(Some(Packet::Voltage(output_packet)));
+            return Ok(Some(Arc::new(RtPacket::RawAndVoltage(output_packet))));
         }
-        Ok(None)
+
+        // If the packet is not RawI32, pass it through.
+        Ok(Some(pkt))
     }
 }

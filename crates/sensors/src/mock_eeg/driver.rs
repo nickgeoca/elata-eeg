@@ -9,7 +9,7 @@ use lazy_static::lazy_static;
 use crate::types::{AdcConfig, DriverStatus, DriverError, DriverType};
 use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{Packet, PacketData, PacketHeader, SensorMeta};
+use pipeline::data::{PacketData, PacketHeader, PacketOwned, SensorMeta};
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -104,6 +104,8 @@ impl MockDriver {
             .collect();
 
         let meta = Arc::new(SensorMeta {
+            sensor_id: 0,
+            meta_rev: 0,
             schema_ver: 2,
             source_type: "MockEeg".to_string(),
             v_ref: config.vref,
@@ -141,7 +143,7 @@ impl crate::types::AdcDriver for MockDriver {
         Ok(())
     }
 
-    fn acquire(&mut self, tx: crossbeam_channel::Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
+    fn acquire(&mut self, tx: flume::Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
         info!("MockDriver synchronous acquisition started");
 
         let inner_arc = self.inner.clone();
@@ -170,7 +172,7 @@ impl crate::types::AdcDriver for MockDriver {
             let relative_timestamp = current_sample_count * sample_interval_us;
             let samples = gen_realistic_eeg_data(&config, relative_timestamp);
 
-            let packet = Packet::RawI32(PacketData {
+            let packet = PacketOwned::RawI32(PacketData {
                 header: PacketHeader {
                     ts_ns: (base_timestamp + relative_timestamp) * 1000,
                     batch_size: batch_size as u32,

@@ -1,120 +1,68 @@
 //! Utility macros for the pipeline crate.
 
-/// A declarative macro for defining a pipeline stage.
+/// A declarative macro for defining a simple pipeline stage.
 ///
-/// This macro generates the boilerplate required for a stage, including:
-/// - The main stage struct.
-/// - A parameter struct with `serde` and `schemars` support.
-/// - An implementation of the `Stage` trait.
+/// This macro generates a struct and a synchronous `Stage` implementation,
+/// removing the need for most boilerplate. The user provides the stage name,
+/// an optional block of state fields, and the core processing logic.
 ///
 /// # Example
 ///
 /// ```ignore
-/// stage_def! {
-///     name: MyStage,
-///     inputs: InputPacketType,
-///     outputs: OutputPacketType,
-///     params: {
-///         my_param: f32 = 1.0,
-///     },
+/// simple_stage!(
+///     MyStage,
 ///     fields: {
-///         my_state: u32,
+///         my_state: u32 = 0,
 ///     },
-///     init: |params| {
-///         Self { my_state: 0 }
-///     },
-///     process: |self, pkt, ctx| -> Result<Option<Packet<OutputPacketType>>, StageError> {
-///         // ... processing logic ...
-///         Ok(Some(output_pkt))
-///     },
-/// }
+///     process: {
+///         // `self` refers to the stage struct instance.
+///         self.my_state += 1;
+///         Ok(Some(pkt))
+///     }
+/// );
 /// ```
 #[macro_export]
-macro_rules! stage_def {
+macro_rules! simple_stage {
     (
-        name: $name:ident,
-        inputs: $input_ty:ty,
-        outputs: $output_ty:ty,
-        params: {
-            $(
-                $(#[$param_meta:meta])*
-                $param_name:ident: $param_ty:ty = $param_default:expr
-            ),* $(,)?
-        },
+        $name:ident,
         fields: {
             $(
-                $(#[$field_meta:meta])*
-                $field_name:ident: $field_ty:ty
+                $field_name:ident: $field_ty:ty = $field_init:expr
             ),* $(,)?
         },
-        init: |$init_params:ident| $init_body:block,
-        process: |$process_self:ident, $process_pkt:ident, $process_ctx:ident| $process_body:block
+        process: $process:block
     ) => {
-        // --- Parameter Struct Definition ---
-        #[derive(Debug, Clone, serde::Deserialize, schemars::JsonSchema)]
-        #[serde(deny_unknown_fields)]
-        pub struct [<$name Params>] {
-            $(
-                $(#[$param_meta])*
-                #[serde(default = $crate::macros::stringify_path!([<$name _default_ $param_name>]))]
-                pub $param_name: $param_ty,
-            )*
-        }
-
-        $(
-            fn [<$name _default_ $param_name>]() -> $param_ty {
-                $param_default
-            }
-        )*
-
-        // --- Stage Struct Definition ---
         pub struct $name {
-            // Parameters are stored directly in the struct
+            id: String,
             $(
-                pub $param_name: $param_ty,
-            )*
-            // Custom state fields
-            $(
-                $(#[$field_meta])*
-                pub $field_name: $field_ty,
+                $field_name: $field_ty,
             )*
         }
 
-        // --- Main Stage Logic Implementation ---
         impl $name {
-            pub fn new(params: [<$name Params>]) -> Self {
-                let user_init_fields = {
-                    let $init_params = &params;
-                    $init_body
-                };
+            // The factory will call this
+            pub fn new(id: String) -> Self {
                 Self {
-                    $($param_name: params.$param_name.clone(),)*
-                    $($field_name: user_init_fields.$field_name,)*
+                    id,
+                    $(
+                        $field_name: $field_init,
+                    )*
                 }
             }
         }
 
-        // --- Trait Implementations ---
-        #[async_trait::async_trait]
-        impl $crate::stage::Stage<$input_ty, $output_ty> for $name {
-            async fn process(
+        impl $crate::stage::Stage for $name {
+            fn id(&self) -> &str {
+                &self.id
+            }
+
+            fn process(
                 &mut self,
-                packet: $crate::data::Packet<$input_ty>,
+                pkt: ::std::sync::Arc<$crate::data::RtPacket>,
                 ctx: &mut $crate::stage::StageContext,
-            ) -> Result<Option<$crate::data::Packet<$output_ty>>, $crate::error::StageError> {
-                let $process_self = self;
-                let $process_pkt = packet;
-                let $process_ctx = ctx;
-                $process_body
+            ) -> Result<Option<::std::sync::Arc<$crate::data::RtPacket>>, $crate::error::StageError> {
+                $process
             }
         }
-    };
-}
-
-// Helper macro to stringify a path, used for default value functions.
-#[macro_export]
-macro_rules! stringify_path {
-    ($path:path) => {
-        stringify!($path)
     };
 }

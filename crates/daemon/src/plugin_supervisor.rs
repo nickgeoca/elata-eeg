@@ -3,8 +3,6 @@
 //! This module is responsible for initializing, running, and managing the
 //! lifecycle of all registered EEG plugins.
 
-use anyhow::Result;
-use std::thread::{JoinHandle};
 
 use eeg_types::plugin::EegPlugin;
 use pipeline::stage::Stage;
@@ -12,7 +10,6 @@ use pipeline::stage::Stage;
 /// Manages the lifecycle of all registered EEG plugins.
 pub struct PluginSupervisor {
     plugins: Vec<Box<dyn Stage>>,
-    handles: Vec<JoinHandle<Result<()>>>,
 }
 
 impl PluginSupervisor {
@@ -20,7 +17,6 @@ impl PluginSupervisor {
     pub fn new() -> Self {
         Self {
             plugins: Vec::new(),
-            handles: Vec::new(),
         }
     }
 

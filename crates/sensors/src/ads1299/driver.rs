@@ -2,16 +2,16 @@
 
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crossbeam_channel::Sender;
+use flume::Sender;
 use log::{debug, info, warn};
 use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::spi::Spi;
 
 use crate::types::ChipConfig;
 use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{Packet, PacketData};
+use pipeline::data::{PacketData, PacketHeader, PacketOwned, SensorMeta};
 
 use crate::types::{AdcConfig, AdcDriver, DriverError, DriverStatus};
 use super::helpers::ch_sample_to_raw;
@@ -36,6 +36,7 @@ pub struct Ads1299Inner {
     pub running: bool,
     pub status: DriverStatus,
     pub registers: [u8; 24],
+    pub sensor_meta: Arc<SensorMeta>,
 }
 
 impl Ads1299Driver {
@@ -48,6 +49,7 @@ impl Ads1299Driver {
     pub fn new(
         config: ChipConfig,
         spi: Arc<Mutex<Spi>>,
+        sensor_meta: Arc<SensorMeta>,
     ) -> Result<Self, DriverError> {
         let gpio = Gpio::new().map_err(|e| DriverError::GpioError(e.to_string()))?;
         let cs_pin = gpio
@@ -66,6 +68,7 @@ impl Ads1299Driver {
             running: false,
             status: DriverStatus::NotInitialized,
             registers: [0u8; 24],
+            sensor_meta,
         };
 
         let driver = Ads1299Driver {
@@ -147,22 +150,30 @@ impl Ads1299Driver {
     /// Read a register from the ADS1299.
     pub fn read_register(&self, register: u8) -> Result<u8, DriverError> {
         let mut inner = self.inner.lock().unwrap();
-        let spi = self.spi.lock().unwrap();
-        let mut buffer = [0u8; 2];
+        let mut spi = self.spi.lock().unwrap();
+        let mut read_buffer = [0u8; 1];
 
         let command = 0x20 | (register & 0x1F);
-        let write_buf = [command, 0x00]; // command, num registers-1
+        let write_buf = [command, 0x00]; // RREG command, num registers-1
 
         debug!("SPI read_register 0x{:02X} - CS low", register);
         inner.cs_pin.set_low();
-        thread::sleep(Duration::from_micros(1)); // Small delay after CS
-        let result = spi.transfer(&mut buffer, &write_buf)
-            .map_err(|e| DriverError::SpiError(e.to_string()));
-        inner.cs_pin.set_high();
-        debug!("SPI read_register result: {:?}", result);
-        result?;
+        // Per datasheet, wait 4 tCLK cycles after command before reading.
+        // At 1MHz SPI, tCLK is 1us. 5us is a safe margin.
+        thread::sleep(Duration::from_micros(5));
 
-        Ok(buffer[1])
+        // Send the command to read the register
+        spi.write(&write_buf)
+            .map_err(|e| DriverError::SpiError(e.to_string()))?;
+
+        // Send a dummy byte to clock in the register value
+        spi.read(&mut read_buffer)
+            .map_err(|e| DriverError::SpiError(e.to_string()))?;
+
+        inner.cs_pin.set_high();
+        debug!("SPI read_register result: Ok(0x{:02X})", read_buffer[0]);
+
+        Ok(read_buffer[0])
     }
 
     /// Write a value to a register in the ADS1299.
@@ -171,21 +182,28 @@ impl Ads1299Driver {
         let mut spi = self.spi.lock().unwrap();
 
         let command = 0x40 | (register & 0x1F);
-        let write_buf = [command, 0x00, value]; // command, num registers-1, value
+        let write_buf = [command, 0x00, value]; // WREG command, num registers-1, value
 
         inner.cs_pin.set_low();
-        spi.write(&write_buf)
-            .map_err(|e| DriverError::SpiError(e.to_string()))?;
+        // Add a small delay for stability, similar to read_register
+        thread::sleep(Duration::from_micros(5));
+
+        let result = spi.write(&write_buf)
+            .map_err(|e| DriverError::SpiError(e.to_string()));
+
         inner.cs_pin.set_high();
 
-        inner.registers[register as usize] = value;
-        Ok(())
+        if result.is_ok() {
+            inner.registers[register as usize] = value;
+        }
+
+        result.map(|_| ())
     }
 
     /// Acquire data from this chip and send it down the channel.
     pub fn acquire_raw(
         &mut self,
-        tx: Sender<Packet>,
+        tx: Sender<PacketOwned>,
         stop_flag: &Arc<AtomicBool>,
         chip_id: u8,
     ) -> Result<(), SensorError> {
@@ -225,8 +243,15 @@ impl Ads1299Driver {
                         samples.push(sample);
                     }
 
-                    let packet = Packet::RawI32(PacketData {
-                        header: Default::default(), // TODO: Populate header properly
+                    let packet = PacketOwned::RawI32(PacketData {
+                        header: PacketHeader {
+                            ts_ns: SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_nanos() as u64,
+                            batch_size: samples.len() as u32,
+                            meta: self.inner.lock().unwrap().sensor_meta.clone(),
+                        },
                         samples,
                     });
 

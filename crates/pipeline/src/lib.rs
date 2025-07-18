@@ -3,22 +3,24 @@
 //! This crate implements a dataflow graph (DAG) architecture for EEG data processing,
 //! replacing the event-bus-based plugin system with explicit pipeline stages and
 //! data flow contracts.
+pub mod allocator;
 pub mod data;
 pub mod stage;
 pub mod control;
 pub mod graph;
 pub mod config;
-pub mod runtime;
+pub mod executor;
 pub mod stages;
 pub mod error;
 pub mod registry;
-// #[macro_use]
-// pub mod macros;
+#[macro_use]
+pub mod macros;
 
 #[cfg(test)]
 mod tests;
 
 // Re-export commonly used types
+pub use allocator::*;
 pub use control::*;
 pub use data::*;
 pub use stage::*;

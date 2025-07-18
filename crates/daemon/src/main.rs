@@ -1,20 +1,19 @@
 use adc_daemon::plugin_supervisor::PluginSupervisor;
 use boards::create_driver;
 use clap::{Arg, Command};
-use sensors::{AdcConfig, DriverType};
 use eeg_types::BridgeMsg;
-use sensors::types::ChipConfig;
+use flume::Selector;
 use pipeline::config::SystemConfig;
-use pipeline::control::{PipelineEvent, ControlCommand};
+use pipeline::control::{ControlCommand, PipelineEvent};
+use pipeline::executor::Executor;
 use pipeline::graph::PipelineGraph;
 use pipeline::registry::StageRegistry;
-use pipeline::runtime::{run as pipeline_run, RuntimeMsg};
-use pipeline::stage::StageContext;
-use crossbeam_channel::{bounded, select};
+use sensors::types::ChipConfig;
+use sensors::{AdcConfig, DriverType};
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Parse command line arguments
@@ -32,20 +31,16 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- Channel Setup ---
     // For WebSocket -> Control Plane
-    let (_control_tx, _control_rx) = bounded::<ControlCommand>(10);
+    let (_control_tx, _control_rx) = flume::bounded::<ControlCommand>(10);
     // For Pipeline -> Main Loop (Events)
-    let (event_tx, event_rx) = bounded(100);
+    let (event_tx, event_rx) = flume::bounded(10);
     // For Sensor Thread -> Main Loop (Data/Errors)
-    let (bridge_tx, bridge_rx) = bounded(100);
-    // For Main Loop -> Pipeline (Data)
-    let (pipeline_data_tx, pipeline_data_rx) = bounded(100);
+    let (bridge_tx, bridge_rx) = flume::bounded::<BridgeMsg>(10);
 
     // --- Configuration ---
-    let initial_config: SystemConfig = SystemConfig {
-        version: "1.0".to_string(),
-        metadata: Default::default(),
-        stages: vec![], // In a real app, load from file
-    };
+    let config_path = "crates/daemon/e2e_test_pipeline.yaml";
+    let config_str = fs::read_to_string(config_path)?;
+    let initial_config: SystemConfig = serde_yaml::from_str(&config_str)?;
 
     // --- Plugin Supervisor ---
     let _supervisor = PluginSupervisor::new();
@@ -53,21 +48,26 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // supervisor.add_plugin(Box::new(MyPlugin::new()));
 
     // --- Pipeline Thread ---
-    let pipeline_handle = {
+    let (pipeline_input_tx, pipeline_handle) = {
         let mut registry = StageRegistry::new();
         pipeline::stages::register_builtin_stages(&mut registry);
-        
-        let event_tx_clone = event_tx.clone();
-        let context = StageContext {
-            event_tx: event_tx_clone,
-        };
-        let graph = PipelineGraph::build(&initial_config, &registry, context).unwrap();
 
-        thread::spawn(move || {
-            tracing::info!("Pipeline task started.");
-            let result = pipeline_run(pipeline_data_rx, event_tx, graph);
-            tracing::info!("Pipeline task finished with result: {:?}", result);
-        })
+        let graph =
+            PipelineGraph::build(&initial_config, &registry, event_tx.clone(), None).unwrap();
+
+        let (executor, input_tx) = Executor::new(graph);
+
+        let handle = thread::spawn(move || {
+            tracing::info!("Pipeline executor started.");
+            // The executor's internal state will run until stop() is called.
+            // For now, we just let the thread run. The stop() method will be called
+            // during graceful shutdown.
+            thread::park(); // Park the thread until unparked during shutdown
+            executor.stop();
+            tracing::info!("Pipeline executor stopped.");
+        });
+
+        (input_tx, handle)
     };
 
     // --- Sensor Thread ---
@@ -76,7 +76,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // TODO: Load this from a config file
         // TODO: Load this from a config file
         let mut adc_config = AdcConfig {
-            board_driver: DriverType::ElataV2,
+            board_driver: DriverType::ElataV1,
             chips: vec![
                 ChipConfig {
                     channels: (0..8).collect(),
@@ -113,15 +113,13 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 
     // --- Main Event Loop ---
-    let shutdown_initiated = false;
     loop {
-        select! {
-            recv(bridge_rx) -> bridge_msg => {
+        Selector::new()
+            .recv(&bridge_rx, |bridge_msg| {
                 match bridge_msg {
                     Ok(BridgeMsg::Data(packet)) => {
-                        if pipeline_data_tx.send(RuntimeMsg::Data(packet)).is_err() {
+                        if pipeline_input_tx.send(Arc::new(packet.into())).is_err() {
                             tracing::error!("Failed to send data to pipeline; channel closed.");
-                            break; // Exit if pipeline is gone
                         }
                     }
                     Ok(BridgeMsg::Error(e)) => {
@@ -129,38 +127,25 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     }
                     Err(_) => {
                         tracing::info!("Bridge channel disconnected.");
-                        break;
                     }
                 }
-            },
-            recv(event_rx) -> event => {
+            })
+            .recv(&event_rx, |event| {
                 match event {
                     Ok(PipelineEvent::ShutdownAck) => {
                         tracing::info!("Pipeline acknowledged shutdown. Stopping sensor thread.");
                         // 2. Tell sensor thread to stop
                         stop_flag.store(true, Ordering::Relaxed);
-                        break; // Exit main loop
                     }
                     Ok(PipelineEvent::TestStateChanged(val)) => {
                         tracing::info!("Test state changed to: {}", val);
                     }
                     Err(_) => {
                         tracing::info!("Event channel disconnected.");
-                        break;
                     }
                 }
-            },
-            // TODO: Implement a proper shutdown signal handler
-            // For now, we just break the loop on any channel disconnect
-            default(Duration::from_secs(1)) => {
-                // This timeout prevents the loop from spinning if all channels are empty
-                // but not disconnected. In a real scenario, you might have a heartbeat
-                // or other periodic tasks here.
-                if shutdown_initiated {
-                    break;
-                }
-            }
-        }
+            })
+            .wait_timeout(std::time::Duration::from_secs(1)).ok();
     }
 
     // --- Graceful Shutdown ---
