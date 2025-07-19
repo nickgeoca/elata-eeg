@@ -23,3 +23,4 @@ impl From<DriverError> for SensorError {
         SensorError::DriverError(e.to_string())
     }
 }
+pub mod spi_bus;

@@ -1,13 +1,13 @@
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use log::{info, warn, debug};
 use crate::types::AdcDriver;
 use lazy_static::lazy_static;
 
 use crate::types::{AdcConfig, DriverStatus, DriverError, DriverType};
-use super::mock_data_generator::{gen_realistic_eeg_data, current_timestamp_micros};
+use super::mock_data_generator::{gen_realistic_eeg_data};
 use eeg_types::{BridgeMsg, SensorError};
 use pipeline::data::{PacketData, PacketHeader, PacketOwned, SensorMeta};
 
@@ -89,13 +89,6 @@ impl MockDriver {
             ));
         }
 
-        if config.batch_size < config.channels.len() {
-            *hardware_in_use = false;
-            return Err(DriverError::ConfigurationError(
-                format!("Batch size ({}) must be at least equal to the number of channels ({})",
-                        config.batch_size, config.channels.len())
-            ));
-        }
 
         let channel_names = config
             .channels
@@ -153,28 +146,35 @@ impl crate::types::AdcDriver for MockDriver {
             let mut inner_guard = inner_arc.lock().unwrap();
             inner_guard.running = true;
             inner_guard.status = DriverStatus::Running;
-            inner_guard.base_timestamp = Some(current_timestamp_micros().unwrap_or(0));
+            inner_guard.base_timestamp = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64);
             inner_guard.sample_count = 0;
             (inner_guard.config.clone(), inner_guard.meta.clone())
         };
 
         let batch_size = config.batch_size;
-        let sample_interval_us = (1_000_000 / config.sample_rate) as u64;
+        let sample_interval_ns = (1_000_000_000.0 / config.sample_rate as f64) as u64;
 
         while !stop_flag.load(Ordering::Relaxed) {
-            let (current_sample_count, base_timestamp) = {
+            let (start_sample_count, base_timestamp) = {
                 let mut inner_guard = inner_arc.lock().unwrap();
                 let count = inner_guard.sample_count;
                 inner_guard.sample_count += batch_size as u64;
                 (count, inner_guard.base_timestamp.unwrap())
             };
 
-            let relative_timestamp = current_sample_count * sample_interval_us;
-            let samples = gen_realistic_eeg_data(&config, relative_timestamp);
+            let mut samples = Vec::with_capacity(batch_size * config.channels.len());
+            for i in 0..batch_size {
+                let sample_num = start_sample_count + i as u64;
+                let relative_timestamp_us = (sample_num * sample_interval_ns) / 1000;
+                let sample_slice = gen_realistic_eeg_data(&config, relative_timestamp_us);
+                samples.extend_from_slice(&sample_slice);
+            }
+
+            let packet_timestamp_offset_ns = start_sample_count * sample_interval_ns;
 
             let packet = PacketOwned::RawI32(PacketData {
                 header: PacketHeader {
-                    ts_ns: (base_timestamp + relative_timestamp) * 1000,
+                    ts_ns: base_timestamp + packet_timestamp_offset_ns,
                     batch_size: batch_size as u32,
                     meta: meta.clone(),
                 },

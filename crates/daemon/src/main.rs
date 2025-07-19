@@ -76,22 +76,22 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // TODO: Load this from a config file
         // TODO: Load this from a config file
         let mut adc_config = AdcConfig {
-            board_driver: DriverType::ElataV1,
+            board_driver: DriverType::ElataV2,
             chips: vec![
                 ChipConfig {
                     channels: (0..8).collect(),
                     gain: 24.0,
                     spi_bus: 0,
                     cs_pin: 0,
-                    drdy_pin: 25,
+                    drdy_pin: 25, // gpio25 pin22
                 },
-                ChipConfig {
-                    channels: (0..8).collect(),
-                    gain: 24.0,
-                    spi_bus: 0,
-                    cs_pin: 1,
-                    drdy_pin: 26, // Use a different DRDY pin for the second chip
-                },
+                // ChipConfig {
+                //     channels: (0..8).collect(),
+                //     gain: 24.0,
+                //     spi_bus: 0,
+                //     cs_pin: 1,
+                //     drdy_pin: 24,
+                // },
             ],
             ..Default::default()
         };

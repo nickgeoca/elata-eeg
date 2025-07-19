@@ -159,6 +159,12 @@ impl fmt::Display for DriverError {
 
 impl Error for DriverError {}
 
+impl From<rppal::gpio::Error> for DriverError {
+    fn from(e: rppal::gpio::Error) -> Self {
+        DriverError::GpioError(e.to_string())
+    }
+}
+
 /// Trait that all sensor drivers must implement
 pub trait AdcDriver: Send + Sync + 'static {
     /// Initialize the driver and underlying hardware.

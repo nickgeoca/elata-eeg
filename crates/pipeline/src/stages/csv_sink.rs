@@ -38,9 +38,9 @@ impl CsvSink {
         let mut writer = BufWriter::new(file);
 
         // Write header
-        let mut header = "timestamp_ns".to_string();
+        let mut header = "timestamp".to_string();
         for i in 0..params.num_channels {
-            header.push_str(&format!(",ch{}_voltage,ch{}_raw", i, i));
+            header.push_str(&format!(",ch{}_voltage,ch{}_raw_sample", i, i));
         }
         writeln!(writer, "{}", header)
             .map_err(|e| StageError::Fatal(format!("Failed to write CSV header: {}", e)))?;

@@ -74,7 +74,7 @@ graph TD
 | **Signal group** | **Pi 5 pin(s)** | **ADS1299-EEG_FE header / jumper** | **Notes** |
 | :--- | :--- | :--- | :--- |
 | **Shared power / ground** | 3 V3 (Pin 1 or 17) <br>5 V (Pin 2 or 4) <br>GND (any Pi ground) | JP24 (center) <br>JP4 (5 V pad nearest silk) <br>JP5 (GND post) | Heavy ribbon or bus wire; same rails feed all four boards. |
-| **External 2.048 MHz clock** | GPIO4 (Pin 7) via GPCLK0 | **J3-17** on every board <br>**JP23 1-2** (Ext CLK) <br>**JP18 1-2** (route to chip) | One star-node wire tees to all four headers. |
+| **Internal clock** | - | **J3-17** on every board  (route to chip) | Board 0 star-node wire tees to all three other board headers. |
 | **MOSI (DIN)** | GPIO10 (Pin 19) | J3-11 (DIN) | Shared. |
 | **SCLK** | GPIO11 (Pin 23) | J3-3 (SCLK) | Shared. |
 | **MISO (DOUT)** | GPIO9 (Pin 21) | J3-13 (DOUT1) | *Simple harness:* tie all four DOUT1 pins together here and run RDATAC.<br>*Debug harness:* give each board its own GPIO and leave RDATAC; both work. |
@@ -94,8 +94,8 @@ graph TD
 
 | Jumper | Board 0 (clock/bias master) | Boards 1-3 |
 | :--- | :--- | :--- |
-| JP23 (CLKSEL) | **1-2** | **1-2** |
-| JP18 (CLK-route) | **1-2** | **1-2** |
+| JP23 (CLKSEL) | **2-3** | **1-2** |
+| JP18 (CLK-route) | **2-3** | **1-2** |
 | JP21 | **Installed** (J3-1 = CS) | same |
 | JP22 | **Open** (START stays on J3-14) | same |
 | JP1 (BIAS_DRV) | **Closed** | **Open** |
@@ -103,15 +103,7 @@ graph TD
 
 ## Clock Generation on Raspberry Pi 5
 
-To generate the required 2.048 MHz clock signal, use the Raspberry Pi 5's hardware GPCLK peripheral. This provides a stable and precise clock source without requiring an external oscillator.
-
-Add the following line to your `/boot/config.txt` file:
-
-```ini
-dtoverlay=gpclk,gpio=4,clkfreq=2048000
-```
-
-This configures `GPCLK0` to output a 2.048 MHz clock on `GPIO4` (Pin 7). A reboot is required for this change to take effect.
+The clock is using the internal one on board0.
 
 ## Register Configuration Differences
 

@@ -162,7 +162,6 @@ impl LowpassFilter {
 #[derive(Clone)]
 pub struct SignalProcessor {
     num_channels: usize,
-    sample_rate: u32,
     powerline_notch_filters: Option<Vec<NotchFilter>>, // Holds 50Hz OR 60Hz filters, or None
     highpass_filters: Vec<HighpassFilter>,
     lowpass_filters: Vec<LowpassFilter>,
@@ -205,7 +204,6 @@ impl SignalProcessor {
         
         Self {
             num_channels,
-            sample_rate,
             powerline_notch_filters,
             highpass_filters: (0..num_channels)
                 .map(|_| HighpassFilter::new(sample_rate_f32, dsp_high_pass_cutoff))
@@ -264,7 +262,6 @@ mod tests {
     #[test]
     fn test_signal_processor_creation() {
         let processor = SignalProcessor::new(500, 8, 1.0, 50.0, Some(60));
-        assert_eq!(processor.sample_rate, 500);
         assert_eq!(processor.num_channels, 8);
     }
 

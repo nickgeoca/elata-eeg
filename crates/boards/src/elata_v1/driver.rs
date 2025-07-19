@@ -1,23 +1,27 @@
 use eeg_types::{BridgeMsg, SensorError};
 use pipeline::data::SensorMeta;
 use log::info;
-use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
+use rppal::gpio::Gpio;
+use rppal::spi::{Bus, Mode};
 use sensors::{
     ads1299::{
         driver::Ads1299Driver,
         registers::{
-            self, BIAS_SENSN_REG_MASK, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG,
+            self, BIAS_SENSN_REG, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG,
             CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR, CMD_RDATAC, CMD_START, CMD_WAKEUP,
-        },
+BIASREF_INT , PD_BIAS , PD_REFBUF, DC_TEST, SRB1        },
     },
-    AdcConfig, AdcDriver, DriverError, DriverStatus,
+    AdcConfig, AdcDriver, DriverError, DriverStatus, spi_bus::SpiBus,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
-use flume::Sender;
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+use flume::{Receiver, Sender};
+use std::time::{SystemTime, UNIX_EPOCH};
+use pipeline::data::PacketOwned;
 
 pub struct ElataV1Driver {
     inner: Ads1299Driver,
     config: AdcConfig,
+    drdy_tx: Sender<()>,
 }
 
 impl ElataV1Driver {
@@ -26,9 +30,8 @@ impl ElataV1Driver {
             DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
         })?;
 
-        let spi = Spi::new(Bus::Spi0, SlaveSelect::Ss0, 1_000_000, Mode::Mode1)
-            .map_err(|e| DriverError::SpiError(e.to_string()))?;
-        let spi = Arc::new(Mutex::new(spi));
+        let spi_bus = Arc::new(SpiBus::new(Bus::Spi0, 1_000_000, Mode::Mode1)?);
+        let gpio = Arc::new(Gpio::new().map_err(|e| DriverError::GpioError(e.to_string()))?);
 
         let sensor_meta = Arc::new(SensorMeta {
             v_ref: config.vref,
@@ -38,8 +41,10 @@ impl ElataV1Driver {
             ..Default::default()
         });
 
-        let inner = Ads1299Driver::new(chip_config.clone(), spi, sensor_meta)?;
-        Ok(Self { inner, config })
+        let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
+        let (drdy_tx, drdy_rx): (Sender<()>, Receiver<()>) = flume::bounded(1);
+        let inner = Ads1299Driver::new(chip_config.clone(), spi_bus, cs_pin, drdy_rx, sensor_meta)?;
+        Ok(Self { inner, config, drdy_tx })
     }
 }
 
@@ -54,9 +59,6 @@ impl AdcDriver for ElataV1Driver {
         let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
         let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
         let active_ch_mask = self.config.channels.iter().fold(0, |acc, &ch| acc | (1 << ch));
-
-        let config1 = CONFIG1_REG | sps_mask; // No daisy chain
-
         let ch_settings: Vec<(u8, u8)> = (0..8)
             .map(|i| {
                 (
@@ -69,17 +71,17 @@ impl AdcDriver for ElataV1Driver {
                 )
             })
             .collect();
-
+ 
         self.inner.initialize_chip(
-            config1,
-            CONFIG2_REG,
-            CONFIG3_REG,
+            CONFIG1_REG | sps_mask,
+            CONFIG2_REG | DC_TEST,
+            CONFIG3_REG | BIASREF_INT | PD_BIAS | PD_REFBUF,
             CONFIG4_REG,
             LOFF_SESP_REG,
-            MISC1_REG,
+            MISC1_REG | SRB1,
             &ch_settings,
-            active_ch_mask, // bias_sensp
-            BIAS_SENSN_REG_MASK,
+            active_ch_mask,
+            BIAS_SENSN_REG,
             active_ch_mask,
         )?;
 
@@ -105,24 +107,52 @@ impl AdcDriver for ElataV1Driver {
         info!("ElataV1 board is now acquiring data.");
 
         // Create a channel to bridge packets from the acquisition loop to the main pipeline
-        let (packet_tx, packet_rx) = flume::unbounded::<pipeline::data::PacketOwned>();
+        let (packet_tx, packet_rx) = flume::unbounded::<(u8, pipeline::data::PacketOwned)>();
         let stop_flag_arc = Arc::new(AtomicBool::new(stop_flag.load(Ordering::Relaxed)));
+
+        let initial_timestamp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        let increment_ns = (1_000_000_000.0 / self.config.sample_rate as f64) as u64;
+        let mut packet_index: u64 = 0;
 
         // Spawn a dedicated thread to forward packets.
         let bridge_tx = tx.clone();
         let bridge_thread = std::thread::spawn(move || {
-            while let Ok(packet) = packet_rx.recv() {
-                if bridge_tx.send(BridgeMsg::Data(packet.into())).is_err() {
+            while let Ok((_chip_id, packet)) = packet_rx.recv() {
+                if let pipeline::data::PacketOwned::RawI32(mut data) = packet {
+                    // Override timestamp with incremental one
+                    data.header.ts_ns = initial_timestamp_ns + (packet_index * increment_ns);
+
+                    if bridge_tx.send(BridgeMsg::Data(PacketOwned::RawI32(data))).is_err() {
+                        break;
+                    }
+                    packet_index += 1;
+                }
+            }
+        });
+
+        // For ElataV1, we simulate the DRDY signal with a ticker thread.
+        let sample_rate = self.config.sample_rate;
+        let interval = std::time::Duration::from_secs_f64(1.0 / sample_rate as f64);
+        let drdy_tx = self.drdy_tx.clone();
+        let stop_flag_ticker_clone = stop_flag_arc.clone();
+        let ticker_thread = std::thread::spawn(move || {
+            while !stop_flag_ticker_clone.load(Ordering::Relaxed) {
+                if drdy_tx.send(()).is_err() {
                     break;
                 }
+                std::thread::sleep(interval);
             }
         });
 
         // Run the acquisition loop directly in the current thread.
         let result = self.inner.acquire_raw(packet_tx, &stop_flag_arc, 0);
 
-        // Wait for the bridge thread to finish.
+        // Wait for the threads to finish.
         let _ = bridge_thread.join();
+        let _ = ticker_thread.join();
 
         result
     }
