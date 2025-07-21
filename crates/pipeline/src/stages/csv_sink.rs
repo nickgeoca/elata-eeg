@@ -32,7 +32,8 @@ impl StageFactory for CsvSinkFactory {
 /// A sink stage that writes incoming data to a CSV file.
 pub struct CsvSink {
     id: String,
-    writer: Mutex<Option<BufWriter<File>>>,
+    writer: Mutex<BufWriter<File>>,
+    header_written: Mutex<bool>,
 }
 
 impl CsvSink {
@@ -40,19 +41,12 @@ impl CsvSink {
         let path = PathBuf::from(params.path);
         let file = File::create(&path)
             .map_err(|e| StageError::Fatal(format!("Failed to create CSV file {:?}: {}", path, e)))?;
-        let mut writer = BufWriter::new(file);
-
-        // Write header
-        let mut header = "timestamp".to_string();
-        for i in 0..params.num_channels {
-            header.push_str(&format!(",ch{}_voltage,ch{}_raw_sample", i, i));
-        }
-        writeln!(writer, "{}", header)
-            .map_err(|e| StageError::Fatal(format!("Failed to write CSV header: {}", e)))?;
+        let writer = BufWriter::new(file);
 
         Ok(Self {
             id,
-            writer: Mutex::new(Some(writer)),
+            writer: Mutex::new(writer),
+            header_written: Mutex::new(false),
         })
     }
 }
@@ -61,7 +55,6 @@ impl CsvSink {
 pub struct CsvSinkParams {
     #[serde(default = "default_path")]
     pub path: String,
-    pub num_channels: usize,
 }
 
 fn default_path() -> String {
@@ -79,16 +72,25 @@ impl Stage for CsvSink {
         _ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         if let RtPacket::RawAndVoltage(packet) = &*packet {
-            tracing::info!("csv_sink received packet with source_id: {}", packet.header.source_id);
-            let mut writer_guard = self.writer.lock().unwrap();
-            if let Some(writer) = writer_guard.as_mut() {
-                let mut line = packet.header.ts_ns.to_string();
-                for (raw, voltage) in &*packet.samples {
-                    line.push_str(&format!(",{},{}", voltage, raw));
+            let mut writer = self.writer.lock().unwrap();
+            let mut header_written = self.header_written.lock().unwrap();
+
+            if !*header_written {
+                let mut header = "timestamp".to_string();
+                for i in 0..packet.samples.len() {
+                    header.push_str(&format!(",ch{}_voltage,ch{}_raw_sample", i, i));
                 }
-                writeln!(writer, "{}", line)
-                    .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
+                writeln!(writer, "{}", header)
+                    .map_err(|e| StageError::Fatal(format!("Failed to write CSV header: {}", e)))?;
+                *header_written = true;
             }
+
+            let mut line = packet.header.ts_ns.to_string();
+            for (raw, voltage) in &*packet.samples {
+                line.push_str(&format!(",{},{}", voltage, raw));
+            }
+            writeln!(writer, "{}", line)
+                .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
         }
         Ok(None)
     }
@@ -100,10 +102,7 @@ impl Stage for CsvSink {
 
 impl Drains for CsvSink {
     fn flush(&mut self) -> std::io::Result<()> {
-        let mut writer_guard = self.writer.lock().unwrap();
-        if let Some(writer) = writer_guard.as_mut() {
-            writer.flush()?;
-        }
+        self.writer.lock().unwrap().flush()?;
         Ok(())
     }
 }

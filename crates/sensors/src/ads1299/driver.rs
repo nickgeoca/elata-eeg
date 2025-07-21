@@ -13,6 +13,7 @@ use crate::types::ChipConfig;
 use eeg_types::SensorError;
 
 use crate::types::{AdcConfig, AdcDriver, DriverError, DriverStatus};
+use super::helpers::ch_sample_to_raw;
 use super::registers::{
     BIAS_SENSN_ADDR, BIAS_SENSP_ADDR, CMD_RESET, CMD_SDATAC, CONFIG1_ADDR,
     CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR, LOFF_SENSP_ADDR, MISC1_ADDR, REG_ID_ADDR, CMD_STANDBY,
@@ -78,8 +79,11 @@ impl Ads1299Driver {
         let mut samples = Vec::with_capacity(num_channels);
         for i in 0..num_channels {
             let offset = 3 + i * 3;
-            let sample =
-                i32::from_be_bytes([0, frame_buffer[offset], frame_buffer[offset + 1], frame_buffer[offset + 2]]);
+            let sample = ch_sample_to_raw(
+                frame_buffer[offset],
+                frame_buffer[offset + 1],
+                frame_buffer[offset + 2],
+            );
             samples.push(sample);
         }
         Ok(samples)

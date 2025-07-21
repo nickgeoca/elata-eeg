@@ -22,7 +22,7 @@ use sensors::{
     ads1299::driver::Ads1299Driver, spi_bus::SpiBus,
 };
 
-const NUM_CHIPS: usize = 1;
+const NUM_CHIPS: usize = 2;
 const START_PIN: u8 = 22; // GPIO for START pulse
 
 pub struct ElataV2Driver {
