@@ -53,6 +53,15 @@ pub struct StageContext {
     pub allocator: SharedPacketAllocator,
 }
 
+/// A context object passed to each stage during initialization.
+///
+/// It provides mechanisms for the stage to register itself with the pipeline,
+/// for example as a producer.
+pub struct StageInitCtx<'a> {
+    pub event_tx: &'a Sender<PipelineEvent>,
+    pub allocator: &'a SharedPacketAllocator,
+}
+
 impl StageContext {
     pub fn new(event_tx: Sender<PipelineEvent>, allocator: SharedPacketAllocator) -> Self {
         Self {

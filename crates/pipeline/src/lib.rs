@@ -13,6 +13,8 @@ pub mod executor;
 pub mod stages;
 pub mod error;
 pub mod registry;
+pub mod plugin;
+pub mod bridge;
 #[macro_use]
 pub mod macros;
 
@@ -27,3 +29,5 @@ pub use stage::*;
 pub use stages::*;
 pub use error::*;
 pub use registry::*;
+pub use plugin::*;
+pub use bridge::*;

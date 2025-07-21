@@ -62,7 +62,7 @@ pub fn gen_eeg_sinusoid_data(config: &AdcConfig, relative_micros: u64) -> Vec<i3
     // Scale factor for converting sine wave (-1.0 to 1.0) to 24-bit range
     const AMPLITUDE: f32 = 2000.0 * 256.0; // Scale for 24-bit range
 
-    config.channels.iter().enumerate().map(|(i, _channel)| {
+    config.chips.iter().flat_map(|chip| &chip.channels).enumerate().map(|(i, _channel)| {
         let freq = 2.0 + (i as f32) * 4.0; // 2 Hz for ch0, 6 Hz for ch1, etc.
         let angle = 2.0 * PI * freq * t_secs;
         let waveform = angle.sin();
@@ -97,7 +97,8 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<i
 
     if !generators.contains_key(&generator_key) {
         debug!("Creating new EEG generator for sample rate {} Hz", config.sample_rate);
-        generators.insert(generator_key, EegGenerator::new(config.sample_rate, config.channels.len()));
+        let total_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+        generators.insert(generator_key, EegGenerator::new(config.sample_rate, total_channels));
     }
 
     // Get a mutable reference to the generator
@@ -109,7 +110,7 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<i
     }
 
     // Generate samples for each channel
-    config.channels.iter().enumerate().map(|(i, _channel)| {
+    config.chips.iter().flat_map(|chip| &chip.channels).enumerate().map(|(i, _channel)| {
         gen.generate_sample(i)
     }).collect()
 }

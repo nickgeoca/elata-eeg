@@ -1,8 +1,8 @@
 //! Main driver implementation for the ADS1299 chip.
 
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use flume::{Receiver, Sender};
 use log::{debug, info, warn};
@@ -10,14 +10,12 @@ use rppal::gpio::OutputPin;
 
 use crate::spi_bus::SpiBus;
 use crate::types::ChipConfig;
-use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{PacketData, PacketHeader, PacketOwned, SensorMeta};
+use eeg_types::SensorError;
 
 use crate::types::{AdcConfig, AdcDriver, DriverError, DriverStatus};
-use super::helpers::ch_sample_to_raw;
 use super::registers::{
     BIAS_SENSN_ADDR, BIAS_SENSP_ADDR, CMD_RESET, CMD_SDATAC, CONFIG1_ADDR,
-    CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR, LOFF_SENSP_ADDR, MISC1_ADDR, REG_ID_ADDR,
+    CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR, LOFF_SENSP_ADDR, MISC1_ADDR, REG_ID_ADDR, CMD_STANDBY,
 };
 
 /// ADS1299 driver for interfacing with a single ADS1299 chip over a shared SPI bus.
@@ -25,7 +23,6 @@ use super::registers::{
 pub struct Ads1299Driver {
     inner: Arc<Mutex<Ads1299Inner>>,
     bus: Arc<SpiBus>,
-    drdy_rx: Receiver<()>,
 }
 
 /// Internal state for the Ads1299Driver.
@@ -35,7 +32,6 @@ pub struct Ads1299Inner {
     pub running: bool,
     pub status: DriverStatus,
     pub registers: [u8; 24],
-    pub sensor_meta: Arc<SensorMeta>,
 }
 
 impl Ads1299Driver {
@@ -51,8 +47,6 @@ impl Ads1299Driver {
         config: ChipConfig,
         bus: Arc<SpiBus>,
         cs_pin: OutputPin,
-        drdy_rx: Receiver<()>,
-        sensor_meta: Arc<SensorMeta>,
     ) -> Result<Self, DriverError> {
         let inner = Ads1299Inner {
             config,
@@ -60,19 +54,33 @@ impl Ads1299Driver {
             running: false,
             status: DriverStatus::NotInitialized,
             registers: [0u8; 24],
-            sensor_meta,
         };
 
         let driver = Ads1299Driver {
             inner: Arc::new(Mutex::new(inner)),
             bus,
-            drdy_rx,
         };
 
         let cs_pin_num = driver.inner.lock().unwrap().config.cs_pin;
         info!("Ads1299Driver created for CS pin {}", cs_pin_num);
         debug!("CS pin initialized to high");
         Ok(driver)
+    }
+
+    pub fn read_data_raw(&mut self) -> Result<Vec<i32>, SensorError> {
+        let inner = self.inner.lock().unwrap();
+        let num_channels = inner.config.channels.len();
+        let mut frame_buffer = vec![0u8; 3 + num_channels * 3]; // 3 status bytes + 3 bytes per channel
+        self.read_frame(&mut frame_buffer)?;
+
+        let mut samples = Vec::with_capacity(num_channels);
+        for i in 0..num_channels {
+            let offset = 3 + i * 3;
+            let sample =
+                i32::from_be_bytes([0, frame_buffer[offset], frame_buffer[offset + 1], frame_buffer[offset + 2]]);
+            samples.push(sample);
+        }
+        Ok(samples)
     }
 
     /// Send a command to the ADS1299, handling CS and SPI bus locking.
@@ -96,13 +104,10 @@ impl Ads1299Driver {
         bias_sensn: u8,
     ) -> Result<(), DriverError> {
         self.send_command(CMD_RESET)?;
-        
-        // Delay to allow reset to complete. The working python script sends 3 null bytes
+        thread::sleep(Duration::from_millis(10));
+        self.send_command(CMD_SDATAC)?;  // keep this as a safe guard against peramently damaging the chip (MISO line)
         thread::sleep(Duration::from_millis(10));
 
-        self.send_command(CMD_SDATAC)?;
- 
-        debug!("Reading device ID...");
         let id = self.read_register(REG_ID_ADDR)?;
         debug!("Read device ID: 0x{:02X}", id);
         if id != 0x3E {
@@ -118,41 +123,39 @@ impl Ads1299Driver {
         self.write_register(CONFIG4_ADDR, config4)?;
         self.write_register(LOFF_SENSP_ADDR, loff)?;
         self.write_register(MISC1_ADDR, misc1)?;
-
         for &(addr, value) in ch_settings {
             self.write_register(addr, value)?;
         }
-
         self.write_register(BIAS_SENSP_ADDR, bias_sensp)?;
         self.write_register(BIAS_SENSN_ADDR, bias_sensn)?;
 
+        thread::sleep(Duration::from_millis(10));
+        for reg in 0x00..=0x17 {
+            let val = self.read_register(reg)?;
+            info!("Reg 0x{:02X}: 0x{:02X}", reg, val);
+        }
+
+        thread::sleep(Duration::from_micros(50));
+        self.send_command(CMD_STANDBY)?;
+        thread::sleep(Duration::from_micros(50));
         self.inner.lock().unwrap().status = DriverStatus::Ok;
         Ok(())
     }
 
-    /// Read a register from the ADS1299.
     pub fn read_register(&self, register: u8) -> Result<u8, DriverError> {
-        //////////////
-            let mut inner = self.inner.lock().unwrap();
+        let _inner = self.inner.lock().unwrap();
+        // Now we can access the public 'spi' field
+        let spi = self.bus.spi.lock().unwrap();
 
-            // Step 1: send the command bytes
-            let cmd = [0x20 | (register & 0x1F), 0x00];
-            self.bus.write(&mut inner.cs_pin, &cmd)?;
+        // Command (0x20 | reg), num registers-1 (0x00), dummy byte for clocking
+        let write_buf = [0x20 | (register & 0x1F), 0x00, 0x00];
+        let mut read_buf = [0u8; 3];
 
-            // Step 2: send a dummy byte and read the response
-            let mut read_buf = [0x00];
-            self.bus.transfer(&mut inner.cs_pin, &mut read_buf)?;
-            // debug!("SPI read_register result: Ok(0x{:02X})", read_buf[0]);
-            Ok(read_buf[0])
+        spi.transfer(&mut read_buf, &write_buf)
+            .map_err(|e| DriverError::SpiError(e.to_string()))?;
+        Ok(read_buf[2])
     }
-        /// ////////////
-        // let mut inner = self.inner.lock().unwrap();
-        // let mut tx_rx = [0x20 | (register & 0x1F), 0x00, 0x00];
-        // debug!("SPI read_register 0x{:02X}", register);
-        // self.bus.transfer(&mut inner.cs_pin, &mut tx_rx)?;
-        // debug!("SPI read_register result: Ok(0x{:02X})", tx_rx[2]);
-        // Ok(tx_rx[2])
-    // }
+
 
     /// Write a value to a register in the ADS1299.
     fn write_register(&self, register: u8, value: u8) -> Result<(), DriverError> {
@@ -165,79 +168,15 @@ impl Ads1299Driver {
         if result.is_ok() {
             inner.registers[register as usize] = value;
         }
-
         result
     }
 
-    /// Acquire data from this chip and send it down the channel.
     /// Reads a single frame of data from the chip.
-    fn read_frame(&self, buffer: &mut [u8]) -> Result<(), SensorError> {
+    pub fn read_frame(&self, buffer: &mut [u8]) -> Result<(), SensorError> {
         let mut inner = self.inner.lock().unwrap();
         self.bus
             .transfer(&mut inner.cs_pin, buffer)
             .map_err(|e| SensorError::HardwareFault(e.to_string()))
-    }
-
-    /// Acquire data from this chip and send it down the channel.
-    pub fn acquire_raw(
-        &mut self,
-        tx: Sender<(u8, PacketOwned)>,
-        stop_flag: &Arc<AtomicBool>,
-        chip_id: u8,
-    ) -> Result<(), SensorError> {
-        let num_channels = self.inner.lock().unwrap().config.channels.len();
-        let packet_size = 3 + (num_channels * 3); // status + 3 bytes/channel
-
-        {
-            let mut inner = self.inner.lock().unwrap();
-            inner.running = true;
-            inner.status = DriverStatus::Running;
-        }
-
-        let mut buffer = vec![0u8; packet_size];
-        while !stop_flag.load(Ordering::Relaxed) {
-            // Wait for the signal from the dispatcher thread
-            match self.drdy_rx.recv() {
-                Ok(_) => {
-                    self.read_frame(&mut buffer)?;
-
-                    let mut samples = Vec::with_capacity(num_channels);
-                    for i in 0..num_channels {
-                        let start = 3 + i * 3;
-                        let sample = ch_sample_to_raw(
-                            buffer[start],
-                            buffer[start + 1],
-                            buffer[start + 2],
-                        );
-                        samples.push(sample);
-                    }
-
-                    let packet = PacketOwned::RawI32(PacketData {
-                        header: PacketHeader {
-                            ts_ns: SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_nanos()
-                                as u64,
-                            batch_size: samples.len() as u32,
-                            meta: self.inner.lock().unwrap().sensor_meta.clone(),
-                        },
-                        samples,
-                    });
-
-                    if tx.send((chip_id, packet)).is_err() {
-                        info!("[Chip {}] Acquisition channel closed", chip_id);
-                        break;
-                    }
-                }
-                Err(_) => {
-                    // This indicates the dispatcher thread has shut down.
-                    info!("[Chip {}] DRDY channel disconnected", chip_id);
-                    break;
-                }
-            }
-        }
-        Ok(())
     }
 }
 
@@ -249,10 +188,12 @@ impl crate::types::AdcDriver for Ads1299Driver {
         ))
     }
 
-    fn acquire(&mut self, _tx: Sender<BridgeMsg>, _stop_flag: &AtomicBool) -> Result<(), SensorError> {
-        Err(SensorError::HardwareFault(
-            "Use acquire_raw for multi-chip setups".to_string(),
-        ))
+    fn acquire_batched(
+        &mut self,
+        _batch_size: usize,
+        _stop_flag: &AtomicBool,
+    ) -> Result<(Vec<i32>, u64), SensorError> {
+        unimplemented!("This will be implemented by the board-specific drivers (ElataV1/V2)");
     }
 
     fn get_status(&self) -> DriverStatus {

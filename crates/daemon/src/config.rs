@@ -1,6 +1,6 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
-use sensors::DriverType;
+use eeg_types::DriverType;
 
 /// Configuration for the DSP filters
 #[derive(Clone, Debug, Serialize, Deserialize)]

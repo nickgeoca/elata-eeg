@@ -1,6 +1,6 @@
 use sensors::raw::mock_eeg::MockDriver;
 use sensors::AdcDriver;
-use eeg_types::BridgeMsg;
+use pipeline::bridge::BridgeMsg;
 use pipeline::config::{StageConfig, SystemConfig};
 use pipeline::control::{PipelineEvent};
 use pipeline::error::StageError;
@@ -80,13 +80,12 @@ async fn setup_test_daemon() -> (
                 ..Default::default()
             }],
             sample_rate: 1000,
-            batch_size: 8,
             ..Default::default()
         };
         let mut driver = MockDriver::new(config).unwrap();
         let stop_flag_clone = stop_flag.clone();
         thread::spawn(move || {
-            let _ = driver.acquire(bridge_tx, &stop_flag_clone);
+            let _ = driver.acquire_batched(1, &stop_flag_clone);
         })
     };
 

@@ -4,7 +4,7 @@
 //! Plugins are essentially pipeline stages and can be integrated directly into the pipeline.
 
 use anyhow::Result;
-use pipeline::stage::Stage;
+use crate::stage::Stage;
 
 /// Configuration trait that all plugin configurations must implement
 pub trait PluginConfig: Send + Sync + Clone + std::fmt::Debug {

@@ -2,5 +2,5 @@
 //!
 //! This module contains the product-specific code for the Elata EMU v2 device.
 
-mod driver;
+pub mod driver;
 pub use driver::ElataV2Driver;

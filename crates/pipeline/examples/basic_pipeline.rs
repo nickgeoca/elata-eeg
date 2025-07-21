@@ -2,7 +2,8 @@
 
 use std::sync::Arc;
 use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
-use pipeline::data::{RtPacket, PacketData, PacketHeader, SensorMeta};
+use eeg_types::SensorMeta;
+use pipeline::data::{RtPacket, PacketData, PacketHeader};
 use pipeline::config::StageConfig;
 use pipeline::control::PipelineEvent;
 use pipeline::stage::{Stage, StageContext};
@@ -66,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
     let input_packet = Arc::new(RtPacket::RawI32(PacketData {
         header: PacketHeader {
+            source_id: "test_source".to_string(),
             ts_ns: 0,
             batch_size: 4,
             meta: sensor_meta.clone(),
@@ -83,6 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stage_type: "ToVoltage".to_string(),
         params: Default::default(),
         inputs: Default::default(),
+        outputs: vec![],
     })?;
     let mut doubler_stage = DoublerStage;
     let (event_tx, _) = mpsc::unbounded::<PipelineEvent>();

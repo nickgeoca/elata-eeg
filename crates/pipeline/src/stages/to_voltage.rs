@@ -5,7 +5,8 @@ use crate::config::StageConfig;
 use crate::data::{PacketData, PacketView, RtPacket};
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Stage, StageContext};
+use crate::stage::{Stage, StageContext, StageInitCtx};
+use flume::Receiver;
 use std::sync::Arc;
 
 /// A factory for creating `ToVoltage` stages.
@@ -13,15 +14,31 @@ use std::sync::Arc;
 pub struct ToVoltageFactory;
 
 impl StageFactory for ToVoltageFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let v_ref = config.params["vref"]
             .as_f64()
             .ok_or_else(|| StageError::BadConfig("Missing vref".to_string()))? as f32;
         let adc_bits = config.params["adc_bits"]
             .as_u64()
             .ok_or_else(|| StageError::BadConfig("Missing adc_bits".to_string()))? as u8;
+        let gain = config.params["gain"]
+            .as_f64()
+            .ok_or_else(|| StageError::BadConfig("Missing gain".to_string()))? as f32;
 
-        Ok(Box::new(ToVoltage::new(config.name.clone(), v_ref, adc_bits)))
+        Ok((
+            Box::new(ToVoltage::new(
+                config.name.clone(),
+                v_ref,
+                adc_bits,
+                gain,
+                config.outputs.clone(),
+            )),
+            None,
+        ))
     }
 }
 
@@ -29,17 +46,22 @@ pub struct ToVoltage {
     id: String,
     v_ref: f32,
     adc_bits: u8,
+    gain: f32,
     scale_factor: f32,
+    output_name: String,
 }
 
 impl ToVoltage {
-    pub fn new(id: String, v_ref: f32, adc_bits: u8) -> Self {
+    pub fn new(id: String, v_ref: f32, adc_bits: u8, gain: f32, outputs: Vec<String>) -> Self {
         let full_scale_range = (1i64 << (adc_bits - 1)) as f32;
+        let output_name = format!("{}.{}", id, outputs.get(0).cloned().unwrap_or_else(|| "0".to_string()));
         Self {
             id,
             v_ref,
             adc_bits,
-            scale_factor: v_ref / full_scale_range,
+            gain,
+            scale_factor: (v_ref / gain) / full_scale_range,
+            output_name,
         }
     }
 }
@@ -54,6 +76,12 @@ impl Stage for ToVoltage {
         pkt: Arc<RtPacket>,
         ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
+        let source_id = match &*pkt {
+            RtPacket::RawI32(d) => &d.header.source_id,
+            RtPacket::Voltage(d) => &d.header.source_id,
+            RtPacket::RawAndVoltage(d) => &d.header.source_id,
+        };
+        tracing::info!("to_voltage received packet with source_id: {}", source_id);
         let view = PacketView::from(&*pkt);
 
         if let PacketView::RawI32 { header, data } = view {
@@ -65,10 +93,11 @@ impl Stage for ToVoltage {
                 samples_both.push((raw_sample, voltage));
             }
 
-            let output_packet = PacketData {
+            let mut output_packet = PacketData {
                 header: header.clone(),
                 samples: samples_both,
             };
+            output_packet.header.source_id = self.output_name.clone();
 
             return Ok(Some(Arc::new(RtPacket::RawAndVoltage(output_packet))));
         }

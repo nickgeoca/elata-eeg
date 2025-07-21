@@ -1,10 +1,11 @@
 //! CSV sink stage for recording voltage EEG data to files.
 
 use crate::config::StageConfig;
+use crate::data::RtPacket;
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Drains, Stage, StageContext};
-use crate::data::RtPacket;
+use crate::stage::{Drains, Stage, StageContext, StageInitCtx};
+use flume::Receiver;
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -16,11 +17,15 @@ use std::sync::{Arc, Mutex};
 pub struct CsvSinkFactory;
 
 impl StageFactory for CsvSinkFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let params: CsvSinkParams = serde_json::from_value(serde_json::Value::Object(
             config.params.clone().into_iter().collect(),
         ))?;
-        Ok(Box::new(CsvSink::new(config.name.clone(), params)?))
+        Ok((Box::new(CsvSink::new(config.name.clone(), params)?), None))
     }
 }
 
@@ -74,6 +79,7 @@ impl Stage for CsvSink {
         _ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         if let RtPacket::RawAndVoltage(packet) = &*packet {
+            tracing::info!("csv_sink received packet with source_id: {}", packet.header.source_id);
             let mut writer_guard = self.writer.lock().unwrap();
             if let Some(writer) = writer_guard.as_mut() {
                 let mut line = packet.header.ts_ns.to_string();

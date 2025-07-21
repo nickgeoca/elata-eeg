@@ -98,8 +98,8 @@ graph TD
 | JP18 (CLK-route) | **2-3** | **1-2** |
 | JP21 | **Installed** (J3-1 = CS) | same |
 | JP22 | **Open** (START stays on J3-14) | same |
-| JP1 (BIAS_DRV) | **Closed** | **Open** |
-| JP7 / JP8 (REF buffer) | As in single-board bring-up | same |
+| JP1 (BIAS_DRV) | **1-2** | **Open** |
+| JP7 / JP8 (REF buffer) | As in single-board bring-up | open |
 
 ## Clock Generation on Raspberry Pi 5
 

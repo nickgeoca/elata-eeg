@@ -7,12 +7,22 @@ use crate::data::{PacketOwned, RtPacket};
 use crate::error::{PipelineError, StageError};
 use crate::registry::StageRegistry;
 use crate::stage::{DefaultPolicy, Stage, StageContext, StagePolicy, StageState};
+use flume::Receiver;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 pub type StageId = String;
+
+/// Defines the operational mode of a stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageMode {
+    /// A standard stage that processes packets from an input channel.
+    Pull,
+    /// A source stage that produces packets asynchronously.
+    Producer,
+}
 
 /// Represents a node in the pipeline graph.
 pub struct PipelineNode {
@@ -21,6 +31,8 @@ pub struct PipelineNode {
     pub input_source: Option<StageId>,
     pub state: StageState,
     pub policy: Box<dyn StagePolicy>,
+    pub mode: StageMode,
+    pub producer_rx: Option<Receiver<Arc<RtPacket>>>,
 }
 
 /// Represents the entire pipeline as a graph of connected stages.
@@ -41,6 +53,8 @@ impl PipelineGraph {
         allocator: Option<SharedPacketAllocator>,
     ) -> Result<Self, StageError> {
         let mut nodes = HashMap::new();
+        let allocator = allocator
+            .unwrap_or_else(|| Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024)));
 
         for stage_config in &config.stages {
             if nodes.contains_key(&stage_config.name) {
@@ -50,14 +64,28 @@ impl PipelineGraph {
                 )));
             }
 
-            let stage = registry.create_stage(stage_config)?;
+            let init_ctx = crate::stage::StageInitCtx {
+                event_tx: &event_tx,
+                allocator: &allocator,
+            };
+
+            let (stage, producer_rx) = registry.create_stage(stage_config, &init_ctx)?;
+            let mode = if producer_rx.is_some() {
+                StageMode::Producer
+            } else {
+                StageMode::Pull
+            };
+
             if stage_config.inputs.len() > 1 {
                 return Err(StageError::BadConfig(format!(
                     "Stage '{}' has more than one input, which is not currently supported.",
                     stage_config.name
                 )));
             }
-            let input_source = stage_config.inputs.first().cloned();
+            let input_source = stage_config
+                .inputs
+                .first()
+                .map(|s| s.split('.').next().unwrap_or(s).to_string());
 
             let node = PipelineNode {
                 name: stage_config.name.clone(),
@@ -65,24 +93,39 @@ impl PipelineGraph {
                 input_source,
                 state: StageState::Running,
                 policy: Box::new(DefaultPolicy),
+                mode,
+                producer_rx,
             };
             nodes.insert(stage_config.name.clone(), node);
         }
 
+        // Create a map of all available outputs for validation.
+        let mut available_outputs = HashMap::new();
+        for stage_config in &config.stages {
+            for output_name in &stage_config.outputs {
+                available_outputs.insert(
+                    format!("{}.{}", stage_config.name, output_name),
+                    stage_config.name.clone(),
+                );
+            }
+            // For stages without explicit outputs, assume a default output stream.
+            if stage_config.outputs.is_empty() {
+                available_outputs.insert(stage_config.name.clone(), stage_config.name.clone());
+            }
+        }
+
         // Validate that all input sources exist.
         for stage_config in &config.stages {
-            if let Some(source_name) = stage_config.inputs.first() {
-                if !nodes.contains_key(source_name) {
+            for input_name in &stage_config.inputs {
+                if !available_outputs.contains_key(input_name) {
                     return Err(StageError::BadConfig(format!(
                         "Stage '{}' references an unknown input '{}'",
-                        stage_config.name, source_name
+                        stage_config.name, input_name
                     )));
                 }
             }
         }
 
-        let allocator =
-            allocator.unwrap_or_else(|| Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024)));
         let context = StageContext::new(event_tx, allocator.clone());
 
         Ok(Self {
@@ -187,12 +230,13 @@ impl PipelineGraph {
         outputs.insert(source_stage_name, Some(Arc::new(runtime_packet)));
 
         for stage_id in topo {
+            let input_name = self.get_input_for_stage(stage_id);
             if let Some(node) = self.nodes.get_mut(stage_id) {
                 // Determine the input for the current stage.
-                let input_packet = if let Some(source_id) = &node.input_source {
+                let input_packet = if let Some(input_name) = input_name {
                     // This stage takes input from a predecessor.
                     // We clone the Arc, which is a cheap reference count bump.
-                    outputs.get(source_id).and_then(|p| p.clone())
+                    outputs.get(&input_name).and_then(|p| p.clone())
                 } else {
                     // This is a source stage, its input comes from the initial push.
                     outputs.get(stage_id).and_then(|p| p.clone())
@@ -207,6 +251,14 @@ impl PipelineGraph {
                     let result = node.stage.process(packet, &mut self.context);
                     match result {
                         Ok(output) => {
+                            if let Some(ref packet) = output {
+                                let source_id = match &**packet {
+                                    RtPacket::RawI32(d) => &d.header.source_id,
+                                    RtPacket::Voltage(d) => &d.header.source_id,
+                                    RtPacket::RawAndVoltage(d) => &d.header.source_id,
+                                };
+                                outputs.insert(source_id.clone(), Some(packet.clone()));
+                            }
                             outputs.insert(stage_id.clone(), output);
                         }
                         Err(e) => {

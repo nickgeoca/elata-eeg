@@ -2,7 +2,8 @@
 
 use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
 use pipeline::config::{StageConfig, SystemConfig};
-use pipeline::data::{PacketData, PacketHeader, RtPacket, SensorMeta};
+use eeg_types::SensorMeta;
+use pipeline::data::{PacketData, PacketHeader, RtPacket};
 use pipeline::control::{PipelineEvent};
 use pipeline::error::StageError;
 use pipeline::executor::Executor;
@@ -193,6 +194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
         let packet = RtPacket::RawI32(PacketData {
             header: PacketHeader {
+                source_id: "acquire".to_string(),
                 ts_ns: i as u64,
                 batch_size: samples_per_packet as u32,
                 meta: Arc::new(SensorMeta::default()),

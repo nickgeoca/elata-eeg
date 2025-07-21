@@ -1,6 +1,6 @@
 use std::error::Error;
 use clap::Parser;
-use sensors::{AdcConfig, DriverType};
+use sensors::types::{AdcConfig, ChipConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -21,15 +21,19 @@ struct Args {
 fn main() -> Result<(), Box<dyn Error>> {
     let args = Args::parse();
 
-    // Create a basic ADC configuration
-    let config = AdcConfig {
-        sample_rate: args.sample_rate,
+    // Create a basic ADC configuration using chip-based format
+    let chip_config = ChipConfig {
         channels: args.channels,
         gain: 1.0,
-        board_driver: if args.mock { DriverType::MockEeg } else { DriverType::Ads1299 },
-        batch_size: 4,
+        spi_bus: 0,
+        cs_pin: 0,
+        drdy_pin: 25,
+    };
+    
+    let config = AdcConfig {
+        sample_rate: args.sample_rate,
         vref: 4.5,
-        chips: vec![],
+        chips: vec![chip_config],
     };
 
     // Note: EegSystem has been moved to the device crate (elata_emu_v1 module)

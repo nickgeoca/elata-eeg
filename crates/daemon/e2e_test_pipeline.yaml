@@ -1,21 +1,38 @@
 version: "1.0"
 metadata:
   name: "E2E Test Pipeline"
-  description: "A simple pipeline to test the v1 driver by converting raw data to voltage and saving it to a CSV file."
-  version: "1.0.0"
+  description: "A pipeline to acquire data from an EEG board, convert it to voltage, and save it to a CSV file."
+  version: "1.1.0"
 stages:
+  - name: "eeg_source"
+    type: "eeg_source"
+    params:
+      driver:
+        type: "ElataV2" # Can be "ElataV1", "ElataV2", or "Mock"
+        sample_rate: 250
+        vref: 4.5
+        chips:
+          - channels: [0, 1, 2, 3, 4, 5, 6, 7]
+            gain: 1.0
+            cs_pin: 0
+            drdy_pin: 25
+      batch_size: 32
+    outputs: ["raw_data"]
+
   - name: "to_voltage"
     type: "to_voltage"
     params:
       vref: 4.5
       adc_bits: 24
-    inputs: []
-    description: "Convert raw ADC values to voltages"
+      gain: 1.0 # This should match the gain in the source stage
+    inputs:
+      - "eeg_source.raw_data"
+    outputs: ["voltage_data"]
+
   - name: "csv_sink"
     type: "csv_sink"
     params:
       path: "e2e_test_output.csv"
       num_channels: 8
     inputs:
-      - "to_voltage"
-    description: "Record voltage data to a CSV file"
+      - "to_voltage.voltage_data"

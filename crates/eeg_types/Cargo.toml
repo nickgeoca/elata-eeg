@@ -4,9 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-pipeline = { path = "../pipeline" }
 anyhow = "1.0"
 tracing = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 bytes = "1.0"
 thiserror = "1.0"
+
+[features]
+meta-tags = []

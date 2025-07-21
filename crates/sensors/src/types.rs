@@ -3,8 +3,8 @@
 use std::error::Error;
 use std::fmt;
 use std::sync::atomic::AtomicBool;
-use flume::Sender;
-use eeg_types::{BridgeMsg, SensorError as EegSensorError};
+
+use eeg_types::SensorError as EegSensorError;
 
 /// Configuration for ADC/sensor drivers
 use serde::{Serialize, Deserialize};
@@ -47,36 +47,18 @@ impl Default for ChipConfig {
 pub struct AdcConfig {
     /// Target sample rate in Hz
     pub sample_rate: u32,
-    /// Type of board driver to use
-    pub board_driver: DriverType,
-    /// Number of samples to batch together
-    pub batch_size: usize,
     /// Reference voltage for ADC conversion
     pub vref: f32,
     /// Configuration for each chip on the board.
-    /// If empty, the legacy `channels` and `gain` fields are used for a single-chip board.
-    #[serde(default)]
     pub chips: Vec<ChipConfig>,
-    /// (Legacy) List of active channels (0-indexed)
-    #[serde(default)]
-    pub channels: Vec<u8>,
-    /// (Legacy) Gain setting for all channels
-    #[serde(default)]
-    pub gain: f32,
 }
-
-pub use eeg_types::DriverType;
 
 impl Default for AdcConfig {
     fn default() -> Self {
         Self {
             sample_rate: 250,
-            channels: (0..8).collect(),
-            gain: 1.0,
-            board_driver: DriverType::MockEeg,
-            batch_size: 1,
             vref: 4.5,
-            chips: vec![],
+            chips: vec![ChipConfig::default()],
         }
     }
 }
@@ -96,18 +78,6 @@ pub enum DriverStatus {
     Error(String),
 }
 
-/// Events emitted by sensor drivers
-use pipeline::data::RtPacket;
-
-#[derive(Debug)]
-pub enum DriverEvent {
-    /// New data is available
-    Data(RtPacket),
-    /// Driver status changed
-    StatusChange(DriverStatus),
-    /// An error occurred
-    Error(String),
-}
 
 /// Errors that can occur in sensor drivers
 #[derive(Debug, Clone)]
@@ -170,12 +140,20 @@ pub trait AdcDriver: Send + Sync + 'static {
     /// Initialize the driver and underlying hardware.
     fn initialize(&mut self) -> Result<(), DriverError>;
 
-    /// Start data acquisition (new synchronous method)
-    fn acquire(
+    /// Acquire a batch of raw i32 samples from the sensor.
+    /// This is a blocking call that should wait for data to be ready.
+    ///
+    /// # Arguments
+    /// * `batch_size` - The number of samples to acquire for each channel.
+    /// * `stop_flag` - An atomic bool to signal the acquisition loop to stop.
+    ///
+    /// # Returns
+    /// A vector containing the raw i32 samples, interleaved by channel.
+    fn acquire_batched(
         &mut self,
-        tx: Sender<BridgeMsg>,
+        batch_size: usize,
         stop_flag: &AtomicBool,
-    ) -> Result<(), EegSensorError>;
+    ) -> Result<(Vec<i32>, u64), EegSensorError>;
 
     /// Get current driver status
     fn get_status(&self) -> DriverStatus;

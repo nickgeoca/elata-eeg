@@ -1,5 +1,6 @@
 //! Error types for the pipeline system
 
+use sensors::DriverError;
 use thiserror::Error;
 
 /// Pipeline-specific error types
@@ -94,10 +95,20 @@ pub enum StageError {
     JsonError(String),
     #[error("live reconfiguration is not supported by this stage")]
     UnsupportedReconfig,
+    #[error("stream closed")]
+    StreamClosed,
+    #[error("driver error: {0}")]
+    DriverError(String),
 }
 
 impl From<serde_json::Error> for StageError {
     fn from(err: serde_json::Error) -> Self {
         StageError::JsonError(err.to_string())
+    }
+}
+
+impl From<DriverError> for StageError {
+    fn from(err: DriverError) -> Self {
+        StageError::DriverError(err.to_string())
     }
 }

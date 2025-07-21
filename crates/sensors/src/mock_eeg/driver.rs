@@ -6,10 +6,9 @@ use log::{info, warn, debug};
 use crate::types::AdcDriver;
 use lazy_static::lazy_static;
 
-use crate::types::{AdcConfig, DriverStatus, DriverError, DriverType};
+use crate::types::{AdcConfig, DriverStatus, DriverError};
 use super::mock_data_generator::{gen_realistic_eeg_data};
-use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{PacketData, PacketHeader, PacketOwned, SensorMeta};
+use eeg_types::SensorError;
 
 // Static hardware lock to simulate real hardware access constraints
 lazy_static! {
@@ -30,7 +29,6 @@ struct MockInner {
     base_timestamp: Option<u64>,
     // Total samples generated since acquisition started
     sample_count: u64,
-    meta: Arc<SensorMeta>,
 }
 
 impl MockDriver {
@@ -49,74 +47,48 @@ impl MockDriver {
         *hardware_in_use = true;
 
         // Validate config
-        if config.board_driver != DriverType::MockEeg {
-            *hardware_in_use = false;
-            return Err(DriverError::ConfigurationError(
-                "MockDriver requires config.board_driver=DriverType::MockEeg".to_string()
-            ));
-        }
 
-        if config.channels.is_empty() {
+        let chip_config = config.chips.get(0);
+        let default_channels = vec![];
+        let channels = chip_config.map(|c| &c.channels).unwrap_or(&default_channels);
+
+        if channels.is_empty() {
             *hardware_in_use = false;
             return Err(DriverError::ConfigurationError(
-                "At least one channel must be configured".to_string()
+                "At least one channel must be configured".to_string(),
             ));
         }
 
         let mut unique_channels = std::collections::HashSet::new();
-        for &channel in &config.channels {
+        for &channel in channels {
             if !unique_channels.insert(channel) {
                 *hardware_in_use = false;
-                return Err(DriverError::ConfigurationError(
-                    format!("Duplicate channel detected: {}", channel)
-                ));
+                return Err(DriverError::ConfigurationError(format!(
+                    "Duplicate channel detected: {}",
+                    channel
+                )));
             }
         }
 
-        for &channel in &config.channels {
+        for &channel in channels {
             if channel > 31 {
                 *hardware_in_use = false;
-                return Err(DriverError::ConfigurationError(
-                    format!("Invalid channel index: {}. MockDriver supports channels 0-31", channel)
-                ));
+                return Err(DriverError::ConfigurationError(format!(
+                    "Invalid channel index: {}. MockDriver supports channels 0-31",
+                    channel
+                )));
             }
         }
 
-        if config.batch_size == 0 {
-            *hardware_in_use = false;
-            return Err(DriverError::ConfigurationError(
-                "Batch size must be greater than 0".to_string()
-            ));
-        }
 
-
-        let channel_names = config
-            .channels
-            .iter()
-            .map(|&ch| format!("ch{}", ch))
-            .collect();
-
-        let meta = Arc::new(SensorMeta {
-            sensor_id: 0,
-            meta_rev: 0,
-            schema_ver: 2,
-            source_type: "MockEeg".to_string(),
-            v_ref: config.vref,
-            adc_bits: 24,
-            gain: config.gain,
-            sample_rate: config.sample_rate,
-            offset_code: 0,
-            is_twos_complement: true,
-            channel_names,
-        });
+        let populated_config = config.clone();
 
         let inner = MockInner {
-            config: config.clone(),
+            config: populated_config,
             running: false,
             status: DriverStatus::Ok,
             base_timestamp: None,
             sample_count: 0,
-            meta,
         };
 
         let driver = MockDriver {
@@ -136,59 +108,51 @@ impl crate::types::AdcDriver for MockDriver {
         Ok(())
     }
 
-    fn acquire(&mut self, tx: flume::Sender<BridgeMsg>, stop_flag: &AtomicBool) -> Result<(), SensorError> {
-        info!("MockDriver synchronous acquisition started");
+    fn acquire_batched(
+        &mut self,
+        batch_size: usize,
+        stop_flag: &AtomicBool,
+    ) -> Result<(Vec<i32>, u64), SensorError> {
+        info!("MockDriver batched acquisition started");
 
         let inner_arc = self.inner.clone();
+        let mut base_timestamp = 0;
 
         // Lock the inner state once to get the necessary info
-        let (config, meta) = {
+        let config = {
             let mut inner_guard = inner_arc.lock().unwrap();
             inner_guard.running = true;
             inner_guard.status = DriverStatus::Running;
-            inner_guard.base_timestamp = Some(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64);
+            base_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+            inner_guard.base_timestamp = Some(base_timestamp);
             inner_guard.sample_count = 0;
-            (inner_guard.config.clone(), inner_guard.meta.clone())
+            inner_guard.config.clone()
         };
 
-        let batch_size = config.batch_size;
         let sample_interval_ns = (1_000_000_000.0 / config.sample_rate as f64) as u64;
 
-        while !stop_flag.load(Ordering::Relaxed) {
-            let (start_sample_count, base_timestamp) = {
-                let mut inner_guard = inner_arc.lock().unwrap();
-                let count = inner_guard.sample_count;
-                inner_guard.sample_count += batch_size as u64;
-                (count, inner_guard.base_timestamp.unwrap())
-            };
+        let total_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+        let mut batch_buffer = Vec::with_capacity(batch_size * total_channels);
 
-            let mut samples = Vec::with_capacity(batch_size * config.channels.len());
-            for i in 0..batch_size {
-                let sample_num = start_sample_count + i as u64;
-                let relative_timestamp_us = (sample_num * sample_interval_ns) / 1000;
-                let sample_slice = gen_realistic_eeg_data(&config, relative_timestamp_us);
-                samples.extend_from_slice(&sample_slice);
-            }
-
-            let packet_timestamp_offset_ns = start_sample_count * sample_interval_ns;
-
-            let packet = PacketOwned::RawI32(PacketData {
-                header: PacketHeader {
-                    ts_ns: base_timestamp + packet_timestamp_offset_ns,
-                    batch_size: batch_size as u32,
-                    meta: meta.clone(),
-                },
-                samples,
-            });
-
-            if tx.send(BridgeMsg::Data(packet)).is_err() {
-                warn!("MockDriver bridge channel closed");
+        for _ in 0..batch_size {
+            if stop_flag.load(Ordering::Relaxed) {
                 break;
             }
 
-            let sleep_time_ms = (batch_size as u64 * 1000) / config.sample_rate as u64;
-            thread::sleep(Duration::from_millis(sleep_time_ms));
+            let sample_num = {
+                let mut inner_guard = inner_arc.lock().unwrap();
+                let count = inner_guard.sample_count;
+                inner_guard.sample_count += 1;
+                count
+            };
+
+            let relative_timestamp_us = (sample_num * sample_interval_ns) / 1000;
+            let sample_slice = gen_realistic_eeg_data(&config, relative_timestamp_us);
+            batch_buffer.extend_from_slice(&sample_slice);
         }
+
+        let sleep_time_ms = (batch_size as u64 * 1000) / config.sample_rate as u64;
+        thread::sleep(Duration::from_millis(sleep_time_ms));
 
         {
             let mut inner_guard = inner_arc.lock().unwrap();
@@ -196,8 +160,8 @@ impl crate::types::AdcDriver for MockDriver {
             inner_guard.status = DriverStatus::Stopped;
         }
 
-        info!("MockDriver synchronous acquisition stopped");
-        Ok(())
+        info!("MockDriver batched acquisition stopped");
+        Ok((batch_buffer, base_timestamp))
     }
 
     fn get_status(&self) -> DriverStatus {

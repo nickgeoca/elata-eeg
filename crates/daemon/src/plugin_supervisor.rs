@@ -4,7 +4,7 @@
 //! lifecycle of all registered EEG plugins.
 
 
-use eeg_types::plugin::EegPlugin;
+use pipeline::plugin::EegPlugin;
 use pipeline::stage::Stage;
 
 /// Manages the lifecycle of all registered EEG plugins.

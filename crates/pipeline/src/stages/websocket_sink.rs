@@ -4,7 +4,7 @@ use crate::config::StageConfig;
 use crate::data::{PacketOwned, PacketView, RtPacket};
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Drains, Stage, StageContext};
+use crate::stage::{Drains, Stage, StageContext, StageInitCtx};
 use flume::{unbounded, Receiver, Sender};
 use serde::Deserialize;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -18,11 +18,18 @@ use tracing::{info, warn};
 pub struct WebsocketSinkFactory;
 
 impl StageFactory for WebsocketSinkFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let params: WebsocketSinkParams = serde_json::from_value(serde_json::Value::Object(
             config.params.clone().into_iter().collect(),
         ))?;
-        Ok(Box::new(WebsocketSink::new(config.name.clone(), params)?))
+        Ok((
+            Box::new(WebsocketSink::new(config.name.clone(), params)?),
+            None,
+        ))
     }
 }
 

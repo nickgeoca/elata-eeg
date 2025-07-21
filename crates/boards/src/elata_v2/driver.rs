@@ -4,20 +4,20 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use flume::{Selector, Sender};
+use flume::{Receiver, Sender, Selector};
 use log::{debug, error, info, warn};
-use rppal::gpio::{Gpio, InputPin};
+use rppal::gpio::{Gpio, InputPin, OutputPin};
 use rppal::spi::{Bus, Mode};
 use thread_priority::ThreadPriority;
 
-use eeg_types::{BridgeMsg, SensorError};
-use pipeline::data::{PacketOwned, PacketData, SensorMeta};
+use eeg_types::data::{PacketData, PacketOwned, SensorMeta};
+use eeg_types::SensorError;
 use sensors::{
     ads1299::registers::{
         self, BIAS_SENSN_REG, BIAS_SENSP_REG, CH1SET_ADDR, CHN_OFF, CHN_REG, CMD_RDATAC,
-        CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG,
+        CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG, CMD_START,
         CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, DAISY_DISABLE,
-    BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, DC_TEST, SRB1},
+    BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, DC_TEST, SRB1, MUX_NORMAL, POWER_OFF_CH},
     AdcConfig, AdcDriver, DriverError, DriverStatus,
     ads1299::driver::Ads1299Driver, spi_bus::SpiBus,
 };
@@ -30,7 +30,9 @@ pub struct ElataV2Driver {
     gpio: Arc<Gpio>,
     status: Arc<Mutex<DriverStatus>>,
     config: AdcConfig,
-    drdy_txs: Vec<Sender<()>>,
+    drdy_tx: Sender<usize>,
+    drdy_rx: Receiver<usize>,
+    start_pin: Arc<Mutex<Option<OutputPin>>>,
 }
 
 impl ElataV2Driver {
@@ -44,7 +46,7 @@ impl ElataV2Driver {
 
         let spi_bus = Arc::new(SpiBus::new(
             Bus::Spi0,
-            1_240_000, // 2.048MHz/16 = 128kHz
+            1_240_000,
             Mode::Mode1,
         )?);
         info!("SPI bus initialized.");
@@ -53,27 +55,15 @@ impl ElataV2Driver {
         info!("GPIO initialized.");
 
         let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
-        let mut drdy_rxs = Vec::with_capacity(NUM_CHIPS);
-        let mut drdy_txs = Vec::with_capacity(NUM_CHIPS);
-        for _ in 0..NUM_CHIPS {
-            let (tx, rx) = flume::bounded(1);
-            drdy_txs.push(tx);
-            drdy_rxs.push(rx);
-        }
+        let (drdy_tx, drdy_rx) = flume::bounded(128 * NUM_CHIPS);
 
-        let mut drdy_rxs_iter = drdy_rxs.into_iter();
-        for chip_config in config.chips.iter() {
-            let sensor_meta = Arc::new(SensorMeta {
-                v_ref: config.vref,
-                gain: config.gain,
-                sample_rate: config.sample_rate,
-                adc_bits: 24, // ADS1299 is a 24-bit ADC
-                ..Default::default()
-            });
+        for (i, chip_config) in config.chips.iter().enumerate() {
             let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
-            let drdy_rx = drdy_rxs_iter.next().unwrap();
-            let driver =
-                Ads1299Driver::new(chip_config.clone(), spi_bus.clone(), cs_pin, drdy_rx, sensor_meta)?;
+            let driver = Ads1299Driver::new(
+                chip_config.clone(),
+                spi_bus.clone(),
+                cs_pin,
+            )?;
             chip_drivers.push(driver);
         }
 
@@ -82,7 +72,9 @@ impl ElataV2Driver {
             gpio,
             status: Arc::new(Mutex::new(DriverStatus::Stopped)),
             config,
-            drdy_txs,
+            drdy_tx,
+            drdy_rx,
+            start_pin: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -91,44 +83,29 @@ impl AdcDriver for ElataV2Driver {
     fn initialize(&mut self) -> Result<(), DriverError> {
         info!("Initializing ElataV2 board with {} chips...", NUM_CHIPS);
 
-        // Reset all chips first to ensure they are in a known state
-        for chip in self.chip_drivers.iter_mut() {
-            chip.send_command(CMD_RESET)?;
-        thread::sleep(Duration::from_millis(140));
-
-            // chip.send_command(CMD_WAKEUP)?;
-        thread::sleep(Duration::from_millis(140));
-
-
-        }
-        // Wait for reset to complete
-        thread::sleep(Duration::from_millis(140));
-
-                
+        // 1. Initialize chip registers first
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
-                let val = chip.read_register(0x00)?;                info!("----------Reg 0x{:02X}: 0x{:02X}", 0x00, val);
             info!("Initializing Chip {}...", i);
             let chip_info = &self.config.chips[i];
 
-            // --- Register Settings ---
-            let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
+            let gain_mask = registers::gain_to_reg_mask(chip_info.gain)?;
             let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
-            let pd_bias = if i == 0 { PD_BIAS } else { 0x00 }; // Board 0 is the bias master
+            let pd_bias = if i == 0 { PD_BIAS } else { 0x00 };
+
             let ch_settings: Vec<(u8, u8)> = (0..8)
                 .map(|ch_idx| {
                     let setting = if chip_info.channels.contains(&ch_idx) {
-                        CHN_REG | gain_mask
+                        CHN_REG | MUX_NORMAL | gain_mask
                     } else {
-                        CHN_OFF
+                        POWER_OFF_CH
                     };
                     (CH1SET_ADDR + ch_idx, setting)
                 })
                 .collect();
             let active_ch_mask = chip_info.channels.iter().fold(0, |acc, &ch| acc | (1 << (ch % 8)));
-
             chip.initialize_chip(
                 CONFIG1_REG | sps_mask | DAISY_DISABLE,
-                CONFIG2_REG | DC_TEST,
+                CONFIG2_REG,
                 CONFIG3_REG | BIASREF_INT | PD_REFBUF | pd_bias,
                 CONFIG4_REG,
                 LOFF_SESP_REG,
@@ -138,200 +115,120 @@ impl AdcDriver for ElataV2Driver {
                 BIAS_SENSN_REG,
                 active_ch_mask,
             )?;
-
-            thread::sleep(Duration::from_millis(10));
-            // Register dump for verification
-            info!("---- Chip {} Register Dump ----", i);
-            for reg in 0x00..=0x17 {
-                let val = chip.read_register(reg)?;
-                info!("Reg 0x{:02X}: 0x{:02X}", reg, val);
-            }
-            
-            chip.send_command(CMD_STANDBY)?;
             info!("Chip {} initialized and ready.", i);
-
-            // Add a small delay to allow the chip to stabilize
-            thread::sleep(Duration::from_millis(10));
         }
 
-        info!("ElataV2 board initialized successfully.");
+        thread::sleep(Duration::from_millis(10));
+
+        // 2. Spawn DRDY handler threads *before* starting data acquisition
+        for i in 0..NUM_CHIPS {
+            let chip_config = &self.config.chips[i];
+            let drdy_pin = self.gpio.get(chip_config.drdy_pin)?.into_input_pullup();
+            let drdy_tx = self.drdy_tx.clone();
+            thread::Builder::new()
+                .name(format!("drdy_handler_{}", i))
+                .spawn(move || {
+                    let mut last_drdy = Instant::now();
+                    loop {
+                        // Basic edge detection: wait for pin to go low
+                        if drdy_pin.is_low() {
+                            // Basic debouncing
+                            if last_drdy.elapsed() > Duration::from_micros(200) {
+                                if drdy_tx.send(i).is_err() {
+                                    // Main receiver has dropped, exit thread
+                                    break;
+                                }
+                                last_drdy = Instant::now();
+                            }
+                        }
+                        // A small sleep to prevent pegging the CPU
+                        thread::sleep(Duration::from_micros(50));
+                    }
+                })
+                .map_err(|e| DriverError::Other(format!("Failed to spawn DRDY handler thread: {}", e)))?;
+            info!("DRDY polling handler started for chip {}", i);
+        }
+
+        // 3. Now, start data acquisition on all chips
+        let mut start_pin = self.gpio.get(START_PIN)?.into_output();
+        start_pin.set_low();
+
+        for chip in self.chip_drivers.iter_mut() {
+            chip.send_command(CMD_WAKEUP)?;
+            thread::sleep(Duration::from_micros(50));
+        }
+
+        // Pulse START pin to begin conversions
+        thread::sleep(Duration::from_millis(1));
+        start_pin.set_high();
+        thread::sleep(Duration::from_millis(1));
+        for chip in self.chip_drivers.iter_mut() {
+            chip.send_command(CMD_RDATAC)?;
+            thread::sleep(Duration::from_micros(50));
+        }
+
+        // Store the pin so it's not dropped and its state is maintained
+        *self.start_pin.lock().unwrap() = Some(start_pin);
+
+        info!("ElataV2 board initialized successfully and is acquiring data.");
         Ok(())
     }
 
-    // Sequence
-    // 1) 
-    fn acquire(
+    fn acquire_batched(
         &mut self,
-        tx: Sender<BridgeMsg>,
+        batch_size: usize,
         stop_flag: &AtomicBool,
-    ) -> Result<(), SensorError> {
+    ) -> Result<(Vec<i32>, u64), SensorError> {
         *self.status.lock().unwrap() = DriverStatus::Running;
-        let (data_tx, data_rx) = flume::bounded::<(u8, PacketOwned)>(NUM_CHIPS * 2);
-        let mut start_pin = self.gpio.get(START_PIN).unwrap().into_output();
-        start_pin.set_low();
-        thread::sleep(Duration::from_millis(10));
 
-        // --- Synchronize with START pulse ---
-        info!("Synchronizing chips with START pulse...");
-        for chip in self.chip_drivers.iter_mut() {
-            chip.send_command(CMD_WAKEUP)?;
+        let total_channels: usize = self.config.chips.iter().map(|c| c.channels.len()).sum();
+        if total_channels == 0 {
+            return Ok((Vec::new(), 0));
         }
-        thread::sleep(Duration::from_millis(10));
-        start_pin.set_high();
-        thread::sleep(Duration::from_millis(10));
-        // TODO wait for all data readies then send RDATAC
-        for chip in self.chip_drivers.iter_mut() {
-            chip.send_command(CMD_RDATAC)?;
-        }
-        // info!("Chips synchronized and in RDATAC mode.");
+        let mut batch_buffer: Vec<i32> = Vec::with_capacity(batch_size * total_channels);
+        let mut first_drdy_timestamp = 0;
 
-        // --- Spawn acquisition threads ---
-        info!("Starting acquisition threads...");
-        let mut handles: Vec<JoinHandle<Result<(), SensorError>>> = Vec::new();
-        let thread_stop_flag = Arc::new(AtomicBool::new(false));
+        for i in 0..batch_size {
+            if stop_flag.load(Ordering::Relaxed) {
+                break;
+            }
 
-        for (i, chip) in self.chip_drivers.iter().enumerate() {
-            let mut chip_clone = chip.clone();
-            let thread_tx = data_tx.clone();
-            let stop_clone = thread_stop_flag.clone();
-            let handle = thread::Builder::new()
-                .name(format!("chip_{}_acq", i))
-                .spawn(move || {
-                    if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
-                        warn!("[Chip {}] Failed to set thread priority: {:?}", i, e);
+            // Wait for a DRDY signal from any chip
+            match self.drdy_rx.recv_timeout(Duration::from_millis(500)) {
+                Ok(chip_index) => {
+                    if i == 0 {
+                        first_drdy_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
                     }
-                    chip_clone.acquire_raw(thread_tx, &stop_clone, i as u8)
-                })
-                .unwrap();
-            handles.push(handle);
-        }
-
-        // --- Spawn DRDY interrupt dispatcher thread ---
-        let dispatcher_stop_flag = thread_stop_flag.clone();
-        let mut drdy_pins: Vec<InputPin> = self
-            .config
-            .chips
-            .iter()
-            .map(|c| self.gpio.get(c.drdy_pin).unwrap().into_input())
-            .collect();
-
-        for pin in &mut drdy_pins {
-            pin.set_interrupt(rppal::gpio::Trigger::FallingEdge, None)
-                .map_err(|e| SensorError::DriverError(e.to_string()))?;
-        }
-
-        let gpio_clone = self.gpio.clone();
-        let drdy_txs_clone = self.drdy_txs.clone();
-        let dispatcher_handle = thread::Builder::new()
-            .name("drdy_dispatcher".to_string())
-            .spawn(move || {
-                let poll_timeout = Duration::from_millis(200);
-                let drdy_pins_refs: Vec<&InputPin> = drdy_pins.iter().collect();
-                while !dispatcher_stop_flag.load(Ordering::Relaxed) {
-                    match gpio_clone.poll_interrupts(&drdy_pins_refs, true, Some(poll_timeout)) {
-                        Ok(Some((pin, _level))) => {
-                            if let Some(chip_index) =
-                                drdy_pins.iter().position(|p| p.pin() == pin.pin())
-                            {
-                                if drdy_txs_clone[chip_index].send(()).is_err() {
-                                    debug!("DRDY channel for chip {} closed.", chip_index);
-                                    break;
-                                }
-                            }
-                        }
-                        Ok(None) => {
-                            warn!("DRDY dispatcher timed out waiting for interrupt.");
+                    // A chip is ready, read its data
+                    let driver = &mut self.chip_drivers[chip_index];
+                    match driver.read_data_raw() {
+                        Ok(data) => {
+                            debug!(
+                                "[Chip {}] Acquired {} samples.",
+                                chip_index,
+                                data.len() / self.config.chips[chip_index].channels.len()
+                            );
+                            batch_buffer.extend(data);
                         }
                         Err(e) => {
-                            error!("Error polling DRDY interrupts: {}", e);
-                            break;
+                            error!("[Chip {}] Failed to read data: {}", chip_index, e);
+                            // Optional: decide if we should break or continue
                         }
                     }
                 }
-                info!("DRDY dispatcher thread finished.");
-            })
-            .unwrap();
-        handles.push(thread::spawn(move || {
-            dispatcher_handle.join().unwrap();
-            Ok(())
-        }));
-
-        // --- Data merging loop ---
-        let merge_timeout = Duration::from_millis(
-            (1.0 / self.config.sample_rate as f32 * 1000.0 * 2.0) as u64,
-        );
-
-        let initial_timestamp_ns = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let increment_ns = (1_000_000_000.0 / self.config.sample_rate as f64) as u64;
-        let mut packet_index: u64 = 0;
-
-        while !stop_flag.load(Ordering::Relaxed) {
-            let mut packet_buffer: HashMap<u8, PacketData<Vec<i32>>> = HashMap::with_capacity(NUM_CHIPS);
-            let first_packet_deadline = Instant::now() + merge_timeout;
-
-            while packet_buffer.len() < NUM_CHIPS {
-                let timeout = first_packet_deadline.saturating_duration_since(Instant::now());
-                if timeout.is_zero() {
-                    warn!("Timed out waiting for a full frame of packets.");
+                Err(flume::RecvTimeoutError::Timeout) => {
+                    warn!("DRDY timeout. No data received in 500ms.");
+                    continue; // Or break, depending on desired behavior
+                }
+                Err(flume::RecvTimeoutError::Disconnected) => {
+                    error!("DRDY channel disconnected. Stopping acquisition.");
                     break;
                 }
-
-                Selector::new()
-                    .recv(&data_rx, |msg| {
-                        if let Ok((chip_id, PacketOwned::RawI32(packet_data))) = msg {
-                            packet_buffer.insert(chip_id, packet_data);
-                        }
-                    })
-                    .wait_timeout(timeout)
-                    .ok();
-            }
-
-            if packet_buffer.len() == NUM_CHIPS {
-                let mut merged_samples = Vec::with_capacity(self.config.channels.len());
-                let mut first_header = None;
-
-                for i in 0..NUM_CHIPS {
-                    if let Some(packet_data) = packet_buffer.remove(&(i as u8)) {
-                        if first_header.is_none() {
-                            first_header = Some(packet_data.header);
-                        }
-                        merged_samples.extend(packet_data.samples);
-                    } else {
-                        warn!("Missing packet from chip {} in frame", i);
-                        break;
-                    }
-                }
-
-                if let Some(mut header) = first_header {
-                    header.ts_ns = initial_timestamp_ns + (packet_index * increment_ns);
-                    header.batch_size = merged_samples.len() as u32;
-
-                    let merged_packet = PacketOwned::RawI32(PacketData {
-                        header,
-                        samples: merged_samples,
-                    });
-
-                    if tx.send(BridgeMsg::Data(merged_packet)).is_err() {
-                        break;
-                    }
-                    packet_index += 1;
-                }
-            }
-        }
-
-        // --- Shutdown threads ---
-        thread_stop_flag.store(true, Ordering::Relaxed);
-        for handle in handles {
-            if let Err(e) = handle.join().unwrap() {
-                error!("Acquisition thread failed: {:?}", e);
             }
         }
 
         *self.status.lock().unwrap() = DriverStatus::Stopped;
-        Ok(())
+        Ok((batch_buffer, first_drdy_timestamp))
     }
 
     fn get_status(&self) -> DriverStatus {
@@ -344,6 +241,13 @@ impl AdcDriver for ElataV2Driver {
 
     fn shutdown(&mut self) -> Result<(), DriverError> {
         info!("Shutting down ElataV2 board...");
+
+        // Take START pin low to stop conversions
+        if let Some(mut start_pin) = self.start_pin.lock().unwrap().take() {
+            start_pin.set_low();
+            info!("START pin set to low.");
+        }
+
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
             info!("Sending SDATAC and STANDBY to chip {}", i);
             chip.send_command(CMD_SDATAC)?;

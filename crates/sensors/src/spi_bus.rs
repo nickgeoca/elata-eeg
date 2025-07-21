@@ -11,7 +11,8 @@ use crate::DriverError;
 #[derive(Clone)]
 pub struct SpiBus {
     // The Spi device is wrapped in a Mutex to allow safe sharing across threads.
-    spi: Arc<Mutex<Spi>>,
+    // Made public to allow low-level access for debugging.
+    pub spi: Arc<Mutex<Spi>>,
 }
 
 impl SpiBus {
@@ -39,7 +40,7 @@ impl SpiBus {
         cs_pin: &mut OutputPin,
         buffer: &mut [u8],
     ) -> Result<(), DriverError> {
-        let mut spi = self.spi.lock().unwrap();
+        let spi = self.spi.lock().unwrap();
         // Create a separate, owned buffer for writing to avoid the E0502 borrow error.
         let write_buffer = buffer.to_vec();
 

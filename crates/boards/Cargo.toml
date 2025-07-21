@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 eeg_types = { path = "../eeg_types" }
 sensors = { path = "../sensors" }
-pipeline = { path = "../pipeline" }
 log = "0.4"
 flume = { workspace = true }
 thread-priority = "0.3"

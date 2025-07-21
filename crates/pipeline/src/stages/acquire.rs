@@ -4,7 +4,8 @@ use crate::config::StageConfig;
 use crate::data::RtPacket;
 use crate::error::StageError;
 use crate::registry::StageFactory;
-use crate::stage::{Stage, StageContext};
+use crate::stage::{Stage, StageContext, StageInitCtx};
+use flume::Receiver;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -13,8 +14,12 @@ use tracing::debug;
 pub struct AcquireFactory;
 
 impl StageFactory for AcquireFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
-        Ok(Box::new(Acquire::new(config.name.clone())))
+    fn create(
+        &self,
+        config: &StageConfig,
+        _: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
+        Ok((Box::new(Acquire::new(config.name.clone())), None))
     }
 }
 

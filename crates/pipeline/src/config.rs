@@ -24,6 +24,8 @@ pub struct StageConfig {
     pub params: HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub inputs: Vec<String>,
+    #[serde(default)]
+    pub outputs: Vec<String>,
     }
     
     #[cfg(test)]
