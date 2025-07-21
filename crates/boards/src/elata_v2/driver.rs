@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use flume::{Receiver, Sender, Selector};
 use log::{debug, error, info, warn};
-use rppal::gpio::{Gpio, InputPin, OutputPin};
+use rppal::gpio::{Gpio, InputPin, OutputPin, Trigger};
 use rppal::spi::{Bus, Mode};
 use thread_priority::ThreadPriority;
 
@@ -15,7 +15,7 @@ use eeg_types::SensorError;
 use sensors::{
     ads1299::registers::{
         self, BIAS_SENSN_REG, BIAS_SENSP_REG, CH1SET_ADDR, CHN_OFF, CHN_REG, CMD_RDATAC,
-        CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG, CMD_START,
+        CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG,
         CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, DAISY_DISABLE,
     BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, DC_TEST, SRB1, MUX_NORMAL, POWER_OFF_CH},
     AdcConfig, AdcDriver, DriverError, DriverStatus,
@@ -33,6 +33,7 @@ pub struct ElataV2Driver {
     drdy_tx: Sender<usize>,
     drdy_rx: Receiver<usize>,
     start_pin: Arc<Mutex<Option<OutputPin>>>,
+    drdy_pins: Vec<InputPin>,
 }
 
 impl ElataV2Driver {
@@ -75,6 +76,7 @@ impl ElataV2Driver {
             drdy_tx,
             drdy_rx,
             start_pin: Arc::new(Mutex::new(None)),
+            drdy_pins: Vec::new(),
         })
     }
 }
@@ -120,34 +122,34 @@ impl AdcDriver for ElataV2Driver {
 
         thread::sleep(Duration::from_millis(10));
 
-        // 2. Spawn DRDY handler threads *before* starting data acquisition
+        // 2. Set up asynchronous DRDY interrupts and store pins for ownership
+        let mut drdy_pins = Vec::with_capacity(NUM_CHIPS);
         for i in 0..NUM_CHIPS {
             let chip_config = &self.config.chips[i];
-            let drdy_pin = self.gpio.get(chip_config.drdy_pin)?.into_input_pullup();
+            let mut drdy_pin = self.gpio.get(chip_config.drdy_pin)?.into_input_pullup();
+
+            // Check initial state before setting up interrupt
+            let initial_state = drdy_pin.is_high();
+            info!(
+                "Chip {} DRDY pin {} initial state: {} (should be HIGH before data acquisition starts)",
+                i,
+                chip_config.drdy_pin,
+                if initial_state { "HIGH" } else { "LOW" }
+            );
+
             let drdy_tx = self.drdy_tx.clone();
-            thread::Builder::new()
-                .name(format!("drdy_handler_{}", i))
-                .spawn(move || {
-                    let mut last_drdy = Instant::now();
-                    loop {
-                        // Basic edge detection: wait for pin to go low
-                        if drdy_pin.is_low() {
-                            // Basic debouncing
-                            if last_drdy.elapsed() > Duration::from_micros(200) {
-                                if drdy_tx.send(i).is_err() {
-                                    // Main receiver has dropped, exit thread
-                                    break;
-                                }
-                                last_drdy = Instant::now();
-                            }
-                        }
-                        // A small sleep to prevent pegging the CPU
-                        thread::sleep(Duration::from_micros(50));
-                    }
-                })
-                .map_err(|e| DriverError::Other(format!("Failed to spawn DRDY handler thread: {}", e)))?;
-            info!("DRDY polling handler started for chip {}", i);
+            drdy_pin.set_async_interrupt(Trigger::FallingEdge, None, move |level| {
+                debug!("DRDY interrupt fired for chip {} with level: {:?}", i, level);
+                let _ = drdy_tx.send(i);
+            })?;
+
+            info!(
+                "Asynchronous DRDY interrupt handler registered for chip {} on pin {}",
+                i, chip_config.drdy_pin
+            );
+            drdy_pins.push(drdy_pin);
         }
+        self.drdy_pins = drdy_pins;
 
         // 3. Now, start data acquisition on all chips
         let mut start_pin = self.gpio.get(START_PIN)?.into_output();
@@ -155,20 +157,25 @@ impl AdcDriver for ElataV2Driver {
 
         for chip in self.chip_drivers.iter_mut() {
             chip.send_command(CMD_WAKEUP)?;
-            thread::sleep(Duration::from_micros(50));
         }
+        thread::sleep(Duration::from_millis(10));
+
 
         // Pulse START pin to begin conversions
-        thread::sleep(Duration::from_millis(1));
         start_pin.set_high();
+
         thread::sleep(Duration::from_millis(1));
+
+        // Enable RDATAC mode first
         for chip in self.chip_drivers.iter_mut() {
             chip.send_command(CMD_RDATAC)?;
-            thread::sleep(Duration::from_micros(50));
         }
+        thread::sleep(Duration::from_millis(1));
+
 
         // Store the pin so it's not dropped and its state is maintained
         *self.start_pin.lock().unwrap() = Some(start_pin);
+
 
         info!("ElataV2 board initialized successfully and is acquiring data.");
         Ok(())
@@ -196,6 +203,7 @@ impl AdcDriver for ElataV2Driver {
             // Wait for a DRDY signal from any chip
             match self.drdy_rx.recv_timeout(Duration::from_millis(500)) {
                 Ok(chip_index) => {
+                    debug!("[Batch {}] DRDY received for chip {}", i, chip_index);
                     if i == 0 {
                         first_drdy_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
                     }
@@ -241,6 +249,9 @@ impl AdcDriver for ElataV2Driver {
 
     fn shutdown(&mut self) -> Result<(), DriverError> {
         info!("Shutting down ElataV2 board...");
+
+        // Clear interrupt handlers and release DRDY pins
+        self.drdy_pins.clear();
 
         // Take START pin low to stop conversions
         if let Some(mut start_pin) = self.start_pin.lock().unwrap().take() {

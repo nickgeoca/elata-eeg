@@ -68,10 +68,12 @@ impl Ads1299Driver {
     }
 
     pub fn read_data_raw(&mut self) -> Result<Vec<i32>, SensorError> {
-        let inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock().unwrap();
         let num_channels = inner.config.channels.len();
-        let mut frame_buffer = vec![0u8; 3 + num_channels * 3]; // 3 status bytes + 3 bytes per channel
-        self.read_frame(&mut frame_buffer)?;
+        // The ADS1299 always sends a fixed-size frame for all 8 channels, regardless of configuration.
+        // We must read all 27 bytes (3 status + 8 channels * 3 bytes) to avoid stalling the SPI bus.
+        let mut frame_buffer = vec![0u8; 27];
+        self.read_frame(&mut inner, &mut frame_buffer)?;
 
         let mut samples = Vec::with_capacity(num_channels);
         for i in 0..num_channels {
@@ -172,8 +174,8 @@ impl Ads1299Driver {
     }
 
     /// Reads a single frame of data from the chip.
-    pub fn read_frame(&self, buffer: &mut [u8]) -> Result<(), SensorError> {
-        let mut inner = self.inner.lock().unwrap();
+    /// Reads a single frame of data from the chip.
+    pub fn read_frame(&self, inner: &mut Ads1299Inner, buffer: &mut [u8]) -> Result<(), SensorError> {
         self.bus
             .transfer(&mut inner.cs_pin, buffer)
             .map_err(|e| SensorError::HardwareFault(e.to_string()))
