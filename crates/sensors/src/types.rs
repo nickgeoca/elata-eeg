@@ -21,14 +21,10 @@ pub struct ChipConfig {
     /// SPI chip select for this chip
     #[serde(default = "default_cs_pin")]
     pub cs_pin: u8,
-    /// DRDY pin for this chip
-    #[serde(default = "default_drdy_pin")]
-    pub drdy_pin: u8,
 }
 
 fn default_spi_bus() -> u8 { 0 }
 fn default_cs_pin() -> u8 { 0 }
-fn default_drdy_pin() -> u8 { 25 }
 
 impl Default for ChipConfig {
     fn default() -> Self {
@@ -37,7 +33,6 @@ impl Default for ChipConfig {
             gain: 1.0,
             spi_bus: default_spi_bus(),
             cs_pin: default_cs_pin(),
-            drdy_pin: default_drdy_pin(),
         }
     }
 }
@@ -49,9 +44,14 @@ pub struct AdcConfig {
     pub sample_rate: u32,
     /// Reference voltage for ADC conversion
     pub vref: f32,
+    /// Data ready pin for the first chip in the daisy chain
+    #[serde(default = "default_drdy_pin")]
+    pub drdy_pin: u8,
     /// Configuration for each chip on the board.
     pub chips: Vec<ChipConfig>,
 }
+
+fn default_drdy_pin() -> u8 { 25 }
 
 impl Default for AdcConfig {
     fn default() -> Self {
@@ -59,6 +59,7 @@ impl Default for AdcConfig {
             sample_rate: 250,
             vref: 4.5,
             chips: vec![ChipConfig::default()],
+            drdy_pin: default_drdy_pin(),
         }
     }
 }
@@ -132,6 +133,12 @@ impl Error for DriverError {}
 impl From<rppal::gpio::Error> for DriverError {
     fn from(e: rppal::gpio::Error) -> Self {
         DriverError::GpioError(e.to_string())
+    }
+}
+
+impl From<rppal::spi::Error> for DriverError {
+    fn from(e: rppal::spi::Error) -> Self {
+        DriverError::SpiError(e.to_string())
     }
 }
 

@@ -79,14 +79,11 @@ graph TD
 | **SCLK** | GPIO11 (Pin 23) | J3-3 (SCLK) | Shared. |
 | **MISO (DOUT)** | GPIO9 (Pin 21) | J3-13 (DOUT1) | *Simple harness:* tie all four DOUT1 pins together here and run RDATAC.<br>*Debug harness:* give each board its own GPIO and leave RDATAC; both work. |
 | **START** | GPIO22 (Pin 15) | J3-14 | Tie all four to one GPIO for < 1 µs sync pulse. |
-| **CS_A** | CE0 (Pin 24) | J3-7 board 0 | Pull low for board 0 transfers. |
-| **CS_B** | CE1 (Pin 26) | J3-7 board 1 | — |
-| **CS_C** | GPIO5 (Pin 29) | J3-7 board 2 | — |
-| **CS_D** | GPIO6 (Pin 31) | J3-7 board 3 | — |
-| **DRDY_A** | GPIO25 (Pin 22) | J3-15 board 0 | Falling-edge interrupt. |
-| **DRDY_B** | GPIO24 (Pin 18) | J3-15 board 1 | — |
-| **DRDY_C** | GPIO23 (Pin 16) | J3-15 board 2 | — |
-| **DRDY_D** | GPIO27 (Pin 13) | J3-15 board 3 | — |
+| **CS_A** | CE0 (Pin 24) (hardware cs) | J3-7 board 0 | Pull low for board 0 transfers. |
+| **CS_B** | CE1 (Pin 26) (hardware cs) | J3-7 board 1 | — |
+| **CS_C** | GPIO5 (Pin 29) (software cs) | J3-7 board 2 | — |
+| **CS_D** | GPIO6 (Pin 31) (software cs) | J3-7 board 3 | — |
+| **DRDY** | GPIO25 (Pin 22) | J3-15 board 0 | Falling-edge interrupt. |
 | **Bias electrode** | — | JP25-4 on **board 0 only** | Close **JP1** on board 0, open on others. |
 | **Reference electrode (SRB1)** | — | JP25-6 on every board | Wire-OR; MISC1.SRB1 = 1 on all boards. |
 

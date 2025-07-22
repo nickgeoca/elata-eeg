@@ -27,12 +27,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         gain: 1.0,
         spi_bus: 0,
         cs_pin: 0,
-        drdy_pin: 25,
     };
     
     let config = AdcConfig {
         sample_rate: args.sample_rate,
         vref: 4.5,
+        drdy_pin: 25,
         chips: vec![chip_config],
     };
 

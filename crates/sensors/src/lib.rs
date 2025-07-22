@@ -2,6 +2,7 @@ pub mod types;
 pub mod ads1299;
 #[cfg(feature = "mock_eeg")]
 pub mod mock_eeg;
+pub mod spi_bus;
 
 // Re-export the main types that users need
 pub use types::{AdcConfig, DriverStatus, DriverError, AdcDriver};
@@ -23,4 +24,3 @@ impl From<DriverError> for SensorError {
         SensorError::DriverError(e.to_string())
     }
 }
-pub mod spi_bus;

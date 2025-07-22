@@ -1,20 +1,20 @@
 use eeg_types::data::{PacketOwned, SensorMeta};
 use eeg_types::SensorError;
 use log::{debug, error, info, warn};
-use rppal::gpio::Gpio;
-use rppal::spi::{Bus, Mode};
+use rppal::gpio::{Gpio, OutputPin};
+use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use sensors::{
     ads1299::{
         driver::Ads1299Driver,
         registers::{
             self, BIAS_SENSN_REG, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG,
             CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR, CMD_RDATAC, CMD_START, CMD_WAKEUP,
-BIASREF_INT , PD_BIAS , PD_REFBUF, DC_TEST, SRB1,MUX_NORMAL        },
+BIASREF_INT , PD_BIAS , PD_REFBUF, BIAS_SENS_OFF_MASK, SRB1,MUX_NORMAL        },
     },
-    AdcConfig, AdcDriver, DriverError, DriverStatus, spi_bus::SpiBus,
+    spi_bus::SpiBus,
+    AdcConfig, AdcDriver, DriverError, DriverStatus,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
-use flume::{Receiver, Sender};
+use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use thread_priority::ThreadPriority;
@@ -22,7 +22,6 @@ use thread_priority::ThreadPriority;
 pub struct ElataV1Driver {
     inner: Ads1299Driver,
     config: AdcConfig,
-    gpio: Arc<Gpio>,
 }
 
 impl ElataV1Driver {
@@ -31,16 +30,17 @@ impl ElataV1Driver {
             DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
         })?;
 
-        let spi_bus = Arc::new(SpiBus::new(Bus::Spi0, 1_000_000, Mode::Mode1)?);
-        let gpio = Arc::new(Gpio::new().map_err(|e| DriverError::GpioError(e.to_string()))?);
-
+        let gpio = Gpio::new().map_err(|e| DriverError::GpioError(e.to_string()))?;
         let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
-        let inner = Ads1299Driver::new(
-            chip_config.clone(),
-            spi_bus,
-            cs_pin,
-        )?;
-        Ok(Self { inner, config, gpio })
+
+        let bus = Arc::new(SpiBus::new(
+            Bus::Spi0,
+            1_000_000,
+            Mode::Mode1,
+        )?);
+
+        let inner = Ads1299Driver::new(chip_config.clone(), bus, cs_pin)?;
+        Ok(Self { inner, config })
     }
 }
 
@@ -76,8 +76,7 @@ impl AdcDriver for ElataV1Driver {
             MISC1_REG | SRB1,
             &ch_settings,
             active_ch_mask,
-            BIAS_SENSN_REG,
-            active_ch_mask,
+            BIAS_SENSN_REG & BIAS_SENS_OFF_MASK,
         )?;
 
         info!("ElataV1 board initialized successfully.");

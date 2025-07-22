@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use flume::{Receiver, Sender, Selector};
 use log::{debug, error, info, warn};
 use rppal::gpio::{Gpio, InputPin, OutputPin, Trigger};
-use rppal::spi::{Bus, Mode};
+use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
 use thread_priority::ThreadPriority;
 
 use eeg_types::data::{PacketData, PacketOwned, SensorMeta};
@@ -18,8 +18,9 @@ use sensors::{
         CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG,
         CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, DAISY_DISABLE,
     BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, DC_TEST, SRB1, MUX_NORMAL, POWER_OFF_CH},
+    spi_bus::SpiBus,
     AdcConfig, AdcDriver, DriverError, DriverStatus,
-    ads1299::driver::Ads1299Driver, spi_bus::SpiBus,
+    ads1299::driver::Ads1299Driver,
 };
 
 const NUM_CHIPS: usize = 2;
@@ -30,10 +31,11 @@ pub struct ElataV2Driver {
     gpio: Arc<Gpio>,
     status: Arc<Mutex<DriverStatus>>,
     config: AdcConfig,
-    drdy_tx: Sender<usize>,
-    drdy_rx: Receiver<usize>,
     start_pin: Arc<Mutex<Option<OutputPin>>>,
-    drdy_pins: Vec<InputPin>,
+    drdy_pin: Arc<Mutex<Option<InputPin>>>,
+    sample_rx: Receiver<Vec<i32>>,
+    acq_thread_handle: Option<JoinHandle<()>>,
+    stop_acq_thread: Arc<AtomicBool>,
 }
 
 impl ElataV2Driver {
@@ -45,38 +47,39 @@ impl ElataV2Driver {
             ))));
         }
 
-        let spi_bus = Arc::new(SpiBus::new(
+        let gpio = Arc::new(Gpio::new()?);
+        info!("GPIO initialized.");
+
+        let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
+        let bus = Arc::new(SpiBus::new(
             Bus::Spi0,
             1_240_000,
             Mode::Mode1,
         )?);
         info!("SPI bus initialized.");
 
-        let gpio = Arc::new(Gpio::new()?);
-        info!("GPIO initialized.");
-
-        let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
-        let (drdy_tx, drdy_rx) = flume::bounded(128 * NUM_CHIPS);
-
-        for (i, chip_config) in config.chips.iter().enumerate() {
+        for chip_config in config.chips.iter() {
             let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
-            let driver = Ads1299Driver::new(
-                chip_config.clone(),
-                spi_bus.clone(),
-                cs_pin,
-            )?;
+            info!("CS pin {} initialized for software control.", chip_config.cs_pin);
+
+            let driver = Ads1299Driver::new(chip_config.clone(), bus.clone(), cs_pin)?;
             chip_drivers.push(driver);
         }
+
+        // The acquisition thread will be managed by `initialize` and `shutdown`
+        // This channel will deliver completed samples from the acq thread to the consumer.
+        let (sample_tx, sample_rx) = flume::bounded(4096);
 
         Ok(Self {
             chip_drivers,
             gpio,
             status: Arc::new(Mutex::new(DriverStatus::Stopped)),
             config,
-            drdy_tx,
-            drdy_rx,
             start_pin: Arc::new(Mutex::new(None)),
-            drdy_pins: Vec::new(),
+            drdy_pin: Arc::new(Mutex::new(None)),
+            sample_rx,
+            acq_thread_handle: None,
+            stop_acq_thread: Arc::new(AtomicBool::new(false)),
         })
     }
 }
@@ -105,6 +108,7 @@ impl AdcDriver for ElataV2Driver {
                 })
                 .collect();
             let active_ch_mask = chip_info.channels.iter().fold(0, |acc, &ch| acc | (1 << (ch % 8)));
+            // the setup is NOT daisy chained. running in cascade mode
             chip.initialize_chip(
                 CONFIG1_REG | sps_mask | DAISY_DISABLE,
                 CONFIG2_REG,
@@ -114,44 +118,107 @@ impl AdcDriver for ElataV2Driver {
                 MISC1_REG | SRB1,
                 &ch_settings,
                 active_ch_mask,
-                BIAS_SENSN_REG,
-                active_ch_mask,
+                BIAS_SENS_OFF_MASK
             )?;
             info!("Chip {} initialized and ready.", i);
         }
 
         thread::sleep(Duration::from_millis(10));
 
-        // 2. Set up asynchronous DRDY interrupts and store pins for ownership
-        let mut drdy_pins = Vec::with_capacity(NUM_CHIPS);
-        for i in 0..NUM_CHIPS {
-            let chip_config = &self.config.chips[i];
-            let mut drdy_pin = self.gpio.get(chip_config.drdy_pin)?.into_input_pullup();
+        // This channel is for DRDY interrupts. It's local to the init block.
+        let (drdy_tx, drdy_rx) = flume::bounded(128);
 
-            // Check initial state before setting up interrupt
-            let initial_state = drdy_pin.is_high();
-            info!(
-                "Chip {} DRDY pin {} initial state: {} (should be HIGH before data acquisition starts)",
-                i,
-                chip_config.drdy_pin,
-                if initial_state { "HIGH" } else { "LOW" }
-            );
+        // 2. Set up asynchronous DRDY interrupt
+        let mut drdy_pin = self.gpio.get(self.config.drdy_pin)?.into_input_pullup();
+        let initial_state = drdy_pin.is_high();
+        info!(
+            "DRDY pin {} initial state: {} (should be HIGH before data acquisition starts)",
+            self.config.drdy_pin,
+            if initial_state { "HIGH" } else { "LOW" }
+        );
 
-            let drdy_tx = self.drdy_tx.clone();
-            drdy_pin.set_async_interrupt(Trigger::FallingEdge, None, move |level| {
-                debug!("DRDY interrupt fired for chip {} with level: {:?}", i, level);
-                let _ = drdy_tx.send(i);
-            })?;
+        let drdy_tx_clone = drdy_tx.clone();
+        drdy_pin.set_async_interrupt(Trigger::FallingEdge, None, move |_| {
+            let _ = drdy_tx_clone.send(());
+        })?;
+        info!(
+            "Asynchronous DRDY interrupt handler registered on pin {}",
+            self.config.drdy_pin
+        );
+        *self.drdy_pin.lock().unwrap() = Some(drdy_pin);
 
-            info!(
-                "Asynchronous DRDY interrupt handler registered for chip {} on pin {}",
-                i, chip_config.drdy_pin
-            );
-            drdy_pins.push(drdy_pin);
-        }
-        self.drdy_pins = drdy_pins;
+        // 3. Spawn the acquisition thread
+        let stop_flag = self.stop_acq_thread.clone();
+        let (sample_tx, sample_rx) = flume::bounded(4096); // This is the new channel for samples
+        self.sample_rx = sample_rx; // Move the receiver to the struct
 
-        // 3. Now, start data acquisition on all chips
+        let mut chip_drivers = self.chip_drivers.clone();
+        let total_active_channels: usize = self.config.chips.iter().map(|c| c.channels.len()).sum();
+
+        let acq_thread = thread::Builder::new()
+            .name("adc_acq".into())
+            .spawn(move || {
+                if let Err(e) = thread_priority::set_current_thread_priority(ThreadPriority::Max) {
+                    warn!("Failed to set acquisition thread priority: {:?}", e);
+                }
+                info!("Acquisition thread started with high priority.");
+
+                while !stop_flag.load(Ordering::Relaxed) {
+                    match drdy_rx.recv_timeout(Duration::from_millis(1000)) {
+                        Ok(_) => {
+                            // Atomically read from all chips. If any fail, discard the entire sample.
+                            let chip_data: Vec<Result<Vec<i32>, SensorError>> = chip_drivers
+                                .iter_mut()
+                                .map(|driver| driver.read_data_raw())
+                                .collect();
+
+                            // Check if all reads were successful
+                            if chip_data.iter().all(|res| res.is_ok()) {
+                                let frame: Vec<i32> = chip_data
+                                    .into_iter()
+                                    .flat_map(|res| res.unwrap())
+                                    .collect();
+
+                                if frame.len() == total_active_channels {
+                                    if sample_tx.send(frame).is_err() {
+                                        error!("Sample channel disconnected. Stopping acquisition thread.");
+                                        return;
+                                    }
+                                } else {
+                                    warn!(
+                                        "Incorrect frame size. Expected {}, got {}. Discarding sample.",
+                                        total_active_channels,
+                                        frame.len()
+                                    );
+                                }
+                            } else {
+                                // Log errors for failed reads
+                                for (i, res) in chip_data.iter().enumerate() {
+                                    if let Err(e) = res {
+                                        error!("[Chip {}] Failed to read data in acq thread: {}", i, e);
+                                    }
+                                }
+                                warn!("Incomplete sample due to read errors. Discarding.");
+                            }
+                        }
+                        Err(flume::RecvTimeoutError::Timeout) => {
+                            warn!("Timeout waiting for DRDY. Discarding sample.");
+                            continue;
+                        }
+                        Err(flume::RecvTimeoutError::Disconnected) => {
+                            error!("DRDY channel disconnected. Stopping acquisition thread.");
+                            return;
+                        }
+                    }
+                }
+                info!("Acquisition thread shutting down.");
+            })
+            .map_err(|e| DriverError::Other(format!("Failed to spawn thread: {}", e)))?;
+
+        self.acq_thread_handle = Some(acq_thread);
+
+
+        // 4. Now, start data acquisition on all chips
         let mut start_pin = self.gpio.get(START_PIN)?.into_output();
         start_pin.set_low();
 
@@ -160,22 +227,15 @@ impl AdcDriver for ElataV2Driver {
         }
         thread::sleep(Duration::from_millis(10));
 
-
-        // Pulse START pin to begin conversions
         start_pin.set_high();
-
         thread::sleep(Duration::from_millis(1));
 
-        // Enable RDATAC mode first
         for chip in self.chip_drivers.iter_mut() {
             chip.send_command(CMD_RDATAC)?;
         }
         thread::sleep(Duration::from_millis(1));
 
-
-        // Store the pin so it's not dropped and its state is maintained
         *self.start_pin.lock().unwrap() = Some(start_pin);
-
 
         info!("ElataV2 board initialized successfully and is acquiring data.");
         Ok(())
@@ -192,51 +252,34 @@ impl AdcDriver for ElataV2Driver {
         if total_channels == 0 {
             return Ok((Vec::new(), 0));
         }
+
         let mut batch_buffer: Vec<i32> = Vec::with_capacity(batch_size * total_channels);
-        let mut first_drdy_timestamp = 0;
+        let first_sample_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
 
         for i in 0..batch_size {
             if stop_flag.load(Ordering::Relaxed) {
+                info!("Stop flag received, breaking batch acquisition loop.");
                 break;
             }
 
-            // Wait for a DRDY signal from any chip
-            match self.drdy_rx.recv_timeout(Duration::from_millis(500)) {
-                Ok(chip_index) => {
-                    debug!("[Batch {}] DRDY received for chip {}", i, chip_index);
-                    if i == 0 {
-                        first_drdy_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
-                    }
-                    // A chip is ready, read its data
-                    let driver = &mut self.chip_drivers[chip_index];
-                    match driver.read_data_raw() {
-                        Ok(data) => {
-                            debug!(
-                                "[Chip {}] Acquired {} samples.",
-                                chip_index,
-                                data.len() / self.config.chips[chip_index].channels.len()
-                            );
-                            batch_buffer.extend(data);
-                        }
-                        Err(e) => {
-                            error!("[Chip {}] Failed to read data: {}", chip_index, e);
-                            // Optional: decide if we should break or continue
-                        }
-                    }
+            match self.sample_rx.recv_timeout(Duration::from_millis(1000)) {
+                Ok(frame) => {
+                    batch_buffer.extend(frame);
                 }
                 Err(flume::RecvTimeoutError::Timeout) => {
-                    warn!("DRDY timeout. No data received in 500ms.");
-                    continue; // Or break, depending on desired behavior
+                    warn!("[Batch {}] Sample channel timeout. No data received from acquisition thread in 1000ms.", i);
+                    // This might indicate a problem with the acquisition thread
+                    continue;
                 }
                 Err(flume::RecvTimeoutError::Disconnected) => {
-                    error!("DRDY channel disconnected. Stopping acquisition.");
+                    error!("Sample channel disconnected. Stopping acquisition.");
                     break;
                 }
             }
         }
 
         *self.status.lock().unwrap() = DriverStatus::Stopped;
-        Ok((batch_buffer, first_drdy_timestamp))
+        Ok((batch_buffer, first_sample_timestamp))
     }
 
     fn get_status(&self) -> DriverStatus {
@@ -250,21 +293,37 @@ impl AdcDriver for ElataV2Driver {
     fn shutdown(&mut self) -> Result<(), DriverError> {
         info!("Shutting down ElataV2 board...");
 
-        // Clear interrupt handlers and release DRDY pins
-        self.drdy_pins.clear();
+        // 1. Signal the acquisition thread to stop
+        self.stop_acq_thread.store(true, Ordering::Relaxed);
 
-        // Take START pin low to stop conversions
+        // 2. Wait for the acquisition thread to finish
+        if let Some(handle) = self.acq_thread_handle.take() {
+            info!("Waiting for acquisition thread to join...");
+            if let Err(e) = handle.join() {
+                error!("Acquisition thread panicked: {:?}", e);
+            }
+            info!("Acquisition thread joined.");
+        }
+
+        // 3. Clear interrupt handlers and release DRDY pins
+        if let Some(mut drdy_pin) = self.drdy_pin.lock().unwrap().take() {
+            drdy_pin.clear_async_interrupt().unwrap();
+        }
+
+        // 4. Take START pin low to stop conversions
         if let Some(mut start_pin) = self.start_pin.lock().unwrap().take() {
             start_pin.set_low();
             info!("START pin set to low.");
         }
 
+        // 5. Power down chips
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
             info!("Sending SDATAC and STANDBY to chip {}", i);
             chip.send_command(CMD_SDATAC)?;
             chip.send_command(CMD_STANDBY)?;
             chip.shutdown()?;
         }
+
         *self.status.lock().unwrap() = DriverStatus::NotInitialized;
         info!("ElataV2 board shut down.");
         Ok(())

@@ -15,7 +15,7 @@ use eeg_types::SensorError;
 use crate::types::{AdcConfig, AdcDriver, DriverError, DriverStatus};
 use super::helpers::ch_sample_to_raw;
 use super::registers::{
-    BIAS_SENSN_ADDR, BIAS_SENSP_ADDR, CMD_RESET, CMD_SDATAC, CONFIG1_ADDR,
+    BIAS_SENSN_ADDR, BIAS_SENSP_ADDR, CMD_NOP, CMD_RESET, CMD_SDATAC, CONFIG1_ADDR,
     CONFIG2_ADDR, CONFIG3_ADDR, CONFIG4_ADDR, LOFF_SENSP_ADDR, MISC1_ADDR, REG_ID_ADDR, CMD_STANDBY,
 };
 
@@ -64,7 +64,6 @@ impl Ads1299Driver {
 
         let cs_pin_num = driver.inner.lock().unwrap().config.cs_pin;
         info!("Ads1299Driver created for CS pin {}", cs_pin_num);
-        debug!("CS pin initialized to high");
         Ok(driver)
     }
 
@@ -77,8 +76,8 @@ impl Ads1299Driver {
         self.read_frame(&mut inner, &mut frame_buffer)?;
 
         let mut samples = Vec::with_capacity(num_channels);
-        for i in 0..num_channels {
-            let offset = 3 + i * 3;
+        for &channel_index in &inner.config.channels {
+            let offset = 3 + (channel_index as usize) * 3;
             let sample = ch_sample_to_raw(
                 frame_buffer[offset],
                 frame_buffer[offset + 1],
@@ -92,7 +91,9 @@ impl Ads1299Driver {
     /// Send a command to the ADS1299, handling CS and SPI bus locking.
     pub fn send_command(&self, command: u8) -> Result<(), DriverError> {
         let mut inner = self.inner.lock().unwrap();
-        self.bus.write(&mut inner.cs_pin, &[command])
+        self.bus
+            .write(&mut inner.cs_pin, &[command])
+            .map_err(|e| DriverError::SpiError(e.to_string()))
     }
 
     /// Initialize the ADS1299 chip with raw register values.
@@ -105,7 +106,6 @@ impl Ads1299Driver {
         loff: u8,
         misc1: u8,
         ch_settings: &[(u8, u8)],
-        _active_ch_mask: u8,
         bias_sensp: u8,
         bias_sensn: u8,
     ) -> Result<(), DriverError> {
@@ -149,17 +149,13 @@ impl Ads1299Driver {
     }
 
     pub fn read_register(&self, register: u8) -> Result<u8, DriverError> {
-        let _inner = self.inner.lock().unwrap();
-        // Now we can access the public 'spi' field
-        let spi = self.bus.spi.lock().unwrap();
-
-        // Command (0x20 | reg), num registers-1 (0x00), dummy byte for clocking
-        let write_buf = [0x20 | (register & 0x1F), 0x00, 0x00];
-        let mut read_buf = [0u8; 3];
-
-        spi.transfer(&mut read_buf, &write_buf)
+        let mut inner = self.inner.lock().unwrap();
+        let write_buffer = [0x20 | (register & 0x1F), 0x00, 0x00];
+        let mut read_buffer = [0; 3];
+        self.bus
+            .transfer(&mut inner.cs_pin, &mut read_buffer, &write_buffer)
             .map_err(|e| DriverError::SpiError(e.to_string()))?;
-        Ok(read_buf[2])
+        Ok(read_buffer[2])
     }
 
 
@@ -169,7 +165,10 @@ impl Ads1299Driver {
         let command = 0x40 | (register & 0x1F);
         let write_buf = [command, 0x00, value]; // WREG command, num registers-1, value
 
-        let result = self.bus.write(&mut inner.cs_pin, &write_buf);
+        let result = self
+            .bus
+            .write(&mut inner.cs_pin, &write_buf)
+            .map_err(|e| DriverError::SpiError(e.to_string()));
 
         if result.is_ok() {
             inner.registers[register as usize] = value;
@@ -178,11 +177,14 @@ impl Ads1299Driver {
     }
 
     /// Reads a single frame of data from the chip.
-    /// Reads a single frame of data from the chip.
     pub fn read_frame(&self, inner: &mut Ads1299Inner, buffer: &mut [u8]) -> Result<(), SensorError> {
+        // In RDATAC mode, we just need to send clock pulses to get the data.
+        // Sending NOPs is the standard way to do this.
+        let write_buffer = vec![CMD_NOP; buffer.len()];
         self.bus
-            .transfer(&mut inner.cs_pin, buffer)
-            .map_err(|e| SensorError::HardwareFault(e.to_string()))
+            .transfer(&mut inner.cs_pin, buffer, &write_buffer)
+            .map_err(|e| SensorError::HardwareFault(e.to_string()))?;
+        Ok(())
     }
 }
 
