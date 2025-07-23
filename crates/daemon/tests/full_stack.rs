@@ -20,11 +20,19 @@ use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use flume::{Receiver, Sender, TryRecvError};
 
+use pipeline::stage::StageInitCtx;
 struct StatefulTestStageFactory;
 
 impl StageFactory for StatefulTestStageFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
-        Ok(Box::new(StatefulTestStage::new(&config.name)))
+    fn create(
+        &self,
+        config: &StageConfig,
+        _init_ctx: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
+        Ok((
+            Box::new(StatefulTestStage::new(&config.name)),
+            None,
+        ))
     }
 }
 

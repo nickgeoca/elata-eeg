@@ -8,39 +8,42 @@ default = ["brain_waves_fft_feature"]
 brain_waves_fft_feature = ["dep:brain_waves_fft_plugin"]
 
 [dependencies]
-anyhow = "1.0" # Added for error handling
-clap = { version = "4.0", features = ["derive"] }
-tracing = "0.1" # Added for structured logging
-boards = { path = "../boards", features = ["elata_v1", "elata_v2", "mock_eeg"] }
-eeg_types = { path = "../eeg_types" }
-pipeline = { path = "../pipeline" }
-sensors = { path = "../sensors" }
-csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
+anyhow = "1.0"
+axum = "0.7"
+axum-extra = { version = "0.9", features = ["typed-header"] }
 basic_voltage_filter_plugin = { path = "../../plugins/basic_voltage_filter" }
+boards = { path = "../boards", features = ["elata_v1", "elata_v2", "mock_eeg"] }
 brain_waves_fft_plugin = { path = "../../plugins/brain_waves_fft", optional = true }
-warp = "0.3"
+bytes = "1.0"
+chrono = "0.4"
+clap = { version = "4.0", features = ["derive"] }
+csv = "1.2"
+csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
+eeg_types = { path = "../eeg_types" }
+flume = { workspace = true }
+futures = "0.3"
+futures-util = "0.3"
+log = "0.4"
+nix = { version = "0.27", features = ["signal"] }
+pipeline = { path = "../pipeline" }
+rppal = { version = "0.22.1", features = ["hal"] }
+sensors = { path = "../sensors" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_yaml = "0.9"
-toml = "0.8" # Added for plugin manifest parsing
-futures-util = "0.3"
-csv = "1.2"
-chrono = "0.4"
-env_logger = "0.10" # Added logger
-log = "0.4" # Added for logging
-nix = { version = "0.27", features = ["signal"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net", "sync"] }
+toml = "0.8"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.0", features = ["v4"] }
-bytes = "1.0"
-rppal = { version = "0.22.1", features = ["hal"] }
-flume = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3.8"
-tokio = { version = "1", features = ["full"] }
 tokio-test = "0.4"
-bytes = "1.0"
 tokio-tungstenite = { version = "0.23.1", features = ["native-tls"] }
-flume = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 async-trait = "0.1"
 

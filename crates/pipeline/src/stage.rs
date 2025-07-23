@@ -120,6 +120,13 @@ pub trait Stage: Send + Sync {
         Ok(()) // Default implementation does nothing.
     }
 
+    /// Returns true if the stage's configuration is currently locked, preventing
+    /// dynamic reconfiguration. Stages that need to protect their state (e.g.,
+    /// while recording to a file) should override this method.
+    fn is_locked(&self) -> bool {
+        false
+    }
+
     /// Returns this stage as a mutable `Drains` trait object if it implements it.
     fn as_drains(&mut self) -> Option<&mut dyn Drains> {
         None

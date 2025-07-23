@@ -9,9 +9,9 @@ use pipeline::error::StageError;
 use pipeline::executor::Executor;
 use pipeline::graph::PipelineGraph;
 use pipeline::registry::{StageFactory, StageRegistry};
-use pipeline::stage::{Stage, StageContext};
+use pipeline::stage::{Stage, StageContext, StageInitCtx};
 use serde_json::json;
-use flume::{self as mpsc, Sender};
+use flume::{self as mpsc, Receiver, Sender};
 use std::sync::Arc;
 use tracing::{info, Level};
 use tracing_subscriber::FmtSubscriber;
@@ -26,7 +26,11 @@ struct MultiplierStage {
 struct MultiplierStageFactory;
 
 impl StageFactory for MultiplierStageFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _init_ctx: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let factor = config
             .params
             .get("factor")
@@ -34,10 +38,13 @@ impl StageFactory for MultiplierStageFactory {
             .map(|f| f as f32)
             .ok_or_else(|| StageError::BadConfig("Missing 'factor' param".to_string()))?;
 
-        Ok(Box::new(MultiplierStage {
-            id: config.name.clone(),
-            factor,
-        }))
+        Ok((
+            Box::new(MultiplierStage {
+                id: config.name.clone(),
+                factor,
+            }),
+            None,
+        ))
     }
 }
 
@@ -82,7 +89,11 @@ struct TestSinkFactory {
 }
 
 impl StageFactory for TestSinkFactory {
-    fn create(&self, config: &StageConfig) -> Result<Box<dyn Stage>, StageError> {
+    fn create(
+        &self,
+        config: &StageConfig,
+        _init_ctx: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let tx = self
             .output_tx
             .lock()
@@ -90,10 +101,13 @@ impl StageFactory for TestSinkFactory {
             .take()
             .ok_or_else(|| StageError::BadConfig("output_tx already taken".to_string()))?;
 
-        Ok(Box::new(TestSink {
-            id: config.name.clone(),
-            output_tx: tx,
-        }))
+        Ok((
+            Box::new(TestSink {
+                id: config.name.clone(),
+                output_tx: tx,
+            }),
+            None,
+        ))
     }
 }
 

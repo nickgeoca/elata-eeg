@@ -3,6 +3,7 @@
 //! This stage is responsible for interfacing with EEG hardware drivers,
 //! acquiring raw data in batches, and forwarding it into the pipeline.
 
+use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -22,6 +23,7 @@ use crate::config::StageConfig;
 use crate::data::{PacketData, PacketHeader, RtPacket};
 use crate::error::StageError;
 use crate::registry::StageFactory;
+use eeg_types::data::SensorMeta;
 use crate::stage::{Stage, StageContext, StageInitCtx};
 use flume::Receiver;
 
@@ -106,17 +108,32 @@ impl EegSource {
                 driver.initialize().unwrap(); // Handle error properly
 
                 let config = driver.get_config().unwrap();
-                
+
+                let sensor_meta = SensorMeta {
+                    sensor_id: 1, // Set appropriate sensor ID
+                    meta_rev: 1,
+                    schema_ver: 1,
+                    source_type: "eeg_source".to_string(),
+                    v_ref: config.vref,
+                    adc_bits: 24,
+                    gain: config.gain, // Propagate gain from hardware config
+                    sample_rate: config.sample_rate,
+                    offset_code: 0,
+                    is_twos_complement: true,
+                    channel_names: vec![], // Populate if available
+                    #[cfg(feature = "meta-tags")]
+                    tags: HashMap::new(),
+                };
+                let sensor_meta = Arc::new(sensor_meta);
+
                 // Calculate total channels from all chips
-                let num_channels: usize = config.chips.iter()
-                    .map(|chip| chip.channels.len())
-                    .sum();
-                    
+                let num_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+
                 if num_channels == 0 {
                     log::error!("No channels configured for driver");
                     return;
                 }
-                
+
                 log::info!("Driver configured with {} total channels", num_channels);
                 let sample_interval_ns = (1_000_000_000.0 / config.sample_rate as f64) as u64;
 
@@ -142,7 +159,7 @@ impl EegSource {
                                         source_id: output_name.clone(),
                                         ts_ns: sample_timestamp,
                                         batch_size: 1, // Each packet is now a single sample
-                                        meta: Arc::new(Default::default()),
+                                        meta: sensor_meta.clone(),
                                     },
                                     samples: packet_samples,
                                 }));

@@ -6,7 +6,7 @@ use eeg_types::SensorMeta;
 use pipeline::data::{RtPacket, PacketData, PacketHeader};
 use pipeline::config::StageConfig;
 use pipeline::control::PipelineEvent;
-use pipeline::stage::{Stage, StageContext};
+use pipeline::stage::{Stage, StageContext, StageInitCtx};
 use pipeline::stages::to_voltage::ToVoltageFactory;
 use pipeline::error::StageError;
 use flume as mpsc;
@@ -23,10 +23,10 @@ impl Stage for DoublerStage {
     fn process(
         &mut self,
         packet: Arc<RtPacket>,
-        _ctx: &mut StageContext,
+        ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         if let RtPacket::Voltage(packet_data) = &*packet {
-            let mut new_samples = RecycledF32Vec::new(_ctx.allocator.clone());
+            let mut new_samples = RecycledF32Vec::new(ctx.allocator.clone());
             new_samples.extend(packet_data.samples.iter().map(|s| s * 2.0));
             let new_packet_data = PacketData {
                 header: packet_data.header.clone(),
@@ -80,15 +80,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
     // 2. Instantiate the stages
-    let mut to_voltage_stage = ToVoltageFactory::default().create(&StageConfig {
+    let (event_tx, _) = mpsc::unbounded::<PipelineEvent>();
+    let init_ctx = StageInitCtx {
+        event_tx: &event_tx,
+        allocator: &allocator,
+    };
+    let (mut to_voltage_stage, _) = ToVoltageFactory::default().create(&StageConfig {
         name: "to_voltage".to_string(),
         stage_type: "ToVoltage".to_string(),
         params: Default::default(),
         inputs: Default::default(),
         outputs: vec![],
-    })?;
+    }, &init_ctx)?;
     let mut doubler_stage = DoublerStage;
-    let (event_tx, _) = mpsc::unbounded::<PipelineEvent>();
     let mut ctx = StageContext::new(event_tx, allocator.clone());
 
     // 3. Manually process the packet through the pipeline

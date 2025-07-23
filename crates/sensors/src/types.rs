@@ -13,8 +13,6 @@ use serde::{Serialize, Deserialize};
 pub struct ChipConfig {
     /// List of active channels for this chip (0-indexed for this chip)
     pub channels: Vec<u8>,
-    /// Gain setting for all channels on this chip
-    pub gain: f32,
     /// SPI bus for this chip
     #[serde(default = "default_spi_bus")]
     pub spi_bus: u8,
@@ -30,7 +28,6 @@ impl Default for ChipConfig {
     fn default() -> Self {
         Self {
             channels: (0..8).collect(),
-            gain: 1.0,
             spi_bus: default_spi_bus(),
             cs_pin: default_cs_pin(),
         }
@@ -44,6 +41,8 @@ pub struct AdcConfig {
     pub sample_rate: u32,
     /// Reference voltage for ADC conversion
     pub vref: f32,
+    /// Gain setting for all channels on all chips
+    pub gain: f32,
     /// Data ready pin for the first chip in the daisy chain
     #[serde(default = "default_drdy_pin")]
     pub drdy_pin: u8,
@@ -58,6 +57,7 @@ impl Default for AdcConfig {
         Self {
             sample_rate: 250,
             vref: 4.5,
+            gain: 1.0,
             chips: vec![ChipConfig::default()],
             drdy_pin: default_drdy_pin(),
         }

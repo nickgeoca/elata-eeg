@@ -12,12 +12,11 @@ stages:
         sample_rate: 250
         drdy_pin: 25
         vref: 4.5
+        gain: 1.0
         chips:
           - channels: [7]
-            gain: 1.0
             cs_pin: 7
           - channels: [1]
-            gain: 1.0
             cs_pin: 8
       batch_size: 32
     outputs: ["raw_data"]
@@ -26,7 +25,6 @@ stages:
     type: "to_voltage"
     params:
       vref: 4.5
-      gain: 1.0 # This should match the gain in the source stage
     inputs:
       - "eeg_source.raw_data"
     outputs: ["voltage_data"]
@@ -35,5 +33,12 @@ stages:
     type: "csv_sink"
     params:
       path: "e2e_test_output.csv"
+    inputs:
+      - "to_voltage.voltage_data"
+
+  - name: "websocket_sink"
+    type: "websocket_sink"
+    params:
+      addr: "127.0.0.1:9001"
     inputs:
       - "to_voltage.voltage_data"

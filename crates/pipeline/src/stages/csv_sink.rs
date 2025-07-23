@@ -1,6 +1,7 @@
 //! CSV sink stage for recording voltage EEG data to files.
 
 use crate::config::StageConfig;
+use crate::control::ControlCommand;
 use crate::data::RtPacket;
 use crate::error::StageError;
 use crate::registry::StageFactory;
@@ -34,6 +35,7 @@ pub struct CsvSink {
     id: String,
     writer: Mutex<BufWriter<File>>,
     header_written: Mutex<bool>,
+    is_recording: Mutex<bool>,
 }
 
 impl CsvSink {
@@ -47,6 +49,7 @@ impl CsvSink {
             id,
             writer: Mutex::new(writer),
             header_written: Mutex::new(false),
+            is_recording: Mutex::new(false),
         })
     }
 }
@@ -72,6 +75,11 @@ impl Stage for CsvSink {
         _ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         if let RtPacket::RawAndVoltage(packet) = &*packet {
+            let is_recording = self.is_recording.lock().unwrap();
+            if !*is_recording {
+                return Ok(None); // Not recording, so drop the packet.
+            }
+
             let mut writer = self.writer.lock().unwrap();
             let mut header_written = self.header_written.lock().unwrap();
 
@@ -93,6 +101,25 @@ impl Stage for CsvSink {
                 .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
         }
         Ok(None)
+    }
+
+    fn is_locked(&self) -> bool {
+        *self.is_recording.lock().unwrap()
+    }
+
+    fn control(&mut self, cmd: &ControlCommand, _ctx: &mut StageContext) -> Result<(), StageError> {
+        match cmd {
+            ControlCommand::StartRecording => {
+                let mut is_recording = self.is_recording.lock().unwrap();
+                *is_recording = true;
+            }
+            ControlCommand::StopRecording => {
+                let mut is_recording = self.is_recording.lock().unwrap();
+                *is_recording = false;
+            }
+            _ => {} // Ignore other commands
+        }
+        Ok(())
     }
 
     fn as_drains(&mut self) -> Option<&mut dyn Drains> {

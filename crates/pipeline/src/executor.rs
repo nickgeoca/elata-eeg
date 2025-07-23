@@ -292,4 +292,8 @@ impl Executor {
         }
         info!("All stage threads joined.");
     }
+
+    pub fn get_current_config(&self) -> crate::config::SystemConfig {
+        self.graph.get_current_config()
+    }
 }

@@ -93,7 +93,7 @@ impl AdcDriver for ElataV2Driver {
             info!("Initializing Chip {}...", i);
             let chip_info = &self.config.chips[i];
 
-            let gain_mask = registers::gain_to_reg_mask(chip_info.gain)?;
+            let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
             let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
             let pd_bias = if i == 0 { PD_BIAS } else { 0x00 };
 

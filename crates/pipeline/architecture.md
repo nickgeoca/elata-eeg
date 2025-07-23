@@ -25,7 +25,6 @@ Copy‑free path; Pi 5 tests hit <10 µs/packet easily.
 | Performance              | ★★★★☆ | lock‑free `Arc`, copy‑free; good up to 20 kS/s × 16 ch on Pi 5    |
 | Simplicity               | ★★★★☆ | minimal unsafe; uses standard libs (`flume`, `core_affinity`)     |
 | Stage Boilerplate        | ★★★★★ | stages just take `Arc<RtPacket>` & return `Option<Arc<RtPacket>>` |
-| Extensibility / Hot‑swap | ★★★★☆ | YAML graph reload via `ArcSwap`; no restart needed                |
 
 ###  Constraints
 
@@ -89,7 +88,7 @@ Copy‑free path; Pi 5 tests hit <10 µs/packet easily.
 ```
 workspace/
 ├─ crates/
-│  ├─ pipeline_core/      # hot loop, allocators, graph runtime
+│  ├─ pipeline_core/      # allocators, graph runtime
 │  ├─ plugin_api/         # StageDesc, StageImpl, helper macros
 │  ├─ stages_builtin/     # default DSP + sink stages
 │  ├─ daemon/             # loads YAML, starts runtime, REST control
@@ -115,7 +114,50 @@ workspace/
   * Accepts JSON-Patch messages to tweak stage params in real time
 * *State model* — Base YAML → In-memory overrides → `pipeline.yaml` on clean shutdown; “Restart Current” reuses overrides, “Load Preset” discards them
 
-## 3 · Key Types
+## 3 · Dynamic Configuration and Locking
+
+**Status:** `Planned`
+
+To prevent data corruption during sensitive operations (e.g., changing ADC gain while a `csv_sink` is recording), the control plane must query the pipeline state before applying any configuration changes. This is managed through a `Lockable` trait.
+
+### The `Lockable` Trait
+
+Any stage that has a state where its configuration must not be changed (e.g., it is actively writing to a file) can implement the `Lockable` trait.
+
+```rust
+// In pipeline_core/src/stage.rs
+pub trait Lockable {
+    /// Returns true if the stage's configuration is currently locked.
+    fn is_locked(&self) -> bool;
+}
+
+// with a default implementation on the main Stage trait
+pub trait Stage: Send + Lockable {
+    // ...
+}
+
+// and a default implementation for all stages
+impl<T: Stage> Lockable for T {
+    fn is_locked(&self) -> bool {
+        false // Default to unlocked
+    }
+}
+```
+
+This allows stages like `csv_sink` to opt-in to this safety mechanism by overriding the `is_locked` method, while other stages remain unaffected.
+
+### Query-First Control Flow
+
+The `daemon` acts as the central coordinator and guarantees data integrity by following this sequence:
+
+1.  **Command Received:** The `daemon` receives a command to change a parameter from the control WebSocket.
+2.  **Query Pipeline:** Before applying the change, the `daemon` sends a query to the pipeline executor: "Is any stage that would be affected by this change currently locked?"
+3.  **Check Lock State:** The executor traverses the pipeline graph downstream from the target of the parameter change. It calls `is_locked()` on each stage.
+4.  **Reject or Apply:** If any stage returns `true`, the executor reports "locked" to the `daemon`, which rejects the command. Otherwise, the change is applied.
+
+This ensures that runtime state changes are serialized and validated against the pipeline's collective ability to accept a change, making the system robust and extensible.
+
+## 4 · Key Types
 
 * Downsample stage MUST set `to`; downstream stages rely exclusively on packet header for rate.
 
@@ -277,5 +319,7 @@ impl Clone for RtPacket {
 * **OTA / field updates** – if these rigs end up in multiple labs, add a short section about updating the daemon and stages atomically (systemd-service + `execReload=` works).
 * Conduct Study - Inside this folder, the daemon saves two separate files:      session\_meta.json: Contains the study details ({ "participant": "P001", "notes": "..." }).      pipeline.yaml: A snapshot of the exact pipeline configuration used for this recording. This is vital for reproducibility.
 * **Stage hot-swap:** Implemntation and API, POST /pipeline/stage/fft { action: "add", after: "notch" }
+Extensibility / Hot‑swap 
+* YAML graph reload via `ArcSwap`; no restart needed
 
 *Last updated 2025‑07‑16*

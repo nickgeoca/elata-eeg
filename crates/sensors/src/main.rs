@@ -24,14 +24,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Create a basic ADC configuration using chip-based format
     let chip_config = ChipConfig {
         channels: args.channels,
-        gain: 1.0,
         spi_bus: 0,
         cs_pin: 0,
     };
-    
+
     let config = AdcConfig {
         sample_rate: args.sample_rate,
         vref: 4.5,
+        gain: 1.0,
         drdy_pin: 25,
         chips: vec![chip_config],
     };

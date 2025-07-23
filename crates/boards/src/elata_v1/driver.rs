@@ -51,7 +51,7 @@ impl AdcDriver for ElataV1Driver {
             DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
         })?;
 
-        let gain_mask = registers::gain_to_reg_mask(chip_config.gain)?;
+        let gain_mask = registers::gain_to_reg_mask(self.config.gain)?;
         let sps_mask = registers::sps_to_reg_mask(self.config.sample_rate)?;
         let active_ch_mask = chip_config.channels.iter().fold(0, |acc, &ch| acc | (1 << ch));
         let ch_settings: Vec<(u8, u8)> = (0..8)

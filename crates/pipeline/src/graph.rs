@@ -336,4 +336,8 @@ impl PipelineGraph {
         }
         Ok(())
     }
+
+    pub fn get_current_config(&self) -> SystemConfig {
+        self.config.clone()
+    }
 }
