@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use tracing::{error, info, warn};
+use crate::control::ControlCommand;
+use crate::error::PipelineError;
 
 /// A handle to a running stage in the executor.
 /// A handle to a running stage in the executor.
@@ -295,5 +297,10 @@ impl Executor {
 
     pub fn get_current_config(&self) -> crate::config::SystemConfig {
         self.graph.get_current_config()
+    }
+
+    /// Handles a control command for the pipeline.
+    pub fn handle_control_command(&mut self, cmd: &ControlCommand) -> Result<(), PipelineError> {
+        self.graph.handle_control_command(cmd)
     }
 }

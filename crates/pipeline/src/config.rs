@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 /// Represents the entire system configuration for the pipeline.
 /// This struct is versioned and designed for forward-compatibility.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemConfig {
     pub version: String,
@@ -14,7 +14,7 @@ pub struct SystemConfig {
 }
 
 /// Represents the configuration for a single stage in the pipeline.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct StageConfig {
     pub name: String,

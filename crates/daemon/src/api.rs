@@ -9,7 +9,7 @@ use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use flume::Sender;
-use pipeline::{data::RtPacket, executor::Executor};
+use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
 use std::{
     collections::HashMap,
     fs,
@@ -111,7 +111,7 @@ pub async fn start_pipeline_handler(
         }
     };
 
-    let (event_tx, _event_rx) = flume::bounded(100);
+    let (event_tx, event_rx) = flume::bounded(100);
     let mut registry = StageRegistry::new();
     pipeline::stages::register_builtin_stages(&mut registry);
 
@@ -132,6 +132,26 @@ pub async fn start_pipeline_handler(
     *handle = Some(PipelineHandle {
         executor: Some(executor),
         input_tx,
+    });
+
+    // Spawn a task to forward pipeline events to SSE clients
+    let sse_tx = state.sse_tx.clone();
+    tokio::spawn(async move {
+        while let Ok(event) = event_rx.recv_async().await {
+            let event_json = match serde_json::to_string(&event) {
+                Ok(json) => json,
+                Err(e) => {
+                    tracing::error!("Failed to serialize pipeline event: {}", e);
+                    continue;
+                }
+            };
+            
+            if let Err(e) = sse_tx.send(event_json) {
+                tracing::warn!("Failed to send SSE event: {}", e);
+                // If sending fails, it's likely because there are no subscribers
+                // We can continue, as new subscribers will receive future events
+            }
+        }
     });
 
     (StatusCode::OK, "Pipeline started").into_response()
@@ -191,7 +211,6 @@ pub async fn update_pipeline_handler(
     }
 }
 
-use pipeline::control::ControlCommand;
 
 pub async fn control_handler(
     State(state): State<AppState>,
@@ -199,10 +218,17 @@ pub async fn control_handler(
 ) -> impl IntoResponse {
     tracing::info!("Received control command: {:?}", payload);
 
-    if let Some(handle) = &*state.pipeline_handle.lock().unwrap() {
-        // This is a placeholder for sending the command to the pipeline
-        // In a real implementation, you would send this to the executor's control channel
-        (StatusCode::ACCEPTED, "Command received").into_response()
+    if let Some(ref mut handle) = *state.pipeline_handle.lock().unwrap() {
+        if let Some(ref mut executor) = handle.executor {
+            // Forward the control command to the executor
+            if let Err(e) = executor.handle_control_command(&payload) {
+                tracing::error!("Failed to handle control command: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Command failed").into_response();
+            }
+            (StatusCode::ACCEPTED, "Command received").into_response()
+        } else {
+            (StatusCode::NOT_FOUND, "No pipeline running").into_response()
+        }
     } else {
         (StatusCode::NOT_FOUND, "No pipeline running").into_response()
     }

@@ -181,6 +181,7 @@ impl PipelineGraph {
     /// Pushes a data packet through the pipeline using the pre-computed topological order.
     pub fn push(&mut self, pkt: PacketOwned, topo: &[StageId]) -> Result<(), PipelineError> {
         let mut outputs: HashMap<StageId, Option<Arc<RtPacket>>> = HashMap::new();
+        static mut PACKET_COUNT: u64 = 0;
 
         // Find the source stage (the one with no inputs) and insert the initial packet.
         let source_stage_name = self
@@ -263,6 +264,14 @@ impl PipelineGraph {
                         }
                         Err(e) => {
                             let action = node.policy.on_error();
+                            // Emit an ErrorOccurred event
+                            if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::ErrorOccurred {
+                                stage_id: node.name.clone(),
+                                error_message: e.to_string(),
+                            }) {
+                                tracing::error!("Failed to send ErrorOccurred event: {}", e);
+                            }
+                            
                             match action {
                                 crate::stage::ErrorAction::Fatal => return Err(e.into()),
                                 crate::stage::ErrorAction::SkipPacket => {
@@ -289,6 +298,18 @@ impl PipelineGraph {
             }
         }
 
+        // Increment packet count and emit DataFlowing event every 1000 packets
+        unsafe {
+            PACKET_COUNT += 1;
+            if PACKET_COUNT % 1000 == 0 {
+                if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::DataFlowing {
+                    packet_count: PACKET_COUNT,
+                }) {
+                    tracing::error!("Failed to send DataFlowing event: {}", e);
+                }
+            }
+        }
+        
         Ok(())
     }
 
@@ -305,6 +326,54 @@ impl PipelineGraph {
                         let params_value = serde_json::to_value(&stage_config.params)?;
                         node.stage
                             .reconfigure(&params_value, &mut self.context)?;
+                    }
+                }
+                
+                // Emit a ConfigUpdated event
+                if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::ConfigUpdated {
+                    config: new_config.clone(),
+                }) {
+                    tracing::error!("Failed to send ConfigUpdated event: {}", e);
+                }
+            }
+            ControlCommand::SetParameter { target_stage, parameters } => {
+                // Forward the command to the target stage
+                if let Some(node) = self.nodes.get_mut(target_stage) {
+                    node.stage.control(cmd, &mut self.context)?;
+                    
+                    // Emit a ParameterChanged event
+                    for (param_id, value) in parameters.as_object().unwrap_or(&serde_json::Map::new()) {
+                        if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::ParameterChanged {
+                            stage_id: target_stage.clone(),
+                            parameter_id: param_id.clone(),
+                            value: value.clone(),
+                        }) {
+                            tracing::error!("Failed to send ParameterChanged event: {}", e);
+                        }
+                    }
+                }
+            }
+            ControlCommand::Start => {
+                for node in self.nodes.values_mut() {
+                    node.stage.control(cmd, &mut self.context)?;
+                    
+                    // Emit a StageStarted event
+                    if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::StageStarted {
+                        stage_id: node.name.clone(),
+                    }) {
+                        tracing::error!("Failed to send StageStarted event: {}", e);
+                    }
+                }
+            }
+            ControlCommand::Shutdown => {
+                for node in self.nodes.values_mut() {
+                    node.stage.control(cmd, &mut self.context)?;
+                    
+                    // Emit a StageStopped event
+                    if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::StageStopped {
+                        stage_id: node.name.clone(),
+                    }) {
+                        tracing::error!("Failed to send StageStopped event: {}", e);
                     }
                 }
             }

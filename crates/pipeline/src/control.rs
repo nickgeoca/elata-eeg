@@ -76,10 +76,22 @@ impl Debug for ControlCommand {
 }
 
 /// Events sent from the pipeline back to the control plane (e.g., the `device` crate).
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Serialize)]
 pub enum PipelineEvent {
     /// Acknowledges that the pipeline has completed its shutdown sequence.
     ShutdownAck,
     /// (For testing) Confirms a test stage's state has changed.
     TestStateChanged(u32),
+    /// Indicates that a stage has started processing.
+    StageStarted { stage_id: String },
+    /// Indicates that a stage has stopped processing.
+    StageStopped { stage_id: String },
+    /// Indicates that a parameter has been changed on a stage.
+    ParameterChanged { stage_id: String, parameter_id: String, value: serde_json::Value },
+    /// Indicates that an error has occurred in a stage.
+    ErrorOccurred { stage_id: String, error_message: String },
+    /// Indicates that data is flowing through the pipeline.
+    DataFlowing { packet_count: u64 },
+    /// Indicates that the pipeline configuration has been updated.
+    ConfigUpdated { config: crate::config::SystemConfig },
 }
