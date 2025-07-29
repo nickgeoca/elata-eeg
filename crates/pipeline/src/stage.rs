@@ -5,7 +5,8 @@ use crate::control::{ControlCommand, PipelineEvent};
 use crate::data::RtPacket;
 use crate::error::StageError;
 use flume::Sender;
-use std::sync::Arc;
+use sensors::types::AdcDriver;
+use std::sync::{Arc, Mutex};
 
 /// The possible states of a stage in the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +61,7 @@ pub struct StageContext {
 pub struct StageInitCtx<'a> {
     pub event_tx: &'a Sender<PipelineEvent>,
     pub allocator: &'a SharedPacketAllocator,
+    pub driver: &'a Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
 }
 
 impl StageContext {

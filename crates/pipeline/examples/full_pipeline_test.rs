@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()))?;
 
     // 4. Create and start the executor
-    let (executor, input_tx) = Executor::new(graph);
+    let (executor, input_tx, _) = Executor::new(graph);
 
     // 5. Send a large number of packets into the pipeline
     let num_packets = 1_000;

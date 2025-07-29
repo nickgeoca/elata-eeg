@@ -39,12 +39,12 @@ pub struct ElataV2Driver {
 }
 
 impl ElataV2Driver {
-    pub fn new(config: AdcConfig) -> Result<Self, Box<dyn Error>> {
+    pub fn new(config: AdcConfig) -> Result<Self, DriverError> {
         if config.chips.len() != NUM_CHIPS {
-            return Err(Box::new(DriverError::ConfigurationError(format!(
+            return Err(DriverError::ConfigurationError(format!(
                 "ElataV2Driver requires exactly {} chip configurations",
                 NUM_CHIPS
-            ))));
+            )));
         }
 
         let gpio = Arc::new(Gpio::new()?);

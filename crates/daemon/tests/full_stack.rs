@@ -61,7 +61,7 @@ async fn setup_test_daemon() -> (
     };
 
     // --- Pipeline Thread ---
-    let (executor, input_tx) = {
+    let (executor, input_tx, _) = {
         let mut registry = StageRegistry::new();
         registry.register(
             "stateful_test_stage",
@@ -73,6 +73,7 @@ async fn setup_test_daemon() -> (
             &registry,
             event_tx.clone(),
             None,
+            &None,
         )
         .unwrap();
         Executor::new(graph)

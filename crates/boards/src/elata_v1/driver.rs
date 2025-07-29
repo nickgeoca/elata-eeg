@@ -30,7 +30,7 @@ impl ElataV1Driver {
             DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
         })?;
 
-        let gpio = Gpio::new().map_err(|e| DriverError::GpioError(e.to_string()))?;
+        let gpio = Gpio::new()?;
         let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
 
         let bus = Arc::new(SpiBus::new(

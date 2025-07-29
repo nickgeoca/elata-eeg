@@ -1,5 +1,8 @@
 // Connect to WebSocket
-const ws = new WebSocket('ws://localhost:8080');
+const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+const host = window.location.hostname;
+const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+const ws = new WebSocket(`${protocol}://${host}:${port}`);
 
 // Handle incoming data
 ws.onmessage = (event) => {

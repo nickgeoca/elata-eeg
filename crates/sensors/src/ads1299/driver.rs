@@ -93,7 +93,6 @@ impl Ads1299Driver {
         let mut inner = self.inner.lock().unwrap();
         self.bus
             .write(&mut inner.cs_pin, &[command])
-            .map_err(|e| DriverError::SpiError(e.to_string()))
     }
 
     /// Initialize the ADS1299 chip with raw register values.
@@ -154,7 +153,7 @@ impl Ads1299Driver {
         let mut read_buffer = [0; 3];
         self.bus
             .transfer(&mut inner.cs_pin, &mut read_buffer, &write_buffer)
-            .map_err(|e| DriverError::SpiError(e.to_string()))?;
+?;
         Ok(read_buffer[2])
     }
 
@@ -168,7 +167,7 @@ impl Ads1299Driver {
         let result = self
             .bus
             .write(&mut inner.cs_pin, &write_buf)
-            .map_err(|e| DriverError::SpiError(e.to_string()));
+;
 
         if result.is_ok() {
             inner.registers[register as usize] = value;

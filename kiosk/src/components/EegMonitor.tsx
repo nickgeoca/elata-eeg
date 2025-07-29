@@ -1,11 +1,12 @@
 'use client';
 import React from 'react'; // Added to resolve React.Fragment error
 
-import { useRef, useState, useEffect } from 'react';
+import { useRef, useState, useEffect, useContext } from 'react';
 import { useEegConfig } from './EegConfig';
 import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
 import { useCommandWebSocket } from '../context/CommandWebSocketContext';
 import { useEegData } from '../context/EegDataContext';
+import { useEventStream } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
 
 export default function EegMonitorWebGL() {
@@ -15,8 +16,7 @@ export default function EegMonitorWebGL() {
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
   const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph');
   
-  const [configWebSocket, setConfigWebSocket] = useState<WebSocket | null>(null); // Restored
-  const [isConfigWsOpen, setIsConfigWsOpen] = useState(false); // Restored
+  // configWebSocket state is no longer needed as we use SSE for configuration updates
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
   const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.25); // Added for UI Voltage Scaling
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
@@ -24,9 +24,10 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get all data and config from the new central context
-  const { config, dataStatus } = useEegData();
+  const { config, setConfig, dataStatus } = useEegData();
   const { dataReceived, driverError, wsStatus } = dataStatus;
   const { status: configStatus, refreshConfig } = useEegConfig(); // Keep for settings UI
+  const { fatalError } = useEventStream(); // Get fatal error from EventStreamContext
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -48,11 +49,15 @@ export default function EegMonitorWebGL() {
   }, [config]);
 
   const { sendPowerlineFilterCommand } = useCommandWebSocket(); // Keep for potential direct use if needed
+ 
+   const { ws: commandWs } = useCommandWebSocket(); // Get the command WebSocket
 
   const handleUpdateConfig = () => {
-    if (!configWebSocket || configWebSocket.readyState !== WebSocket.OPEN) {
-      console.error('Config WebSocket (EegMonitor) not connected or not ready.');
-      setConfigUpdateStatus('Error: Config service not connected. Cannot send update.');
+    // In the new API, configuration updates are sent via POST /api/control
+    // We'll use the existing command WebSocket for now, but this should eventually use HTTP
+    if (!commandWs || commandWs.readyState !== WebSocket.OPEN) {
+      console.error('Command WebSocket not connected or not ready.');
+      setConfigUpdateStatus('Error: Command service not connected. Cannot send update.');
       return;
     }
 
@@ -121,7 +126,9 @@ export default function EegMonitorWebGL() {
     
     console.log('Sending config update via EegMonitor /config WebSocket:', newConfigPayload);
     setConfigUpdateStatus('Sending configuration update...');
-    configWebSocket.send(JSON.stringify(newConfigPayload));
+    // Send the configuration update via the command WebSocket
+    // In a full implementation, this would be a POST /api/control request
+    commandWs.send(JSON.stringify(newConfigPayload));
   };
 
   // Use the command WebSocket context
@@ -275,8 +282,21 @@ export default function EegMonitorWebGL() {
           )}
         </div>
       )}
+
+      {fatalError && (
+        <div className="bg-red-800 text-white p-4 text-lg flex items-center justify-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6 mr-3 text-red-300" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+          </svg>
+          <div>
+            <p className="font-bold">A fatal error occurred in the pipeline:</p>
+            <p className="font-mono text-sm mt-1">{fatalError}</p>
+            <p className="text-xs mt-2 text-red-200">Please check the daemon logs and restart the application.</p>
+          </div>
+        </div>
+      )}
       
-      {driverError && (
+      {driverError && !fatalError && (
         <div className="bg-yellow-800 text-white px-2 py-1 text-sm flex items-center">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-yellow-300" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />

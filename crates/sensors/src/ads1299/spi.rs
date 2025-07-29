@@ -18,7 +18,7 @@ pub fn wait_irq(
     // Ensure the interrupt is configured for falling edge.
     // This might be redundant if set once at initialization, but it's safe.
     pin.set_interrupt(Trigger::FallingEdge, None)
-        .map_err(|e| crate::types::DriverError::GpioError(e.to_string()))?;
+?;
 
     match pin.poll_interrupt(true, Some(timeout)) {
         Ok(Some(_)) => Ok(true),
@@ -28,7 +28,7 @@ pub fn wait_irq(
         }
         Err(e) => {
             error!("DRDY pin poll_interrupt error: {}", e);
-            Err(crate::types::DriverError::GpioError(e.to_string()))
+            Err(crate::types::DriverError::from(e))
         }
     }
 }

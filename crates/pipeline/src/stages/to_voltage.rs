@@ -68,7 +68,7 @@ impl Stage for ToVoltage {
             RtPacket::Voltage(d) => &d.header.source_id,
             RtPacket::RawAndVoltage(d) => &d.header.source_id,
         };
-        tracing::info!("to_voltage received packet with source_id: {}", source_id);
+        // tracing::info!("to_voltage received packet with source_id: {}", source_id);
         let view = PacketView::from(&*pkt);
 
         if let PacketView::RawI32 { header, data } = view {

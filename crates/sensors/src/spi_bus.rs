@@ -46,7 +46,7 @@ impl SpiBus {
         cs_pin.set_low();
         thread::sleep(Duration::from_micros(CS_DELAY_US));
 
-        let result = spi.write(data).map_err(|e| DriverError::SpiError(e.to_string()));
+        let result = spi.write(data).map_err(|e| DriverError::from(e));
 
         // End transaction
         thread::sleep(Duration::from_micros(CS_DELAY_US));
@@ -71,7 +71,7 @@ impl SpiBus {
 
         let result = spi
             .transfer(read_buffer, write_buffer)
-            .map_err(|e| DriverError::SpiError(e.to_string()));
+            .map_err(|e| DriverError::from(e));
 
         thread::sleep(Duration::from_micros(CS_DELAY_US));
         cs_pin.set_high();

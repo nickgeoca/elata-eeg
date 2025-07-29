@@ -5,6 +5,7 @@ use crate::graph::{PipelineGraph, StageId, StageMode};
 use crate::stage::{DefaultPolicy, ErrorAction, Stage, StagePolicy, StageState};
 use flume::{Receiver, Selector, Sender};
 use std::collections::HashMap;
+use std::any::Any;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 use std::thread;
 use tracing::{error, info, warn};
@@ -34,21 +35,30 @@ pub struct Executor {
     handles: HashMap<StageId, StageHandle>,
     graph: PipelineGraph,
     stop_txs: Vec<Sender<()>>,
+    fatal_error_tx: Sender<Box<dyn Any + Send>>,
 }
 
 impl Executor {
     /// Creates a new executor from a pipeline graph.
-    pub fn new(graph: PipelineGraph) -> (Self, Sender<Arc<RtPacket>>) {
+    pub fn new(
+        graph: PipelineGraph,
+    ) -> (
+        Self,
+        Sender<Arc<RtPacket>>,
+        Receiver<Box<dyn Any + Send>>,
+    ) {
         let (input_tx, input_rx) = flume::unbounded();
+        let (fatal_error_tx, fatal_error_rx) = flume::unbounded();
 
         let mut executor = Self {
             handles: HashMap::new(),
             graph,
             stop_txs: Vec::new(),
+            fatal_error_tx,
         };
 
         executor.wire_and_start(input_rx);
-        (executor, input_tx)
+        (executor, input_tx, fatal_error_rx)
     }
 
     /// Wires the graph and starts the threads.
@@ -92,6 +102,7 @@ impl Executor {
             let context = self.graph.context.clone();
             let mode = node.mode;
             let producer_rx = node.producer_rx;
+            let fatal_error_tx = self.fatal_error_tx.clone();
 
             let input_rx = if mode == StageMode::Producer {
                 producer_rx.expect("Producer stage must have a receiver")
@@ -215,9 +226,16 @@ impl Executor {
                                             if node_guard.state != StageState::Running {
                                                 return; // Don't process new packets if not running
                                             }
-                                            match node_guard.stage.process(packet, &mut context_clone)
-                                            {
-                                                Ok(Some(output_packet)) => {
+                                            let result = std::panic::catch_unwind(
+                                                std::panic::AssertUnwindSafe(|| {
+                                                    node_guard
+                                                        .stage
+                                                        .process(packet, &mut context_clone)
+                                                }),
+                                            );
+
+                                            match result {
+                                                Ok(Ok(Some(output_packet))) => {
                                                     for tx in &output_txs {
                                                         if tx.send(output_packet.clone()).is_err()
                                                         {
@@ -225,8 +243,9 @@ impl Executor {
                                                         }
                                                     }
                                                 }
-                                                Ok(None) => { /* Packet was filtered */ }
-                                                Err(e) => {
+                                                Ok(Ok(None)) => { /* Packet was filtered */ }
+                                                Ok(Err(e)) => {
+                                                    // Stage returned an error
                                                     error!(
                                                         "Error in stage '{}': {}",
                                                         node_guard.name, e
@@ -245,7 +264,8 @@ impl Executor {
                                                             "Stage '{}' is draining due to an error.",
                                                             node_guard.name
                                                         );
-                                                            node_guard.state = StageState::Draining;
+                                                            node_guard.state =
+                                                                StageState::Draining;
                                                         }
                                                         ErrorAction::SkipPacket => {
                                                             warn!(
@@ -253,6 +273,19 @@ impl Executor {
                                                             node_guard.name
                                                         );
                                                         }
+                                                    }
+                                                }
+                                                Err(panic_payload) => {
+                                                    // Stage panicked
+                                                    error!(
+                                                        "PANIC in stage '{}'. Shutting down.",
+                                                        node_guard.name
+                                                    );
+                                                    should_halt_input
+                                                        .store(true, Ordering::SeqCst);
+                                                    // Send the panic payload to the main thread
+                                                    if fatal_error_tx.send(panic_payload).is_err() {
+                                                        error!("Fatal error channel disconnected. Cannot report panic.");
                                                     }
                                                 }
                                             }

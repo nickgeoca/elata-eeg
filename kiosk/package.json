@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -p 3000",
+    "dev": "node server.js",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
@@ -23,9 +23,11 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/http-proxy-middleware": "^1.0.0",
     "@types/node": "^20",
     "@types/react": "^18.2.0",
     "@types/react-dom": "^18.2.0",
+    "http-proxy-middleware": "^3.0.5",
     "tailwindcss": "^4",
     "typescript": "^5"
   }

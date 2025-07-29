@@ -2,7 +2,7 @@
 
 import EegMonitor from '@/components/EegMonitor';
 import { EegConfigProvider, useEegConfig } from '@/components/EegConfig';
-import { CommandWebSocketProvider } from '@/context/CommandWebSocketContext';
+import { CommandProvider } from '@/context/CommandWebSocketContext';
 import { EegDataProvider } from '@/context/EegDataContext';
 import { useContext } from 'react';
 
@@ -28,13 +28,13 @@ export default function Home() {
   return (
     <div className="flex flex-col min-h-screen bg-gray-900 text-white">
       <EegConfigProvider>
-        <CommandWebSocketProvider>
+        <CommandProvider>
           <EegDataProvider>
             <div className="flex-grow">
               <EegMonitorWrapper />
             </div>
           </EegDataProvider>
-        </CommandWebSocketProvider>
+        </CommandProvider>
       </EegConfigProvider>
     </div>
   );

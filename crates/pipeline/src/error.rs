@@ -98,7 +98,7 @@ pub enum StageError {
     #[error("stream closed")]
     StreamClosed,
     #[error("driver error: {0}")]
-    DriverError(String),
+    Driver(#[from] DriverError),
 }
 
 impl From<serde_json::Error> for StageError {
@@ -107,8 +107,3 @@ impl From<serde_json::Error> for StageError {
     }
 }
 
-impl From<DriverError> for StageError {
-    fn from(err: DriverError) -> Self {
-        StageError::DriverError(err.to_string())
-    }
-}

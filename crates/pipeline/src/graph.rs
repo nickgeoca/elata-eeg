@@ -11,7 +11,9 @@ use flume::Receiver;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use sensors::types::AdcDriver;
 
 pub type StageId = String;
 
@@ -51,6 +53,7 @@ impl PipelineGraph {
         registry: &StageRegistry,
         event_tx: flume::Sender<crate::control::PipelineEvent>,
         allocator: Option<SharedPacketAllocator>,
+        driver: &Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
     ) -> Result<Self, StageError> {
         let mut nodes = HashMap::new();
         let allocator = allocator
@@ -67,6 +70,7 @@ impl PipelineGraph {
             let init_ctx = crate::stage::StageInitCtx {
                 event_tx: &event_tx,
                 allocator: &allocator,
+                driver,
             };
 
             let (stage, producer_rx) = registry.create_stage(stage_config, &init_ctx)?;

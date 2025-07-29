@@ -29,8 +29,12 @@ sequenceDiagram
 
     UI->>Daemon: POST /api/pipelines/p1/start
     activate Daemon
-    Note over Daemon: Loads p1.yaml, creates and runs pipeline
-    Daemon-->>UI: 200 OK
+    alt Pipeline is not running or p1 is already running
+        Note over Daemon: Starts p1 if not running
+        Daemon-->>UI: 200 OK
+    else Another pipeline (e.g., p2) is running
+        Daemon-->>UI: 409 Conflict {"error": "...", "running_pipeline_id": "p2"}
+    end
     deactivate Daemon
 
     UI->>Daemon: GET /api/events
@@ -73,8 +77,19 @@ sequenceDiagram
     ```
 
 *   **`POST /api/pipelines/{id}/start`**
-    *   **Description:** Starts a specific pipeline by its ID. The daemon loads the corresponding YAML file, creates the pipeline, and starts its execution.
-    *   **Response:** `200 OK`
+    *   **Description:** Starts a specific pipeline by its ID. The behavior depends on the current state of the daemon:
+        - If no pipeline is running, it starts the requested pipeline.
+        - If the requested pipeline is already running, it does nothing and returns success.
+        - If a different pipeline is running, it returns a conflict error.
+    *   **Responses:**
+        - `200 OK`: The requested pipeline is now running.
+        - `409 Conflict`: A different pipeline is already running. The response body will indicate the ID of the running pipeline.
+        ```json
+        {
+          "error": "Conflict: A different pipeline is already running.",
+          "running_pipeline_id": "some_other_pipeline"
+        }
+        ```
 
 *   **`POST /api/pipeline/stop`**
     *   **Description:** Stops the currently running pipeline.
@@ -107,7 +122,7 @@ sequenceDiagram
 ### Real-time Events
 
 *   **`GET /api/events`**
-    *   **Description:** Establishes a Server-Sent Events (SSE) connection. The daemon will push real-time state updates, data, or other events to the client over this connection.
+    *   **Description:** Establishes a Server-Sent Events (SSE) connection. Upon connection, the daemon will immediately push a `PipelineStarted` event if a pipeline is already running, containing the full configuration of that pipeline. Subsequently, the daemon will push real-time state updates, data, or other events to the client over this connection.
     *   **Response:** A stream of `text/event-stream` data.
 
 ## Design Rationale (FAQ)
@@ -116,7 +131,7 @@ sequenceDiagram
     The daemon discovers pipeline definitions (`*.yaml` files) from configured directories on the filesystem. The UI then uses the `GET /api/pipelines` endpoint to get a list of available pipelines to present to the user. This decouples the UI from the filesystem.
 
 *   **How does the GUI know what controls to display?**
-    After a pipeline is started, the daemon streams its structure (stages, parameters, etc.) to the UI via the SSE connection (`/api/events`) or through the `/api/pipeline/state` endpoint. The UI uses this information to dynamically render the appropriate controls.
+    After a pipeline is started (or if the UI connects when a pipeline is already running), the UI **must** call `GET /api/state` to fetch the complete configuration of the running pipeline. This ensures the UI has the necessary information to render the correct controls and avoids race conditions with the event stream. The SSE connection (`/api/events`) should be used for subsequent real-time updates.
 
 *   **Why use HTTP/SSE instead of WebSockets?**
     This design uses HTTP for standard request/response interactions (like starting or stopping a pipeline), which is simple and stateless. For real-time updates from the server to the client, Server-Sent Events (SSE) are used. SSE is a simpler protocol than WebSockets and is very efficient for one-way server-to-client data streaming. This combination provides a lightweight and robust solution.

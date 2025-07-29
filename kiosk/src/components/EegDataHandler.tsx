@@ -15,9 +15,11 @@ import {
     DEFAULT_BATCH_SIZE,
     WINDOW_DURATION,
 } from '../utils/eegConstants';
+import { SystemConfig } from '@/types/eeg';
+import { PipelineState } from '../context/PipelineContext';
  
 interface EegDataHandlerProps {
-  config: any;
+  pipelineState: PipelineState;
   onDataUpdate: (dataReceived: boolean) => void;
   onError?: (error: string) => void;
   onSamples: (samples: { values: Float32Array; timestamps: BigUint64Array }[]) => void;
@@ -33,7 +35,7 @@ interface EegDataHandlerProps {
 }
 
 export function useEegDataHandler({
-  config,
+  pipelineState,
   onDataUpdate,
   onError,
   onSamples,
@@ -44,7 +46,7 @@ export function useEegDataHandler({
   // subscriptions now has a default value as it's optional
   subscriptions = [],
 }: EegDataHandlerProps) {
-  const [status, setStatus] = useState('Connecting...');
+  const [wsConnectionStatus, setWsConnectionStatus] = useState('Disconnected');
   const wsRef = useRef<WebSocket | null>(null);
   // handleMessageRef is no longer needed at this scope
   const dataReceivedTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -54,7 +56,6 @@ export function useEegDataHandler({
   const logCounterRef = useRef(0); // Ref for throttling logs
 
   // --- Refs for props to ensure stability ---
-  const configRef = useRef(config);
   const onDataUpdateRef = useRef(onDataUpdate);
   const onErrorRef = useRef(onError);
   const onFftDataRef = useRef(onFftData);
@@ -62,10 +63,6 @@ export function useEegDataHandler({
   const subscriptionsRef = useRef(subscriptions);
 
   // Update refs whenever props change
-  useEffect(() => {
-    configRef.current = config;
-  }, [config]);
-
   useEffect(() => {
     onDataUpdateRef.current = onDataUpdate;
   }, [onDataUpdate]);
@@ -128,17 +125,22 @@ export function useEegDataHandler({
    * Main effect for WebSocket connection management.
    * Runs only once on mount.
    */
-  // Create a stable key from the config properties that necessitate a WebSocket restart.
-  const configKey = useMemo(() => {
-    if (!config) return null;
-    // Sort channels to ensure ["0", "1"] and ["1", "0"] produce the same key
-    const channelKey = config.channels?.slice().sort().join(',') || '';
-    return `${config.sample_rate}-${channelKey}`;
-  }, [config]);
-
   useEffect(() => {
     console.log(`[EegDataHandler] Effect running to establish WebSocket connection.`);
     let isMounted = true;
+
+    const { status, config } = pipelineState;
+
+    // Only connect if the pipeline is started and we have a valid config.
+    // Clean up any existing connection and exit the effect.
+    if (status !== 'started' || !config) {
+      if (wsRef.current) {
+        console.log("[EegDataHandler] Ensuring WebSocket is closed due to status or config change.");
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      return;
+    }
 
     // Function to send subscription messages to the backend
     const sendSubscription = (topics: string[], action: 'subscribe' | 'unsubscribe') => {
@@ -153,23 +155,6 @@ export function useEegDataHandler({
     };
 
     const connectWebSocket = () => {
-      // Use the ref to get the latest config without adding it as a dependency
-      const currentConfig = configRef.current;
-      
-      // If config isn't ready, wait and retry.
-      if (!currentConfig) {
-        console.warn("[EegDataHandler] Config not ready, scheduling reconnect.");
-        if (isMounted) {
-            reconnectTimeoutRef.current = setTimeout(connectWebSocket, 500);
-        }
-        return;
-      }
-
-      // Clear any existing reconnect timeout
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-        reconnectTimeoutRef.current = null;
-      }
       
       // Close existing connection if any
       if (wsRef.current) {
@@ -181,18 +166,18 @@ export function useEegDataHandler({
       }
       
       if (!isMounted) return;
-      setStatus('Connecting...');
+      setWsConnectionStatus('Connecting...');
   
-      const wsHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost';
       const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const ws = new WebSocket(`${wsProtocol}://${wsHost}:8080/ws/data`); // <-- Use the new endpoint
+      const wsHost = typeof window !== 'undefined' ? window.location.host : 'localhost:3000'; // Use the same host as the web page
+      const ws = new WebSocket(`${wsProtocol}://${wsHost}/ws/data`);
       wsRef.current = ws;
       
       ws.binaryType = 'arraybuffer';
       
       ws.onopen = () => {
         if (!isMounted) return;
-        setStatus('Connected');
+        setWsConnectionStatus('Connected');
         reconnectAttemptsRef.current = 0;
         const now = performance.now();
         setDebugInfo(prev => ({
@@ -269,8 +254,8 @@ export function useEegDataHandler({
       };
 
       const handleEegPayload = (payload: Uint8Array) => {
-        const currentConfig = configRef.current;
-        const configuredChannelCount = currentConfig?.channels?.length || 0;
+        const eegSourceStage = config?.stages.find(s => s.plugin_id === 'eeg_source');
+        const configuredChannelCount = eegSourceStage?.params.channel_count || 0;
         if (configuredChannelCount === 0) return;
 
         const dataView = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
@@ -364,7 +349,7 @@ export function useEegDataHandler({
           console.log(`[EegDataHandler] WebSocket closed with code: ${event.code}, reason: ${event.reason || 'No reason provided'}`);
         }
         
-        setStatus('Disconnected');
+        setWsConnectionStatus('Disconnected');
         
         // Don't reconnect for expected closures (normal shutdown)
         if (isExpectedClosure) {
@@ -422,10 +407,11 @@ export function useEegDataHandler({
         wsRef.current = null;
       }
     };
-  }, []); // Re-run effect only once on mount
+  }, [pipelineState]); // Re-run effect only when the pipelineState object changes
+
   // Return status and debug info
   return {
-    status,
+    status: wsConnectionStatus,
     debugInfo: !isProduction ? debugInfo : undefined
   };
 }

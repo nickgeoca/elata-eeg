@@ -1,14 +1,39 @@
+# Final Fix Plan for EegDataContext
+
+This plan outlines the precise change needed in `kiosk/src/context/EegDataContext.tsx` to resolve the state propagation bug.
+
+The fix is to remove the `setDataVersion(v => v + 1);` line from the `useEffect` hook that clears the data buffer upon a configuration change. This prevents an unnecessary and destabilizing re-render.
+
+### Diff for `kiosk/src/context/EegDataContext.tsx`
+
+```diff
+--- a/kiosk/src/context/EegDataContext.tsx
++++ b/kiosk/src/context/EegDataContext.tsx
+@@ -251,7 +251,6 @@
+ 
+     rawSamplesRef.current = [];
+     sampleTimestamps.current = [];
+-    setDataVersion(v => v + 1);
+     console.log('[EegDataContext] Cleared buffer due to configuration change');
+   }, [configKey]);
+ 
+
+```
+
+### Full file content for `kiosk/src/context/EegDataContext.tsx`
+
+```tsx
 'use client';
 
 import React, { createContext, useContext, useState, ReactNode, useMemo, useRef, useCallback, useEffect } from 'react';
 import { useEegDataHandler } from '../components/EegDataHandler';
 import { useEventStream } from './EventStreamContext';
 import { usePipeline } from './PipelineContext'; // Import the usePipeline hook
-import { EegSample, SampleChunk } from '../types/eeg'; // Import shared types
 
 // Constants for data management
 const MAX_SAMPLE_CHUNKS = 100;
 const RECONNECTION_DATA_RETENTION_MS = 5000; // Keep data for 5 seconds during reconnections
+import { EegSample, SampleChunk } from '../types/eeg'; // Import shared types
 
 // Callback type for live data subscribers
 type RawDataCallback = (data: SampleChunk[]) => void;
@@ -66,7 +91,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [subscriptions, setSubscriptions] = useState<string[]>([]);
   const rawDataSubscribersRef = useRef<Set<RawDataCallback>>(new Set());
 
-  const { pipelineConfig, pipelineState } = usePipeline(); // Get the pipeline state object
+  const { pipelineConfig, pipelineStatus } = usePipeline(); // Get the pipeline config and status
 
   // Derive a stable config object directly from the pipeline context
   const config = useMemo(() => {
@@ -272,7 +297,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   }, [isReconnecting]);
 
   const { status: wsStatus } = useEegDataHandler({
-    pipelineState: pipelineState, // Pass the entire state object
+    // Only pass the config (and thus enable the handler) when the pipeline is started.
+    config: pipelineStatus === 'started' ? config : null,
     onDataUpdate: handleDataUpdate,
     onError: handleError,
     onSamples: handleSamples,

@@ -81,65 +81,46 @@ pub enum DriverStatus {
 
 
 /// Errors that can occur in sensor drivers
-#[derive(Debug, Clone)]
+use thiserror::Error;
+
+#[derive(Error, Debug, Clone)]
 pub enum DriverError {
     /// A sensor-specific error.
-    SensorError(EegSensorError),
+    #[error("Sensor error: {0}")]
+    SensorError(#[from] EegSensorError),
     /// Hardware communication error
+    #[error("Hardware error: {0}")]
     HardwareError(String),
     /// Invalid configuration
+    #[error("Configuration error: {0}")]
     ConfigurationError(String),
     /// SPI communication error
+    #[error("SPI error: {0}")]
     SpiError(String),
     /// GPIO error
+    #[error("GPIO error: {0}")]
     GpioError(String),
     /// Timeout error
+    #[error("Timeout error: {0}")]
     TimeoutError(String),
     /// I/O error
+    #[error("I/O error: {0}")]
     IoError(String),
     /// Driver not initialized
+    #[error("Driver not initialized")]
     NotInitialized,
     /// Driver not configured
+    #[error("Driver not configured")]
     NotConfigured,
     /// Hardware not found
+    #[error("Hardware not found: {0}")]
     HardwareNotFound(String),
     /// Acquisition error
+    #[error("Acquisition error: {0}")]
     AcquisitionError(String),
     /// Generic error
+    #[error("Error: {0}")]
     Other(String),
-}
-
-impl fmt::Display for DriverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            DriverError::SensorError(e) => write!(f, "Sensor error: {}", e),
-            DriverError::HardwareError(msg) => write!(f, "Hardware error: {}", msg),
-            DriverError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
-            DriverError::SpiError(msg) => write!(f, "SPI error: {}", msg),
-            DriverError::GpioError(msg) => write!(f, "GPIO error: {}", msg),
-            DriverError::TimeoutError(msg) => write!(f, "Timeout error: {}", msg),
-            DriverError::IoError(msg) => write!(f, "I/O error: {}", msg),
-            DriverError::NotInitialized => write!(f, "Driver not initialized"),
-            DriverError::NotConfigured => write!(f, "Driver not configured"),
-            DriverError::HardwareNotFound(msg) => write!(f, "Hardware not found: {}", msg),
-            DriverError::AcquisitionError(msg) => write!(f, "Acquisition error: {}", msg),
-            DriverError::Other(msg) => write!(f, "Error: {}", msg),
-        }
-    }
-}
-
-impl Error for DriverError {}
-
-impl From<rppal::gpio::Error> for DriverError {
-    fn from(e: rppal::gpio::Error) -> Self {
-        DriverError::GpioError(e.to_string())
-    }
-}
-
-impl From<rppal::spi::Error> for DriverError {
-    fn from(e: rppal::spi::Error) -> Self {
-        DriverError::SpiError(e.to_string())
-    }
 }
 
 /// Trait that all sensor drivers must implement
@@ -170,4 +151,23 @@ pub trait AdcDriver: Send + Sync + 'static {
 
     /// Shutdown the driver and clean up resources
     fn shutdown(&mut self) -> Result<(), DriverError>;
+}
+
+
+impl From<rppal::spi::Error> for DriverError {
+    fn from(err: rppal::spi::Error) -> Self {
+        DriverError::SpiError(err.to_string())
+    }
+}
+
+impl From<rppal::gpio::Error> for DriverError {
+    fn from(err: rppal::gpio::Error) -> Self {
+        DriverError::GpioError(err.to_string())
+    }
+}
+
+impl From<std::io::Error> for DriverError {
+    fn from(err: std::io::Error) -> Self {
+        DriverError::IoError(err.to_string())
+    }
 }

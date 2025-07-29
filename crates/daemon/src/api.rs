@@ -8,14 +8,14 @@ use axum::{
 use futures::stream::{self, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use flume::Sender;
+use flume::{Receiver, Sender};
+use eeg_types::data::SensorMeta;
 use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
 use std::{
     collections::HashMap,
     fs,
     path::PathBuf,
     sync::{Arc, Mutex},
-    thread::JoinHandle,
 };
 use tokio::sync::broadcast;
 
@@ -25,10 +25,12 @@ pub struct AppState {
     pub pipelines: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub sse_tx: broadcast::Sender<String>,
     pub pipeline_handle: Arc<Mutex<Option<PipelineHandle>>>,
+    pub source_meta_cache: Arc<Mutex<Option<SensorMeta>>>,
 }
 
 // Will hold the running pipeline's sender channel
 pub struct PipelineHandle {
+    pub id: String,
     pub executor: Option<Executor>,
     pub input_tx: Sender<Arc<RtPacket>>,
 }
@@ -73,13 +75,35 @@ pub async fn list_pipelines_handler(State(state): State<AppState>) -> Json<Value
 use pipeline::{
     config::SystemConfig, control::PipelineEvent, graph::PipelineGraph, registry::StageRegistry,
 };
-use std::thread;
-
 pub async fn start_pipeline_handler(
     Path(pipeline_id): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    tracing::info!("Starting pipeline: {}", pipeline_id);
+    tracing::info!("Request to start pipeline: {}", pipeline_id);
+
+    let mut handle = state.pipeline_handle.lock().unwrap();
+
+    // Check if a pipeline is already running
+    if let Some(existing_handle) = &*handle {
+        if existing_handle.id == pipeline_id {
+            tracing::info!("Pipeline '{}' is already running. Request is idempotent.", pipeline_id);
+            return (StatusCode::OK, "Pipeline already running").into_response();
+        } else {
+            tracing::warn!(
+                "Conflict: Pipeline '{}' is running, but request was for '{}'",
+                existing_handle.id,
+                pipeline_id
+            );
+            let body = json!({
+                "error": "Conflict: A different pipeline is already running.",
+                "running_pipeline_id": existing_handle.id
+            });
+            return (StatusCode::CONFLICT, Json(body)).into_response();
+        }
+    }
+
+    // No pipeline is running, proceed to start one
+    tracing::info!("No pipeline running. Starting '{}'", pipeline_id);
 
     let config_path = {
         let pipelines = state.pipelines.lock().unwrap();
@@ -115,7 +139,7 @@ pub async fn start_pipeline_handler(
     let mut registry = StageRegistry::new();
     pipeline::stages::register_builtin_stages(&mut registry);
 
-    let graph = match PipelineGraph::build(&config, &registry, event_tx, None) {
+    let graph = match PipelineGraph::build(&config, &registry, event_tx, None, &None) {
         Ok(g) => g,
         Err(e) => {
             return (
@@ -126,16 +150,17 @@ pub async fn start_pipeline_handler(
         }
     };
 
-    let (executor, input_tx) = Executor::new(graph);
+    let (executor, input_tx, fatal_error_rx) = Executor::new(graph);
 
-    let mut handle = state.pipeline_handle.lock().unwrap();
     *handle = Some(PipelineHandle {
+        id: pipeline_id.clone(),
         executor: Some(executor),
         input_tx,
     });
 
     // Spawn a task to forward pipeline events to SSE clients
     let sse_tx = state.sse_tx.clone();
+    let sse_tx_clone = sse_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
             let event_json = match serde_json::to_string(&event) {
@@ -145,11 +170,43 @@ pub async fn start_pipeline_handler(
                     continue;
                 }
             };
-            
-            if let Err(e) = sse_tx.send(event_json) {
-                tracing::warn!("Failed to send SSE event: {}", e);
-                // If sending fails, it's likely because there are no subscribers
-                // We can continue, as new subscribers will receive future events
+
+            if sse_tx_clone.send(event_json).is_err() {
+                // This is not critical, just means no one is listening
+            }
+        }
+    });
+
+    // Spawn a task to listen for fatal errors
+    let pipeline_handle_clone = state.pipeline_handle.clone();
+    tokio::spawn(async move {
+        if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
+            tracing::error!("Fatal pipeline error detected. Shutting down.");
+
+            // Attempt to extract a string from the panic payload
+            let error_msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
+                s.to_string()
+            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic payload".to_string()
+            };
+
+            // Stop the pipeline
+            if let Some(mut handle) = pipeline_handle_clone.lock().unwrap().take() {
+                if let Some(executor) = handle.executor.take() {
+                    executor.stop();
+                }
+            }
+
+            // Broadcast the failure event
+            let event = PipelineEvent::PipelineFailed {
+                error: error_msg,
+            };
+            if let Ok(event_json) = serde_json::to_string(&event) {
+                if sse_tx.send(event_json).is_err() {
+                    tracing::warn!("Failed to send pipeline failure SSE event.");
+                }
             }
         }
     });
@@ -255,10 +312,36 @@ use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 pub async fn sse_handler(
     State(state): State<AppState>,
 ) -> Sse<impl Stream<Item = Result<Event, BroadcastStreamRecvError>>> {
-    let stream =
+    let mut initial_events = Vec::new();
+
+    // Immediately send the current pipeline state if a pipeline is running
+    if let Some(handle) = &*state.pipeline_handle.lock().unwrap() {
+        if let Some(executor) = &handle.executor {
+            let config = executor.get_current_config();
+            let event = PipelineEvent::PipelineStarted {
+                id: handle.id.clone(),
+                config,
+            };
+            if let Ok(event_json) = serde_json::to_string(&event) {
+                initial_events.push(Ok(Event::default().data(event_json)));
+            }
+        }
+    }
+
+    // Also send the cached SourceReady event if it exists
+    if let Some(meta) = &*state.source_meta_cache.lock().unwrap() {
+        let event = PipelineEvent::SourceReady { meta: meta.clone() };
+        if let Ok(event_json) = serde_json::to_string(&event) {
+            initial_events.push(Ok(Event::default().data(event_json)));
+        }
+    }
+
+    let live_stream =
         tokio_stream::wrappers::BroadcastStream::new(state.sse_tx.subscribe()).map(|res| {
             res.map(|msg| Event::default().data(msg))
         });
+
+    let stream = stream::iter(initial_events).chain(live_stream);
 
     Sse::new(Box::pin(stream))
 }

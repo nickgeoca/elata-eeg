@@ -3,29 +3,8 @@ import path from 'path'; // Import the 'path' module
 
 const nextConfig: NextConfig = {
   /* config options here */
-  // Enable CORS for API routes
-  async headers() {
-    return [
-      {
-        // Apply these headers to all routes
-        source: '/(.*)',
-        headers: [
-          {
-            key: 'Access-Control-Allow-Origin',
-            value: '*',
-          },
-          {
-            key: 'Access-Control-Allow-Methods',
-            value: 'GET, POST, PUT, DELETE, OPTIONS',
-          },
-          {
-            key: 'Access-Control-Allow-Headers',
-            value: 'X-Requested-With, Content-Type, Accept',
-          },
-        ],
-      },
-    ];
-  },
+  // All proxying is now handled by the custom server in server.js.
+  // Only the webpack configuration for module resolution is needed here.
   webpack: (config, { buildId, dev, isServer, defaultLoaders, webpack }) => {
     // Add aliases for dependencies used by applet files outside the kiosk directory
     // This tells Webpack to resolve these modules to the specific paths

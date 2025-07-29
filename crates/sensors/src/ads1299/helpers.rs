@@ -14,7 +14,7 @@ pub fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {
 pub fn ch_raw_to_voltage(raw: i32, vref: f32, gain: f32) -> f32 {
     let voltage = ((raw as f64) * ((vref / gain) as f64) / (1 << 23) as f64) as f32;
     // Add detailed logging (using debug! instead of trace!)
-    debug!("ch_raw_to_voltage: raw={}, vref={}, gain={}, calculated_voltage={}", raw, vref, gain, voltage);
+    // debug!("ch_raw_to_voltage: raw={}, vref={}, gain={}, calculated_voltage={}", raw, vref, gain, voltage);
     voltage
 }
 

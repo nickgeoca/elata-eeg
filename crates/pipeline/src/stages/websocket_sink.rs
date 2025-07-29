@@ -69,7 +69,16 @@ fn default_addr() -> String {
 }
 
 fn accept_loop(addr: SocketAddr, clients: Arc<Mutex<Vec<Sender<String>>>>) {
-    let listener = TcpListener::bind(&addr).expect("Failed to bind");
+    let listener = match TcpListener::bind(&addr) {
+        Ok(listener) => listener,
+        Err(e) => {
+            warn!(
+                "Failed to bind WebSocket sink to address {}: {}. The sink will be disabled.",
+                addr, e
+            );
+            return;
+        }
+    };
     info!("WebSocket sink listening on: {}", addr);
     for stream in listener.incoming() {
         match stream {
@@ -94,10 +103,50 @@ fn handle_connection(stream: TcpStream, rx: Receiver<String>) {
         }
     };
 
-    for msg in rx {
-        if websocket.send(Message::Text(msg)).is_err() {
-            break;
+    // Set the stream to non-blocking mode. This is crucial.
+    if let Err(e) = websocket.get_mut().set_nonblocking(true) {
+        warn!("Failed to set non-blocking mode: {}", e);
+        return;
+    }
+
+    loop {
+        // Try to read a message from the client in a non-blocking way
+        match websocket.read() {
+            Ok(msg) => {
+                if msg.is_close() {
+                    break;
+                }
+                // Handle other messages if necessary (e.g., subscriptions)
+            }
+            Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // This is not an error, just means no message from the client right now.
+            }
+            Err(tungstenite::Error::ConnectionClosed) => {
+                break; // Cleanly exit if the client closes the connection
+            }
+            Err(e) => {
+                warn!("Error reading from WebSocket: {}", e);
+                break; // Exit on other errors
+            }
         }
+
+        // Check for outgoing messages from the pipeline without blocking
+        match rx.try_recv() {
+            Ok(msg) => {
+                if websocket.send(Message::Text(msg)).is_err() {
+                    break; // Exit if we can't send to the client
+                }
+            }
+            Err(flume::TryRecvError::Empty) => {
+                // No message from the pipeline, continue to the sleep.
+            }
+            Err(flume::TryRecvError::Disconnected) => {
+                break; // The pipeline has shut down
+            }
+        }
+
+        // Sleep to prevent the loop from spinning at 100% CPU.
+        thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 

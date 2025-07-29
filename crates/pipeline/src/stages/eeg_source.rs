@@ -12,12 +12,7 @@ use std::thread::{self, JoinHandle};
 
 use serde::Deserialize;
 
-use boards::elata_v1::driver::ElataV1Driver;
-use boards::elata_v2::driver::ElataV2Driver;
-use sensors::{
-    mock_eeg::driver::MockDriver,
-    types::{AdcConfig, AdcDriver, DriverError},
-};
+use sensors::types::{AdcConfig, AdcDriver, DriverError};
 
 use crate::config::StageConfig;
 use crate::data::{PacketData, PacketHeader, RtPacket};
@@ -25,7 +20,8 @@ use crate::error::StageError;
 use crate::registry::StageFactory;
 use eeg_types::data::SensorMeta;
 use crate::stage::{Stage, StageContext, StageInitCtx};
-use flume::Receiver;
+use crate::control::PipelineEvent;
+use flume::{Receiver, Sender};
 
 /// Factory for creating `EegSource` stages.
 #[derive(Default)]
@@ -40,10 +36,10 @@ impl StageFactory for EegSourceFactory {
         let params: EegSourceParams = serde_json::from_value(serde_json::to_value(&config.params)?)
             .map_err(|e| StageError::BadConfig(format!("Failed to parse EegSource params: {}", e)))?;
 
-        let driver = AdcDriverBuilder::new()
-            .with_driver_type(params.driver.driver_type)
-            .with_adc_config(params.driver.adc_config)
-            .build()?;
+        let driver = init_ctx
+            .driver
+            .clone()
+            .ok_or_else(|| StageError::BadConfig("Driver not available in context".to_string()))?;
 
         let (stage, rx) = EegSource::new(
             config.name.clone(),
@@ -51,22 +47,14 @@ impl StageFactory for EegSourceFactory {
             params.batch_size,
             params.outputs,
             init_ctx.allocator.clone(),
+            init_ctx.event_tx.clone(),
         )?;
         Ok((Box::new(stage), Some(rx)))
     }
 }
 
 #[derive(Debug, Deserialize)]
-struct DriverParams {
-    #[serde(rename = "type")]
-    driver_type: DriverType,
-    #[serde(flatten)]
-    adc_config: AdcConfig,
-}
-
-#[derive(Debug, Deserialize)]
 struct EegSourceParams {
-    driver: DriverParams,
     batch_size: usize,
     #[serde(default)]
     outputs: Vec<String>,
@@ -83,15 +71,15 @@ pub struct EegSource {
 impl EegSource {
     pub fn new(
         id: String,
-        driver: Box<dyn AdcDriver>,
+        driver: Arc<std::sync::Mutex<Box<dyn AdcDriver>>>,
         batch_size: usize,
         outputs: Vec<String>,
         allocator: crate::allocator::SharedPacketAllocator,
+        event_tx: Sender<PipelineEvent>,
     ) -> Result<(Self, Receiver<Arc<RtPacket>>), StageError> {
         let (packet_tx, packet_rx) = flume::bounded(128);
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
-        let driver = Arc::new(std::sync::Mutex::new(driver));
         let driver_clone = driver.clone();
         let output_name = format!(
             "{}.{}",
@@ -101,13 +89,20 @@ impl EegSource {
         let dropped_packets = Arc::new(AtomicUsize::new(0));
         let dropped_packets_clone = dropped_packets.clone();
 
+        let thread_id = id.clone();
         let handle = thread::Builder::new()
             .name(format!("{}_acq", id))
             .spawn(move || {
                 let mut driver = driver_clone.lock().unwrap();
-                driver.initialize().unwrap(); // Handle error properly
 
                 let config = driver.get_config().unwrap();
+
+                // Generate channel names based on their numbers, as the config only provides numbers.
+                let channel_names: Vec<String> = config
+                    .chips
+                    .iter()
+                    .flat_map(|chip| chip.channels.iter().map(|&c| format!("CH{}", c)))
+                    .collect();
 
                 let sensor_meta = SensorMeta {
                     sensor_id: 1, // Set appropriate sensor ID
@@ -120,11 +115,19 @@ impl EegSource {
                     sample_rate: config.sample_rate,
                     offset_code: 0,
                     is_twos_complement: true,
-                    channel_names: vec![], // Populate if available
+                    channel_names, // Use the extracted channel names
                     #[cfg(feature = "meta-tags")]
                     tags: HashMap::new(),
                 };
                 let sensor_meta = Arc::new(sensor_meta);
+
+                // EMIT THE SOURCE READY EVENT
+                let event = PipelineEvent::SourceReady {
+                    meta: (*sensor_meta).clone(),
+                };
+                if event_tx.send(event).is_err() {
+                    log::error!("Failed to send source ready event");
+                }
 
                 // Calculate total channels from all chips
                 let num_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
@@ -209,50 +212,6 @@ impl Drop for EegSource {
         self.stop_flag.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Clone, Copy)]
-pub enum DriverType {
-    ElataV1,
-    ElataV2,
-    Mock,
-}
-
-#[derive(Default)]
-pub struct AdcDriverBuilder {
-    driver_type: Option<DriverType>,
-    adc_config: Option<AdcConfig>,
-}
-
-impl AdcDriverBuilder {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn with_driver_type(mut self, driver_type: DriverType) -> Self {
-        self.driver_type = Some(driver_type);
-        self
-    }
-
-    pub fn with_adc_config(mut self, adc_config: AdcConfig) -> Self {
-        self.adc_config = Some(adc_config);
-        self
-    }
-
-    pub fn build(self) -> Result<Box<dyn AdcDriver>, DriverError> {
-        let driver_type = self.driver_type.ok_or_else(|| {
-            DriverError::ConfigurationError("Driver type must be specified".to_string())
-        })?;
-        let adc_config = self.adc_config.ok_or_else(|| {
-            DriverError::ConfigurationError("ADC config must be specified".to_string())
-        })?;
-
-        match driver_type {
-            DriverType::ElataV1 => Ok(Box::new(ElataV1Driver::new(adc_config).unwrap())),
-            DriverType::ElataV2 => Ok(Box::new(ElataV2Driver::new(adc_config).unwrap())),
-            DriverType::Mock => Ok(Box::new(MockDriver::new(adc_config).unwrap())),
         }
     }
 }
