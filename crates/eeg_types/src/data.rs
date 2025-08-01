@@ -96,6 +96,8 @@ pub struct PacketHeader {
     pub ts_ns: u64,
     /// The number of samples in the `samples` field of the `Packet`.
     pub batch_size: u32,
+    /// The number of channels in each sample.
+    pub num_channels: u32,
     /// A shared pointer to the immutable sensor metadata.
     #[serde(with = "arc_sensor_meta")]
     pub meta: Arc<SensorMeta>,

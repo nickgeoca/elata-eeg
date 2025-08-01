@@ -1,10 +1,11 @@
 // This file defines the shared data structures between the backend and frontend.
 
 export interface StageConfig {
-  plugin_id: string;
-  stage_id: string;
+  name: string;
+  type: string;
   params: any;
-  outputs: { [key: string]: string[] };
+  inputs: string[];
+  outputs: string[];
 }
 
 export interface SystemConfig {

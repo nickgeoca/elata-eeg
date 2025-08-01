@@ -1,31 +1,42 @@
 use axum::{
-    extract::{Path, State},
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        FromRef, Path, State,
+    },
     http::StatusCode,
     response::{sse::Event, IntoResponse, Json, Sse},
     routing::post,
     Router,
 };
-use futures::stream::{self, Stream};
+use futures::{
+    stream::{self, Stream, StreamExt},
+    SinkExt,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use flume::{Receiver, Sender};
-use eeg_types::data::SensorMeta;
-use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
-use std::{
-    collections::HashMap,
-    fs,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
 use tokio::sync::broadcast;
-
+use eeg_types::{comms::BrokerMessage, data::SensorMeta};
+use flume::Sender;
+use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
+use tokio::sync::Mutex;
 // Shared application state
+use crate::websocket_broker::WebSocketBroker;
+
 #[derive(Clone)]
 pub struct AppState {
     pub pipelines: Arc<Mutex<HashMap<String, PathBuf>>>,
     pub sse_tx: broadcast::Sender<String>,
     pub pipeline_handle: Arc<Mutex<Option<PipelineHandle>>>,
     pub source_meta_cache: Arc<Mutex<Option<SensorMeta>>>,
+    pub websocket_tx: flume::Sender<BrokerMessage>,
+    pub broker: Arc<WebSocketBroker>,
+}
+
+impl FromRef<AppState> for Arc<WebSocketBroker> {
+    fn from_ref(state: &AppState) -> Self {
+        state.broker.clone()
+    }
 }
 
 // Will hold the running pipeline's sender channel
@@ -62,7 +73,7 @@ pub async fn list_pipelines_handler(State(state): State<AppState>) -> Json<Value
                         state
                             .pipelines
                             .lock()
-                            .unwrap()
+                            .await
                             .insert(id.to_string(), file_path);
                     }
                 }
@@ -81,7 +92,7 @@ pub async fn start_pipeline_handler(
 ) -> impl IntoResponse {
     tracing::info!("Request to start pipeline: {}", pipeline_id);
 
-    let mut handle = state.pipeline_handle.lock().unwrap();
+    let mut handle = state.pipeline_handle.lock().await;
 
     // Check if a pipeline is already running
     if let Some(existing_handle) = &*handle {
@@ -106,7 +117,7 @@ pub async fn start_pipeline_handler(
     tracing::info!("No pipeline running. Starting '{}'", pipeline_id);
 
     let config_path = {
-        let pipelines = state.pipelines.lock().unwrap();
+        let pipelines = state.pipelines.lock().await;
         match pipelines.get(&pipeline_id) {
             Some(path) => path.clone(),
             None => return (StatusCode::NOT_FOUND, "Pipeline not found").into_response(),
@@ -139,7 +150,14 @@ pub async fn start_pipeline_handler(
     let mut registry = StageRegistry::new();
     pipeline::stages::register_builtin_stages(&mut registry);
 
-    let graph = match PipelineGraph::build(&config, &registry, event_tx, None, &None) {
+    let graph = match PipelineGraph::build(
+        &config,
+        &registry,
+        event_tx,
+        None,
+        &None,
+        Some(state.websocket_tx.clone()),
+    ) {
         Ok(g) => g,
         Err(e) => {
             return (
@@ -159,8 +177,7 @@ pub async fn start_pipeline_handler(
     });
 
     // Spawn a task to forward pipeline events to SSE clients
-    let sse_tx = state.sse_tx.clone();
-    let sse_tx_clone = sse_tx.clone();
+    let sse_tx_clone_for_event = state.sse_tx.clone();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
             let event_json = match serde_json::to_string(&event) {
@@ -171,14 +188,16 @@ pub async fn start_pipeline_handler(
                 }
             };
 
-            if sse_tx_clone.send(event_json).is_err() {
-                // This is not critical, just means no one is listening
+            if sse_tx_clone_for_event.send(event_json).is_err() {
+                // This can happen if there are no subscribers, which is fine.
+                tracing::debug!("No active SSE subscribers to send event to.");
             }
         }
     });
 
     // Spawn a task to listen for fatal errors
     let pipeline_handle_clone = state.pipeline_handle.clone();
+    let sse_tx_clone_for_fatal = state.sse_tx.clone();
     tokio::spawn(async move {
         if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
             tracing::error!("Fatal pipeline error detected. Shutting down.");
@@ -193,7 +212,7 @@ pub async fn start_pipeline_handler(
             };
 
             // Stop the pipeline
-            if let Some(mut handle) = pipeline_handle_clone.lock().unwrap().take() {
+            if let Some(mut handle) = pipeline_handle_clone.lock().await.take() {
                 if let Some(executor) = handle.executor.take() {
                     executor.stop();
                 }
@@ -204,7 +223,7 @@ pub async fn start_pipeline_handler(
                 error: error_msg,
             };
             if let Ok(event_json) = serde_json::to_string(&event) {
-                if sse_tx.send(event_json).is_err() {
+                if sse_tx_clone_for_fatal.send(event_json).is_err() {
                     tracing::warn!("Failed to send pipeline failure SSE event.");
                 }
             }
@@ -217,7 +236,7 @@ pub async fn start_pipeline_handler(
 pub async fn stop_pipeline_handler(State(state): State<AppState>) -> impl IntoResponse {
     tracing::info!("Stopping pipeline");
 
-    if let Some(mut handle) = state.pipeline_handle.lock().unwrap().take() {
+    if let Some(mut handle) = state.pipeline_handle.lock().await.take() {
         if let Some(executor) = handle.executor.take() {
             executor.stop();
         }
@@ -240,7 +259,7 @@ pub async fn update_pipeline_handler(
     tracing::info!("Updating pipeline: {}", pipeline_id);
 
     let path = {
-        let pipelines = state.pipelines.lock().unwrap();
+        let pipelines = state.pipelines.lock().await;
         match pipelines.get(&pipeline_id) {
             Some(path) => path.clone(),
             None => return (StatusCode::NOT_FOUND, "Pipeline not found").into_response(),
@@ -275,7 +294,7 @@ pub async fn control_handler(
 ) -> impl IntoResponse {
     tracing::info!("Received control command: {:?}", payload);
 
-    if let Some(ref mut handle) = *state.pipeline_handle.lock().unwrap() {
+    if let Some(ref mut handle) = *state.pipeline_handle.lock().await {
         if let Some(ref mut executor) = handle.executor {
             // Forward the control command to the executor
             if let Err(e) = executor.handle_control_command(&payload) {
@@ -293,7 +312,7 @@ pub async fn control_handler(
 
 pub async fn state_handler(State(state): State<AppState>) -> impl IntoResponse {
     tracing::info!("Fetching current state");
-    if let Some(handle) = &*state.pipeline_handle.lock().unwrap() {
+    if let Some(handle) = &*state.pipeline_handle.lock().await {
         if let Some(executor) = &handle.executor {
             let config = executor.get_current_config();
             Json(json!(config)).into_response()
@@ -305,17 +324,16 @@ pub async fn state_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-use tokio_stream::StreamExt;
 
-use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::wrappers::BroadcastStream;
 
 pub async fn sse_handler(
     State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, BroadcastStreamRecvError>>> {
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let mut initial_events = Vec::new();
 
     // Immediately send the current pipeline state if a pipeline is running
-    if let Some(handle) = &*state.pipeline_handle.lock().unwrap() {
+    if let Some(handle) = &*state.pipeline_handle.lock().await {
         if let Some(executor) = &handle.executor {
             let config = executor.get_current_config();
             let event = PipelineEvent::PipelineStarted {
@@ -323,32 +341,43 @@ pub async fn sse_handler(
                 config,
             };
             if let Ok(event_json) = serde_json::to_string(&event) {
-                initial_events.push(Ok(Event::default().data(event_json)));
+                initial_events.push(Event::default().data(event_json));
             }
         }
     }
 
     // Also send the cached SourceReady event if it exists
-    if let Some(meta) = &*state.source_meta_cache.lock().unwrap() {
+    if let Some(meta) = &*state.source_meta_cache.lock().await {
         let event = PipelineEvent::SourceReady { meta: meta.clone() };
         if let Ok(event_json) = serde_json::to_string(&event) {
-            initial_events.push(Ok(Event::default().data(event_json)));
+            initial_events.push(Event::default().data(event_json));
         }
     }
 
-    let live_stream =
-        tokio_stream::wrappers::BroadcastStream::new(state.sse_tx.subscribe()).map(|res| {
-            res.map(|msg| Event::default().data(msg))
-        });
+    let initial_stream = stream::iter(initial_events.into_iter().map(Ok));
+    let live_stream = BroadcastStream::new(state.sse_tx.subscribe()).filter_map(|res| async {
+        match res {
+            Ok(msg) => Some(Ok(Event::default().data(msg))),
+            Err(e) => {
+                tracing::error!("SSE broadcast stream error: {}", e);
+                None
+            }
+        }
+    });
 
-    let stream = stream::iter(initial_events).chain(live_stream);
+    let stream = initial_stream.chain(live_stream);
 
-    Sse::new(Box::pin(stream))
+    Sse::new(stream).keep_alive(
+        axum::response::sse::KeepAlive::new()
+            .interval(std::time::Duration::from_secs(15))
+            .text("keep-alive"),
+    )
 }
 
 use axum::routing::get;
+use std::convert::Infallible;
 
-pub fn create_router(state: AppState) -> Router {
+pub fn create_router() -> Router<AppState> {
     Router::new()
         .route("/api/pipelines", get(list_pipelines_handler))
         .route("/api/pipelines/:id/start", post(start_pipeline_handler))
@@ -357,5 +386,4 @@ pub fn create_router(state: AppState) -> Router {
         .route("/api/control", post(control_handler))
         .route("/api/state", get(state_handler))
         .route("/api/events", get(sse_handler))
-        .with_state(state)
 }

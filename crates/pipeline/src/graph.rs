@@ -7,11 +7,13 @@ use crate::data::{PacketOwned, RtPacket};
 use crate::error::{PipelineError, StageError};
 use crate::registry::StageRegistry;
 use crate::stage::{DefaultPolicy, Stage, StageContext, StagePolicy, StageState};
-use flume::Receiver;
+use eeg_types::comms::BrokerMessage;
+use flume::{Receiver, Sender};
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use sensors::types::AdcDriver;
 
@@ -54,6 +56,7 @@ impl PipelineGraph {
         event_tx: flume::Sender<crate::control::PipelineEvent>,
         allocator: Option<SharedPacketAllocator>,
         driver: &Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
+        websocket_sender: Option<Sender<BrokerMessage>>,
     ) -> Result<Self, StageError> {
         let mut nodes = HashMap::new();
         let allocator = allocator
@@ -67,10 +70,30 @@ impl PipelineGraph {
                 )));
             }
 
+            let sample_rate = config
+                .stages
+                .iter()
+                .find(|s| s.stage_type == "eeg_source")
+                .and_then(|s| s.params.get("driver"))
+                .and_then(|d| d.get("sample_rate"))
+                .and_then(|sr| sr.as_f64())
+                .unwrap_or(250.0);
+
+            let sample_rate = config
+                .stages
+                .iter()
+                .find(|s| s.stage_type == "eeg_source")
+                .and_then(|s| s.params.get("driver"))
+                .and_then(|d| d.get("sample_rate"))
+                .and_then(|sr| sr.as_f64())
+                .unwrap_or(250.0);
+
             let init_ctx = crate::stage::StageInitCtx {
                 event_tx: &event_tx,
                 allocator: &allocator,
                 driver,
+                sample_rate,
+                websocket_sender: websocket_sender.clone(),
             };
 
             let (stage, producer_rx) = registry.create_stage(stage_config, &init_ctx)?;

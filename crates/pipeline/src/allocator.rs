@@ -22,6 +22,7 @@ pub struct PacketAllocator {
 macro_rules! define_recycled_vec {
     ($name:ident, $type:ty, $pool:ident) => {
         #[derive(Debug)]
+        #[derive(Clone)]
         pub struct $name {
             vec: Vec<$type>,
             allocator: SharedPacketAllocator,

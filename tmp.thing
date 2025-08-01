@@ -1,0 +1,92 @@
+......... Feedback 1
+The crates directory contains several Rust crates (e.g., pipeline, daemon, sensors). The codebase currently offers WebSocket functionality through the pipeline crate’s websocket_sink stage and the (historical) daemon server described in ai_prompt.md. However, a significant portion of the networking layer is currently missing—daemon/src/server.rs has been removed, and there are to‑do items about redesigning the web interface.
+Architecture Plans in the Repository
+
+The document todo/web_ui_control_plane_architecture.md outlines a central “Web Server (Axum)” that manages both WebSockets and HTTP API endpoints. This plan proposes:
+
+    Running a single server inside the daemon that exposes WebSocket hubs and HTTP routes.
+
+    Refactoring websocket_sink so it forwards data to this hub rather than running its own server.
+
+    Adding HTTP endpoints to manage the pipeline (e.g., POST /api/pipeline/load, GET /api/pipeline/status).
+
+Relevant excerpt:
+
+subgraph "Daemon Process"
+    subgraph "Central Web Server (Axum)"
+        WS_Hub[WebSocket Hub]
+    end
+...
+- [ ] **Decision: Adopt Centralized Web Server:** Formally adopt the architecture where a single web server runs inside the daemon, managing all API and WebSocket traffic.
+- [ ] **Task: Add Web Server Dependencies:** Add `tokio`, `axum`, and `tower-http` to the `crates/daemon/Cargo.toml` and remove the old `warp` dependency.
+- [ ] **Task: Define Pipeline Control API:** Design and implement HTTP endpoints (e.g., `POST /api/pipeline/load`, `GET /api/pipeline/status`) for the web UI to manage the pipeline.
+
+Another document, todo/pipeline_integrate.md, explains why networking should live in the daemon crate and not inside the pure DSP pipeline:
+
+| Accepting WebSocket/TCP clients, auth, TLS, JSON RPC | OS sockets, Tokio runtime, logging, metrics | **device** |
+Trying to push [this] up into `pipeline` forces that crate to depend on network, TLS, HTTP upgrades, logging, etc. The core DSP code becomes un-testable on bare-metal and impossible to embed later.
+
+Conclusion
+
+Given these documents, the project intends to run a central Axum-based server that provides both WebSocket streams for real-time EEG data and HTTP endpoints for configuration and control. A WebSocket-only approach would omit the REST-style management API and reduce flexibility. The design rationale is:
+
+    Separation of Concerns – Keep the core pipeline free of networking dependencies.
+
+    Extensibility – Provide HTTP endpoints for pipeline management and introspection.
+
+    Single Web Server – Centralize security and connection handling rather than embedding WebSocket servers in individual stages.
+
+Therefore, implementing a WebSocket/HTTP hybrid (as outlined in the docs) is recommended. It allows real-time streaming over WebSockets while exposing management capabilities through HTTP, aligning with the planned architecture
+
+......... Feedback 2
+The Rust crates mostly rely on WebSockets for real‑time data exchange.
+kiosk/ai_prompt.md describes WebSocket endpoints /eeg, /config, and /command, noting that the Kiosk sends commands and receives updates through these channels
+.
+The pipeline crate implements a WebSocket sink to broadcast data, as shown in websocket_sink.rs where it accepts TCP connections and streams messages to each client
+
+.
+
+However, the frontend also exposes HTTP routes for tasks like listing or downloading CSV recording files. The route handler kiosk/src/app/api/recordings/route.ts demonstrates this HTTP usage
+
+.
+Should it be pure WebSockets or hybrid?
+
+    Real-time streaming and configuration – These rely on frequent, low‑latency updates and are already handled over WebSockets. Using HTTP here would force polling or long-lived requests, so WebSockets make sense.
+
+    Static or infrequent operations – Listing and serving recording files via HTTP is simpler and leverages standard browser behavior for downloads. Implementing file transfer over WebSockets would add complexity with little benefit.
+
+Because the codebase already uses WebSockets for live data and HTTP for occasional file access, a WebSocket/HTTP hybrid aligns with how the project currently operates. WebSockets cover the real-time, bidirectional traffic, while HTTP handles simpler, request/response tasks such as serving recorded files. A purely WebSocket solution would complicate these simpler interactions without improving the real-time streaming.
+
+
+........ Feedback 3
+
+The repository’s TODO documentation clarifies the intended direction. In todo/web_ui_control_plane_architecture.md, the implementation plan explicitly calls for a central web server that manages both WebSocket traffic and HTTP endpoints:
+
+70-82  ... a single web server runs inside the daemon, managing all API and WebSocket traffic.
+76      -   [ ] **Decision: Adopt Centralized Web Server**
+77      -   [ ] **Task: Add Web Server Dependencies:** Add `tokio`, `axum`, and `tower-http`...
+78      -   [ ] **Task: Create Central Web Server:** Implement the Axum web server...
+79      -   [ ] **Task: Create WebSocket Hub:** ...
+80      -   [ ] **Task: Refactor `websocket_sink` Stage:** ...
+81      -   [ ] **Task: Integrate Web Server into Daemon:** ...
+82      -   [ ] **Task: Define Pipeline Control API:** Design and implement HTTP endpoints...
+
+Another document explains why connection management belongs in the daemon (device) layer rather than directly inside the pipeline:
+
+136-152 | Accepting WebSocket/TCP clients ... | **device** | ...
+141     Trying to push the bold row *up* (into `pipeline`) forces that crate to depend on network,
+        TLS, HTTP upgrades, logging, etc. The core DSP code becomes un-testable on bare-metal...
+...
+147-150  Reasons: single security boundary, Tokio containment, deployment flexibility, etc.
+
+This suggests keeping the DSP pipeline free of direct network dependencies and placing network handling (WebSockets plus HTTP control API) in the daemon layer.
+
+Conclusion
+
+Implementing a WebSocket/HTTP hybrid aligns with the repository’s architectural plan:
+
+    Use WebSockets for real‑time EEG data streaming to the UI.
+
+    Provide HTTP endpoints for configuration and pipeline control.
+
+A pure WebSocket design would blur these layers, forcing the core pipeline to depend on network code and reducing flexibility. The hybrid approach keeps the DSP pipeline portable and testable while still offering real‑time data over WebSockets and a clear control plane via HTTP.

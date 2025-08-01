@@ -22,7 +22,7 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
 
     const signalGraphBuffer = useDataBuffer<SampleChunk>();
 
-  const { subscribeRaw, subscribe, unsubscribe, fftData, fullFftPacket } = useEegData();
+  const { subscribeRaw, fftData, fullFftPacket } = useEegData();
 
   // Effect for all data subscriptions
   useEffect(() => {
@@ -42,7 +42,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
       });
     } else if (activeView === 'appletBrainWaves') {
       console.log('[Visualizer] Subscribing to Fft');
-      subscribe(['Fft']);
       isSubscribedToFft = true;
       setViewReadyState(s => ({ ...s, appletBrainWaves: true }));
     }
@@ -55,10 +54,9 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
       }
       if (isSubscribedToFft) {
         console.log('[Visualizer] Unsubscribing from Fft');
-        unsubscribe(['Fft']);
       }
     };
-  }, [activeView, subscribeRaw, unsubscribe, subscribe, signalGraphBuffer]);
+  }, [activeView, subscribeRaw, signalGraphBuffer]);
 
   // Effect to setup ResizeObserver
   useLayoutEffect(() => {
@@ -106,14 +104,16 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
             )
           )}
 
-          {activeView === 'appletBrainWaves' && (
-            <FftRenderer
-              data={fullFftPacket as any}
-              isActive={activeView === 'appletBrainWaves'}
-              containerWidth={containerSize.width}
-              containerHeight={containerSize.height}
-            />
-          )}
+          {activeView === 'appletBrainWaves' &&
+            fullFftPacket &&
+            fullFftPacket.psd_packets && (
+              <FftRenderer
+                data={fullFftPacket}
+                isActive={activeView === 'appletBrainWaves'}
+                containerWidth={containerSize.width}
+                containerHeight={containerSize.height}
+              />
+            )}
         </>
       ) : (
         <div className="absolute inset-0 flex items-center justify-center text-gray-400">

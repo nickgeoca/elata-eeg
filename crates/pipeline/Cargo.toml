@@ -9,7 +9,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 slab = "0.4"
-flume = { workspace = true }
+flume = "0.11.0"
 core_affinity = "0.8"
 log = { workspace = true }
 thiserror = "1.0"
@@ -21,10 +21,10 @@ inventory = "0.3"
 petgraph = "0.6" # For topological sort
 rtrb = { version = "0.2", optional = true } # Real-time ring buffer
 loom = { version = "0.7", optional = true } # For concurrency testing
-tungstenite = "0.21"
 eeg_types = { path = "../eeg_types" }
 sensors = { path = "../sensors", features = ["mock_eeg"] }
 boards = { path = "../boards", features = ["elata_v1", "elata_v2"] }
+byteorder = "1.4.3"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

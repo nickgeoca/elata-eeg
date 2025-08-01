@@ -3,3 +3,6 @@ pub mod config;
 pub mod driver_handler;
 pub mod pid_manager;
 pub mod plugin_supervisor;
+pub mod websocket_broker;
+pub mod api;
+pub mod server;

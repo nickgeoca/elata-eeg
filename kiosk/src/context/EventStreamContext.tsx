@@ -3,7 +3,16 @@
 import { createContext, useContext, useEffect, useState, useCallback, useMemo, useRef } from 'react';
 
 // Define the types for the events based on the API documentation
-type EventType = 'pipeline_state' | 'parameter_update' | 'error' | 'info' | 'data_update' | 'PipelineFailed';
+type EventType =
+  | 'pipeline_state'
+  | 'parameter_update'
+  | 'error'
+  | 'info'
+  | 'data_update'
+  | 'PipelineFailed'
+  | 'FilteredEeg'
+  | 'Fft'
+  | 'SourceReady';
 
 interface PipelineStateEvent {
   type: 'pipeline_state';
@@ -53,9 +62,7 @@ interface DataUpdateEvent {
 
 interface SourceReadyEvent {
   type: 'SourceReady';
-  data: {
-    meta: Record<string, any>;
-  };
+  data: Record<string, any>;
 }
 
 interface PipelineFailedEvent {
@@ -65,7 +72,26 @@ interface PipelineFailedEvent {
   };
 }
 
-type EventData = PipelineStateEvent | ParameterUpdateEvent | ErrorEvent | InfoEvent | DataUpdateEvent | SourceReadyEvent | PipelineFailedEvent;
+interface FilteredEegEvent {
+  type: 'FilteredEeg';
+  data: any; // Base64 encoded binary data
+}
+
+interface FftEvent {
+  type: 'Fft';
+  data: any;
+}
+
+type EventData =
+  | PipelineStateEvent
+  | ParameterUpdateEvent
+  | ErrorEvent
+  | InfoEvent
+  | DataUpdateEvent
+  | SourceReadyEvent
+  | PipelineFailedEvent
+  | FilteredEegEvent
+  | FftEvent;
 
 interface EventStreamContextType {
   events: EventData[];
@@ -93,7 +119,7 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const webSocketRef = useRef<WebSocket | null>(null);
 
   const addEvent = useCallback((event: EventData) => {
     setEvents(prevEvents => [...prevEvents, event]);
@@ -103,85 +129,78 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
     setEvents([]);
   }, []);
 
+  const disconnect = useCallback(() => {
+    if (webSocketRef.current) {
+      console.log('[EventStream] Disconnecting from WebSocket endpoint');
+      webSocketRef.current.close();
+      webSocketRef.current = null;
+      setIsConnected(false);
+    }
+  }, []);
+
   const connect = useCallback(() => {
-    // Prevent multiple connections
-    if (eventSourceRef.current) {
+    if (webSocketRef.current) {
       return;
     }
 
-    // The URL should be relative to the current host, so it's correctly
-    // proxied by the Next.js development server.
-    const url = `/api/events`;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const url = `${protocol}//${host}/ws`;
 
-    console.log('[EventStream] Connecting to SSE endpoint:', url);
-    setFatalError(null); // Clear fatal error on new connection attempt
+    console.log('[EventStream] Connecting to WebSocket endpoint:', url);
+    setFatalError(null);
 
-    const eventSource = new EventSource(url);
-    eventSourceRef.current = eventSource;
+    const newWebSocket = new WebSocket(url);
+    webSocketRef.current = newWebSocket;
 
-    eventSource.onopen = () => {
-      console.log('[EventStream] Connection established');
+    newWebSocket.onopen = () => {
+      console.log('[EventStream] WebSocket connection established');
       setIsConnected(true);
       setError(null);
+      const subscriptionMessage = {
+        subscribe: "eeg_voltage"
+      };
+      newWebSocket.send(JSON.stringify(subscriptionMessage));
     };
 
-    eventSource.onmessage = (event) => {
+    newWebSocket.onmessage = (event) => {
       try {
         const parsedData = JSON.parse(event.data);
-        // The event is an object with a single key which is the event type
         const eventType = Object.keys(parsedData)[0];
         const eventPayload = parsedData[eventType];
         const eventData = { type: eventType, data: eventPayload } as EventData;
-        console.log('[EventStream] Received event:', eventData);
+
         if (eventData.type === 'PipelineFailed') {
           console.error(`[EventStream] Fatal pipeline error: ${eventData.data.error}`);
           setFatalError(eventData.data.error);
-          disconnect(); // Stop trying to reconnect
+          disconnect();
         } else {
           addEvent(eventData);
         }
       } catch (err) {
         console.error('[EventStream] Error parsing event data:', err);
-        addEvent({
-          type: 'error',
-          data: {
-            message: `Failed to parse event data: ${err instanceof Error ? err.message : String(err)}`
-          }
-        });
       }
     };
 
-    eventSource.onerror = (err) => {
-      console.error('[EventStream] EventSource error:', err);
-      setError('Connection to event stream failed');
+    newWebSocket.onerror = (err) => {
+      console.error('[EventStream] WebSocket error:', err);
+      setError('WebSocket connection failed. Retrying...');
       setIsConnected(false);
-      // Don't set eventSourceRef.current to null here - let disconnect handle cleanup
     };
 
-  }, [addEvent]);
-
-  const disconnect = useCallback(() => {
-    if (eventSourceRef.current) {
-      console.log('[EventStream] Disconnecting from SSE endpoint');
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    newWebSocket.onclose = () => {
+      console.log('[EventStream] WebSocket connection closed. Attempting to reconnect...');
       setIsConnected(false);
-      setError(null);
-    }
-  }, []);
+      setTimeout(connect, 5000); // Reconnect after 5 seconds
+    };
+  }, [addEvent, disconnect]);
 
-  // Clean up on unmount
   useEffect(() => {
+    connect();
     return () => {
       disconnect();
     };
-  }, [disconnect]);
-
-  // Auto-connect on mount
-  useEffect(() => {
-    connect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [connect, disconnect]);
 
   const value = useMemo(() => ({
     events,

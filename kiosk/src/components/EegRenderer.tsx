@@ -43,6 +43,13 @@ export const EegRenderer = React.memo(function EegRenderer({
   uiVoltageScaleFactor,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // Render a blank canvas if the component is not active or if configuration is missing,
+  // preventing crashes from accessing properties on undefined objects.
+  if (!isActive || !config?.channels?.length) {
+    return <canvas ref={canvasRef} className="w-full h-full" />;
+  }
+
   const glRef     = useRef<WebGLRenderingContext | null>(null);
   const program   = useRef<WebGLProgram | null>(null);
   const location  = useRef<{
@@ -104,7 +111,7 @@ export const EegRenderer = React.memo(function EegRenderer({
       vbos.current = []; cpuY.current = [];
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isActive]); // ← run once while active
+  }, [isActive, NCH, NPTS]);
 
   /* ---------- resize --------- */
   useEffect(() => {
@@ -128,11 +135,18 @@ export const EegRenderer = React.memo(function EegRenderer({
     const draw = () => {
       // 1. ingest new EEG samples and shift data
       const chunks = dataBuffer.getAndClearData();
+      // Process all available chunks to keep the visualization as real-time as possible,
+      // but be mindful of performance. The underlying data handling should be efficient.
       if (chunks.length > 0) {
         const batches: number[][] = Array.from({ length: NCH }, () => []);
-        chunks.forEach(chk =>
-          chk.samples.forEach(s => batches[s.channelIndex].push(s.value))
-        );
+        chunks.forEach(chk => {
+          // Ensure the chunk has samples and the first sample has a valid channelIndex
+          if (chk.samples.length > 0 && chk.samples[0].channelIndex < NCH) {
+            const channelIndex = chk.samples[0].channelIndex;
+            const values = chk.samples.map(s => s.value);
+            batches[channelIndex].push(...values);
+          }
+        });
 
         for (let ch = 0; ch < NCH; ch++) {
           if (!batches[ch].length) continue;

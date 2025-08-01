@@ -1,6 +1,6 @@
 //! Converts raw i32 ADC samples into f32 voltage values.
 
-use crate::allocator::RecycledI32F32TupleVec;
+use crate::allocator::RecycledF32Vec;
 use crate::config::StageConfig;
 use crate::data::{PacketData, PacketView, RtPacket};
 use crate::error::StageError;
@@ -63,37 +63,30 @@ impl Stage for ToVoltage {
         pkt: Arc<RtPacket>,
         ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
-        let source_id = match &*pkt {
-            RtPacket::RawI32(d) => &d.header.source_id,
-            RtPacket::Voltage(d) => &d.header.source_id,
-            RtPacket::RawAndVoltage(d) => &d.header.source_id,
-        };
-        // tracing::info!("to_voltage received packet with source_id: {}", source_id);
-        let view = PacketView::from(&*pkt);
+        match PacketView::from(&*pkt) {
+            PacketView::RawI32 { header, data } => {
+                log::info!("to_voltage processing {} raw samples", data.len());
+                let gain = header.meta.gain;
+                let v_ref = header.meta.v_ref;
 
-        if let PacketView::RawI32 { header, data } = view {
-            // Extract gain from packet metadata instead of using self.gain
-            let gain = header.meta.gain;
-            let v_ref = header.meta.v_ref;
+                let mut voltage_samples =
+                    RecycledF32Vec::with_capacity(ctx.allocator.clone(), data.len());
 
-            let mut samples_both =
-                RecycledI32F32TupleVec::with_capacity(ctx.allocator.clone(), data.len());
+                for &raw_sample in data.iter() {
+                    let voltage = ch_raw_to_voltage(raw_sample, v_ref, gain);
+                    voltage_samples.push(voltage);
+                }
 
-            for &raw_sample in data.iter() {
-                let voltage = ch_raw_to_voltage(raw_sample, v_ref, gain);
-                samples_both.push((raw_sample, voltage));
+                let mut output_packet = PacketData {
+                    header: header.clone(),
+                    samples: voltage_samples,
+                };
+                output_packet.header.source_id = self.output_name.clone();
+
+                Ok(Some(Arc::new(RtPacket::Voltage(output_packet))))
             }
-
-            let mut output_packet = PacketData {
-                header: header.clone(),
-                samples: samples_both,
-            };
-            output_packet.header.source_id = self.output_name.clone();
-
-            return Ok(Some(Arc::new(RtPacket::RawAndVoltage(output_packet))));
+            // If the packet is not RawI32, pass it through.
+            _ => Ok(Some(pkt)),
         }
-
-        // If the packet is not RawI32, pass it through.
-        Ok(Some(pkt))
     }
 }

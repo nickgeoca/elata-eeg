@@ -1,11 +1,12 @@
 use std::{
     collections::HashMap,
     fs,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use adc_daemon::plugin_supervisor::PluginSupervisor;
-use api::{AppState, PipelineHandle};
+use adc_daemon::websocket_broker::WebSocketBroker;
+use adc_daemon::api::{AppState, PipelineHandle};
 use clap::{Arg, Command};
 use pipeline::config::SystemConfig;
 use pipeline::control::PipelineEvent;
@@ -17,11 +18,8 @@ use sensors::{
 use boards::elata_v2::driver::ElataV2Driver;
 use pipeline::graph::PipelineGraph;
 use pipeline::registry::StageRegistry;
-use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-mod api;
-mod server;
 
 #[tokio::main]
 async fn main() -> Result<(), DriverError> {
@@ -48,14 +46,19 @@ async fn main() -> Result<(), DriverError> {
         .get_matches();
 
     // --- Centralized State ---
-    let (sse_tx, _) = broadcast::channel(100);
+    let (sse_tx, _) = tokio::sync::broadcast::channel(256);
     let (event_tx, event_rx) = flume::bounded(100);
+    let (ws_tx, ws_rx) = flume::unbounded();
+    let broker = Arc::new(WebSocketBroker::new(ws_rx));
+    tokio::spawn(broker.clone().run());
 
     let app_state = AppState {
-        pipelines: Arc::new(Mutex::new(HashMap::new())),
+        pipelines: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         sse_tx: sse_tx.clone(),
-        pipeline_handle: Arc::new(Mutex::new(None)),
-        source_meta_cache: Arc::new(Mutex::new(None)),
+        pipeline_handle: Arc::new(tokio::sync::Mutex::new(None)),
+        source_meta_cache: Arc::new(tokio::sync::Mutex::new(None)),
+        websocket_tx: ws_tx,
+        broker,
     };
 
     // --- Plugin Supervisor ---
@@ -71,14 +74,27 @@ async fn main() -> Result<(), DriverError> {
 
     // --- Driver Initialization ---
     let use_mock = matches.get_flag("mock");
-    let driver: Option<Arc<Mutex<Box<dyn AdcDriver>>>> = if use_mock {
+    let eeg_source_config = initial_config
+        .stages
+        .iter()
+        .find(|s| s.stage_type == "eeg_source")
+        .expect("No eeg_source stage found in config");
+
+    let driver_type = eeg_source_config
+        .params
+        .get("driver")
+        .and_then(|d| d.get("type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("Mock");
+
+    let driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver>>>> = if use_mock || driver_type == "Mock" {
         tracing::info!("Using mock EEG driver");
         let adc_config = AdcConfig::default(); // Use default for mock
-        Some(Arc::new(Mutex::new(Box::new(MockDriver::new(adc_config).unwrap()))))
+        Some(Arc::new(std::sync::Mutex::new(Box::new(MockDriver::new(
+            adc_config,
+        )?))))
     } else {
         tracing::info!("Using ElataV2 hardware driver");
-        // The AdcConfig should be sourced from a dedicated hardware configuration file
-        // or have a sensible default. For now, we'll use a default config.
         let adc_config = AdcConfig {
             chips: vec![
                 sensors::types::ChipConfig {
@@ -96,18 +112,25 @@ async fn main() -> Result<(), DriverError> {
         };
         let mut driver_instance = ElataV2Driver::new(adc_config)?;
         driver_instance.initialize()?;
-        Some(Arc::new(Mutex::new(Box::new(driver_instance))))
+        Some(Arc::new(std::sync::Mutex::new(Box::new(driver_instance))))
     };
 
 
-    let graph =
-        PipelineGraph::build(&initial_config, &registry, event_tx.clone(), None, &driver).unwrap();
+    let graph = PipelineGraph::build(
+        &initial_config,
+        &registry,
+        event_tx.clone(),
+        None,
+        &driver,
+        Some(app_state.websocket_tx.clone()),
+    )
+    .unwrap();
 
     let (executor, input_tx, fatal_error_rx) = Executor::new(graph);
     tracing::info!("Default pipeline executor started.");
 
     // Store the handle to the running pipeline
-    *app_state.pipeline_handle.lock().unwrap() = Some(PipelineHandle {
+    *app_state.pipeline_handle.lock().await = Some(PipelineHandle {
         id: "default".to_string(),
         executor: Some(executor),
         input_tx,
@@ -128,7 +151,7 @@ async fn main() -> Result<(), DriverError> {
                 "Unknown panic payload".to_string()
             };
 
-            if let Some(mut handle) = pipeline_handle_clone.lock().unwrap().take() {
+            if let Some(mut handle) = pipeline_handle_clone.lock().await.take() {
                 if let Some(executor) = handle.executor.take() {
                     executor.stop();
                 }
@@ -139,7 +162,7 @@ async fn main() -> Result<(), DriverError> {
             };
             if let Ok(event_json) = serde_json::to_string(&event) {
                 if sse_tx_clone.send(event_json).is_err() {
-                    tracing::warn!("Failed to send pipeline failure SSE event.");
+                    tracing::warn!("Failed to send pipeline failure SSE event: receiver disconnected.");
                 }
             }
         }
@@ -153,14 +176,16 @@ async fn main() -> Result<(), DriverError> {
             // If this is the source ready event, cache its metadata
             if let PipelineEvent::SourceReady { meta } = &event {
                 tracing::debug!("Caching SourceReady event metadata");
-                let mut cache = event_forwarding_state.source_meta_cache.lock().unwrap();
+                let mut cache = event_forwarding_state.source_meta_cache.lock().await;
                 *cache = Some(meta.clone());
             }
 
             if let Ok(event_json) = serde_json::to_string(&event) {
-                if sse_tx.send(event_json).is_err() {
-                    tracing::warn!("Failed to send SSE event: no active subscribers");
+                // Send to SSE clients
+                if event_forwarding_state.sse_tx.send(event_json.clone()).is_err() {
+                    tracing::debug!("No active SSE subscribers to send event to.");
                 }
+
             } else {
                 tracing::error!("Failed to serialize pipeline event");
             }
@@ -169,19 +194,24 @@ async fn main() -> Result<(), DriverError> {
     });
 
     // --- Server Thread ---
-    let server_handle = tokio::spawn(server::run(app_state.clone()));
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server_handle =
+        tokio::spawn(adc_daemon::server::run(app_state.clone(), shutdown_rx));
 
     // --- Graceful Shutdown ---
     tokio::signal::ctrl_c().await.map_err(|e| DriverError::IoError(e.to_string()))?;
     tracing::info!("Shutdown signal received. Stopping services...");
 
-    if let Some(mut handle) = app_state.pipeline_handle.lock().unwrap().take() {
+    if let Some(mut handle) = app_state.pipeline_handle.lock().await.take() {
         if let Some(executor) = handle.executor.take() {
             executor.stop();
         }
     }
 
-    server_handle.abort();
+    // Signal the server to shut down
+    let _ = shutdown_tx.send(());
+    // Wait for the server to shut down
+    server_handle.await.unwrap().unwrap();
     tracing::info!("EEG Daemon stopped gracefully.");
 
     Ok(())

@@ -60,7 +60,7 @@ export const getPipelineState = async () => {
  */
 export const stopPipeline = async () => {
   try {
-    const response = await fetch(`/api/pipeline/stop`, {
+    const response = await fetch(`/api/pipelines/stop`, {
       method: 'POST',
     });
     if (!response.ok) {

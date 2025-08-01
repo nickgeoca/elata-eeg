@@ -2,9 +2,8 @@
 import React from 'react'; // Added to resolve React.Fragment error
 
 import { useRef, useState, useEffect, useContext } from 'react';
-import { useEegConfig } from './EegConfig';
-import EegRecordingControls from './EegRecordingControls'; // Import the actual controls
-import { useCommandWebSocket } from '../context/CommandWebSocketContext';
+import EegRecordingControls from './EegRecordingControls';
+import { useCommand } from '../context/CommandWebSocketContext';
 import { useEegData } from '../context/EegDataContext';
 import { useEventStream } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
@@ -24,10 +23,9 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get all data and config from the new central context
-  const { config, setConfig, dataStatus } = useEegData();
+  const { config, dataStatus } = useEegData();
   const { dataReceived, driverError, wsStatus } = dataStatus;
-  const { status: configStatus, refreshConfig } = useEegConfig(); // Keep for settings UI
-  const { fatalError } = useEventStream(); // Get fatal error from EventStreamContext
+  const { fatalError } = useEventStream();
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -48,18 +46,11 @@ export default function EegMonitorWebGL() {
     }
   }, [config]);
 
-  const { sendPowerlineFilterCommand } = useCommandWebSocket(); // Keep for potential direct use if needed
- 
-   const { ws: commandWs } = useCommandWebSocket(); // Get the command WebSocket
+  const { sendPowerlineFilterCommand, startRecording, stopRecording, recordingStatus, recordingFilePath } = useCommand();
 
   const handleUpdateConfig = () => {
     // In the new API, configuration updates are sent via POST /api/control
     // We'll use the existing command WebSocket for now, but this should eventually use HTTP
-    if (!commandWs || commandWs.readyState !== WebSocket.OPEN) {
-      console.error('Command WebSocket not connected or not ready.');
-      setConfigUpdateStatus('Error: Command service not connected. Cannot send update.');
-      return;
-    }
 
     if (recordingStatus.startsWith('Currently recording')) {
         setConfigUpdateStatus('Cannot change configuration during recording.');
@@ -128,17 +119,13 @@ export default function EegMonitorWebGL() {
     setConfigUpdateStatus('Sending configuration update...');
     // Send the configuration update via the command WebSocket
     // In a full implementation, this would be a POST /api/control request
-    commandWs.send(JSON.stringify(newConfigPayload));
+    // This should be replaced with a proper API call
+    // sendControlCommand(newConfigPayload);
+    console.warn("Configuration updates via WebSocket are deprecated. Please update to use POST /api/control.");
+    if (newConfigPayload.powerline_filter_hz !== undefined) {
+      sendPowerlineFilterCommand(newConfigPayload.powerline_filter_hz);
+    }
   };
-
-  // Use the command WebSocket context
-  const {
-    wsConnected,
-    startRecording,
-    stopRecording,
-    recordingStatus,
-    recordingFilePath,
-  } = useCommandWebSocket();
  
   // Effect to update lastActiveDataView when activeView changes (and is not settings)
   useEffect(() => {
@@ -391,7 +378,7 @@ export default function EegMonitorWebGL() {
             <button
               onClick={handleUpdateConfig}
               className="w-full px-4 py-2 rounded-md bg-green-600 hover:bg-green-700 text-white font-bold"
-              disabled={!wsConnected || !config}
+              disabled={!config}
             >
               Apply Changes
             </button>

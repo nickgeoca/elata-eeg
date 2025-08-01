@@ -113,7 +113,6 @@ impl crate::types::AdcDriver for MockDriver {
         batch_size: usize,
         stop_flag: &AtomicBool,
     ) -> Result<(Vec<i32>, u64), SensorError> {
-        info!("MockDriver batched acquisition started");
 
         let inner_arc = self.inner.clone();
         let mut base_timestamp = 0;
@@ -160,7 +159,6 @@ impl crate::types::AdcDriver for MockDriver {
             inner_guard.status = DriverStatus::Stopped;
         }
 
-        info!("MockDriver batched acquisition stopped");
         Ok((batch_buffer, base_timestamp))
     }
 

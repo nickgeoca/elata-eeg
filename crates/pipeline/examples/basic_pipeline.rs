@@ -70,6 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             source_id: "test_source".to_string(),
             ts_ns: 0,
             batch_size: 4,
+            num_channels: 4,
             meta: sensor_meta.clone(),
         },
         samples,
@@ -84,6 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let init_ctx = StageInitCtx {
         event_tx: &event_tx,
         allocator: &allocator,
+        driver: &None,
+        sample_rate: 250.0,
+        websocket_sender: None,
     };
     let (mut to_voltage_stage, _) = ToVoltageFactory::default().create(&StageConfig {
         name: "to_voltage".to_string(),

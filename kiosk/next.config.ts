@@ -2,9 +2,17 @@ import type { NextConfig } from "next";
 import path from 'path'; // Import the 'path' module
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  // All proxying is now handled by the custom server in server.js.
-  // Only the webpack configuration for module resolution is needed here.
+  // Redirect /api requests to the daemon
+  async rewrites() {
+    const daemonHost = process.env.DAEMON_HOST || '127.0.0.1';
+    return [
+      {
+        source: '/api/:path*',
+        destination: `http://${daemonHost}:9000/api/:path*`,
+      },
+    ];
+  },
+
   webpack: (config, { buildId, dev, isServer, defaultLoaders, webpack }) => {
     // Add aliases for dependencies used by applet files outside the kiosk directory
     // This tells Webpack to resolve these modules to the specific paths

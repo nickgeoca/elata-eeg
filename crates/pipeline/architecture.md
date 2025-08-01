@@ -263,7 +263,7 @@ Fail on typos via `#[serde(deny_unknown_fields)]`.
 - notch: { hz: 60 }
 - align_and_zip:
     inputs: [to_voltage, ext_sensor]
-- websocket_sink: { port: 9001 }
+- websocket_sink: { topic: "eeg_filtered" }
 - csv_sink: { path: filtered.csv }
 
 ```
@@ -281,7 +281,21 @@ Fail on typos via `#[serde(deny_unknown_fields)]`.
 
 ---
 
-## 8 · Milestones
+## 8 · Sinks
+
+### `websocket_sink`
+
+The `websocket_sink` stage has a specialized role. It no longer creates a WebSocket server. Instead, it acts as a client to a central `WebSocketBroker` that lives in the `daemon`.
+
+Its responsibilities are:
+1.  **Receive a Sender:** During initialization, it receives a `flume::Sender<BrokerMessage>` from the `StageInitCtx`. This channel connects it directly to the `WebSocketBroker`.
+2.  **Forward Packets:** Its only job in the `process` loop is to take an incoming `Arc<RtPacket>`, wrap it in a `BrokerMessage` with its configured `topic`, and send it to the broker.
+
+This design decouples the pipeline from the complexities of network protocols and connection management, centralizing that logic in the `daemon`. The pipeline only needs to know how to send a message to a channel.
+
+---
+
+## 9 · Milestones
 
 1. **Load YAML → build graph → pass compile‑time test**
 2. Implement `simple_stage!` macro & port `ToVoltage` stage

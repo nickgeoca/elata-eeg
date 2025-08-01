@@ -174,18 +174,29 @@ impl Executor {
                                 node.lock().unwrap().name
                             );
                             loop {
-                                match input_rx.recv() {
-                                    Ok(packet) => {
-                                        for tx in &output_txs {
-                                            if tx.send(packet.clone()).is_err() {
-                                                // Downstream disconnected
+                                let should_halt = Arc::new(AtomicBool::new(false));
+                                let should_halt_clone = should_halt.clone();
+
+                                Selector::new()
+                                    .recv(&input_rx, |msg| {
+                                        if let Ok(packet) = msg {
+                                            for tx in &output_txs {
+                                                if tx.send(packet.clone()).is_err() {
+                                                    // Downstream disconnected, this is fine.
+                                                }
                                             }
+                                        } else {
+                                            // Channel is disconnected
+                                            should_halt_clone.store(true, Ordering::SeqCst);
                                         }
-                                    }
-                                    Err(_) => {
-                                        // Producer has shut down
-                                        break;
-                                    }
+                                    })
+                                    .recv(&stop_rx, move |_| {
+                                        should_halt.store(true, Ordering::SeqCst);
+                                    })
+                                    .wait();
+
+                                if should_halt_clone.load(Ordering::SeqCst) {
+                                    break;
                                 }
                             }
                         }

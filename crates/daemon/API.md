@@ -4,21 +4,28 @@ This document describes the RESTful API for controlling and monitoring data proc
 
 ## Overview
 
-The API provides a control plane for managing data pipelines. It is designed as a RESTful service using standard HTTP methods for requests/responses and Server-Sent Events (SSE) for real-time updates from the server to the client.
+The API provides a control plane for managing data pipelines. It is designed as a RESTful service using standard HTTP methods for requests/responses and Server-Sent Events (SSE) for real-time updates from the server to the client. High-performance EEG data streaming is handled via a central WebSocket broker within the daemon.
 
 The primary components are:
-- **Daemon:** A background service that manages and executes pipelines. It exposes the control plane API.
-- **GUI (Kiosk):** A web-based user interface that interacts with the daemon's API to provide users with controls for the pipelines.
+- **Daemon:** A background service that manages and executes pipelines. It exposes the control plane API and a central WebSocket data endpoint on port 9000.
+- **Pipeline:** A dataflow graph that processes EEG data through various stages. Data is sent to the WebSocket broker via a `websocket_sink` stage.
+- **GUI (Kiosk):** A web-based user interface that interacts with the daemon's API for control and connects to the daemon's central WebSocket endpoint for real-time data streaming.
 
 ## Interaction Flow
 
-The following diagram illustrates the typical interaction between the GUI and the Daemon.
+The system uses a dual-connection approach on a single port (9000):
+1. **HTTP/SSE Connection**: For control plane operations and state updates.
+2. **WebSocket Connection**: For high-performance EEG data streaming.
+
+The following diagram illustrates the typical interaction between the GUI and the Daemon:
 
 ```mermaid
 sequenceDiagram
     participant UI as GUI (Kiosk)
     participant Daemon as Daemon
+    participant Pipeline as Pipeline
 
+    Note over UI: Initial connection setup
     UI->>Daemon: GET /api/pipelines
     activate Daemon
     Note over Daemon: Scans fs for *.yaml files
@@ -29,22 +36,30 @@ sequenceDiagram
 
     UI->>Daemon: POST /api/pipelines/p1/start
     activate Daemon
-    alt Pipeline is not running or p1 is already running
-        Note over Daemon: Starts p1 if not running
-        Daemon-->>UI: 200 OK
-    else Another pipeline (e.g., p2) is running
-        Daemon-->>UI: 409 Conflict {"error": "...", "running_pipeline_id": "p2"}
-    end
+    Note over Daemon: Builds pipeline graph from YAML
+    Daemon->>Pipeline: Start execution
+    Pipeline-->>Daemon: Pipeline started
+    Daemon-->>UI: 200 OK
     deactivate Daemon
 
+    Note over UI: Pipeline started, establish data connections
+    
     UI->>Daemon: GET /api/events
     Note over Daemon: Opens SSE connection
     Daemon-->>UI: stream of state updates (json)
-
+    
+    Note over UI: Connect to WebSocket for data
+    UI->>Daemon: WebSocket connect to /ws/data
+    Note over Daemon: Client subscribes to a topic
+    UI->>Daemon: send `{"subscribe": "topic_name"}`
+    Daemon-->>UI: Binary EEG data packets
+    
     Note over UI: User changes a parameter
 
     UI->>Daemon: POST /api/control (body: {"command": "SetParameter", ...})
     activate Daemon
+    Daemon->>Pipeline: Forward control command
+    Pipeline-->>Daemon: Command processed
     Daemon-->>UI: 200 OK
     deactivate Daemon
 
@@ -52,6 +67,8 @@ sequenceDiagram
 
     UI->>Daemon: GET /api/state
     activate Daemon
+    Daemon->>Pipeline: Get current config
+    Pipeline-->>Daemon: Current config
     Daemon-->>UI: 200 OK: {current pipeline config}
     deactivate Daemon
 
@@ -125,6 +142,50 @@ sequenceDiagram
     *   **Description:** Establishes a Server-Sent Events (SSE) connection. Upon connection, the daemon will immediately push a `PipelineStarted` event if a pipeline is already running, containing the full configuration of that pipeline. Subsequently, the daemon will push real-time state updates, data, or other events to the client over this connection.
     *   **Response:** A stream of `text/event-stream` data.
 
+### WebSocket Data Streaming
+
+The daemon provides a central WebSocket endpoint for streaming data from pipelines to clients. This uses a topic-based publish-subscribe model.
+
+*   **Endpoint:** `ws://<daemon_address>/ws/data`
+    *   **Description:** A single, unified WebSocket endpoint for all data streaming. Clients connect to this endpoint and subscribe to specific "topics" to receive data. A topic is typically associated with the output of a specific pipeline stage.
+    *   **Connection:** `ws://<daemon_address>/ws/data` (e.g., `ws://127.0.0.1:9000/ws/data`)
+
+#### Subscription Model
+
+1.  **Connect:** The client establishes a WebSocket connection to `ws://<daemon_address>/ws/data`.
+2.  **Subscribe:** After connecting, the client **must** send a `subscribe` message to receive data. The message is a JSON string specifying the topic.
+    *   **Example `subscribe` message:**
+        ```json
+        {"subscribe": "eeg_raw"}
+        ```
+3.  **Receive Data:** Once subscribed, the client will receive binary data packets published to that topic.
+4.  **Unsubscribe:** The client can stop receiving data by sending an `unsubscribe` message.
+    *   **Example `unsubscribe` message:**
+        ```json
+        {"unsubscribe": "eeg_raw"}
+        ```
+
+A client can be subscribed to multiple topics simultaneously.
+
+#### `websocket_sink` Stage
+
+The `websocket_sink` pipeline stage no longer creates a server. Its role is to forward data from a pipeline into the central broker.
+
+*   **Configuration:**
+    ```yaml
+    - name: "websocket_sink_raw"
+      type: "websocket_sink"
+      params:
+        topic: "eeg_raw" # The topic to publish data under
+      inputs:
+        - "source.output"
+    ```
+*   **Function:** It takes `RtPacket`s from its input, wraps them in a `BrokerMessage` with the configured `topic`, and sends them to the central `WebSocketBroker`.
+
+#### Data Format
+
+The data sent over the WebSocket is the raw binary representation of an `RtPacket`.
+
 ## Design Rationale (FAQ)
 
 *   **How are pipelines discovered?**
@@ -133,8 +194,12 @@ sequenceDiagram
 *   **How does the GUI know what controls to display?**
     After a pipeline is started (or if the UI connects when a pipeline is already running), the UI **must** call `GET /api/state` to fetch the complete configuration of the running pipeline. This ensures the UI has the necessary information to render the correct controls and avoids race conditions with the event stream. The SSE connection (`/api/events`) should be used for subsequent real-time updates.
 
-*   **Why use HTTP/SSE instead of WebSockets?**
-    This design uses HTTP for standard request/response interactions (like starting or stopping a pipeline), which is simple and stateless. For real-time updates from the server to the client, Server-Sent Events (SSE) are used. SSE is a simpler protocol than WebSockets and is very efficient for one-way server-to-client data streaming. This combination provides a lightweight and robust solution.
+*   **Why use both HTTP/SSE and WebSockets?**
+    This design uses a dual-connection approach for optimal performance:
+    - **HTTP/SSE** for control operations: Simple, stateless, cacheable, and easy to debug for pipeline management
+    - **WebSocket** for data streaming: High-performance binary data transfer with low overhead for real-time EEG data
+    
+    This separation allows each protocol to be optimized for its specific use case. The control plane remains simple and debuggable while the data plane achieves the low latency required for EEG streaming.
 
 *   **How are changes saved?**
     A user can save changes to a pipeline's configuration via a `PUT` request to `/api/pipelines/{id}`. This will overwrite the original YAML file. A "Save As" functionality could be a future enhancement.

@@ -1,29 +1,25 @@
 'use client';
 
-import { useCommandWebSocket } from '../context/CommandWebSocketContext';
+import { useCommand } from '../context/CommandWebSocketContext';
 
 export default function EegRecordingControls() {
   const {
-    wsConnected,
     startRecording,
     stopRecording,
     recordingStatus,
-    recordingFilePath,
     isStartRecordingPending,
     recordingError,
-  } = useCommandWebSocket();
+  } = useCommand();
 
 
   return (
     <div className="flex flex-col">
       <button
         onClick={isStartRecordingPending ? undefined : (recordingStatus.startsWith('Currently recording') ? stopRecording : startRecording)}
-        disabled={!wsConnected || isStartRecordingPending}
+        disabled={isStartRecordingPending}
         className={`px-4 py-1 rounded-md flex items-center ${
           ((value) => {
-            return !wsConnected
-              ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
-              : value
+            return value
                 ? 'bg-yellow-500 text-white cursor-wait'
                 : recordingStatus.startsWith('Currently recording')
                   ? 'bg-red-600 hover:bg-red-700 text-white'

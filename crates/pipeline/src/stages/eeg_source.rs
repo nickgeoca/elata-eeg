@@ -149,27 +149,27 @@ impl EegSource {
                             if samples.is_empty() {
                                 continue;
                             }
+                            log::info!("eeg_source acquired {} samples", samples.len());
 
-                            for (i, sample_chunk) in samples.chunks(num_channels).enumerate() {
-                                let mut packet_samples =
-                                    crate::allocator::RecycledI32Vec::new(allocator.clone());
-                                packet_samples.extend_from_slice(sample_chunk);
+                            let mut packet_samples =
+                                crate::allocator::RecycledI32Vec::new(allocator.clone());
+                            packet_samples.extend_from_slice(&samples);
 
-                                let sample_timestamp = timestamp + (i as u64 * sample_interval_ns);
+                            let num_samples_in_batch = samples.len() / num_channels;
 
-                                let packet = Arc::new(RtPacket::RawI32(PacketData {
-                                    header: PacketHeader {
-                                        source_id: output_name.clone(),
-                                        ts_ns: sample_timestamp,
-                                        batch_size: 1, // Each packet is now a single sample
-                                        meta: sensor_meta.clone(),
-                                    },
-                                    samples: packet_samples,
-                                }));
+                            let packet = Arc::new(RtPacket::RawI32(PacketData {
+                                header: PacketHeader {
+                                    source_id: output_name.clone(),
+                                    ts_ns: timestamp,
+                                    batch_size: num_samples_in_batch as u32,
+                                    num_channels: num_channels as u32,
+                                    meta: sensor_meta.clone(),
+                                },
+                                samples: packet_samples,
+                            }));
 
-                                if packet_tx.send(packet).is_err() {
-                                    dropped_packets_clone.fetch_add(1, Ordering::Relaxed);
-                                }
+                            if packet_tx.send(packet).is_err() {
+                                dropped_packets_clone.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                         Err(e) => {

@@ -8,7 +8,7 @@ stages:
     type: "eeg_source"
     params:
       driver:
-        type: "ElataV2" # Can be "ElataV1", "ElataV2", or "Mock"
+        type: "Mock" # Can be "ElataV1", "ElataV2", or "Mock"
         sample_rate: 250
         drdy_pin: 25
         vref: 4.5
@@ -39,6 +39,6 @@ stages:
   - name: "websocket_sink"
     type: "websocket_sink"
     params:
-      addr: "127.0.0.1:9001"
+      topic: "eeg_voltage"
     inputs:
       - "to_voltage.voltage_data"

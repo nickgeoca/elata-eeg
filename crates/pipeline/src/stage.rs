@@ -4,9 +4,11 @@ use crate::allocator::SharedPacketAllocator;
 use crate::control::{ControlCommand, PipelineEvent};
 use crate::data::RtPacket;
 use crate::error::StageError;
+use eeg_types::comms::BrokerMessage;
 use flume::Sender;
 use sensors::types::AdcDriver;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
 
 /// The possible states of a stage in the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,6 +64,8 @@ pub struct StageInitCtx<'a> {
     pub event_tx: &'a Sender<PipelineEvent>,
     pub allocator: &'a SharedPacketAllocator,
     pub driver: &'a Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
+    pub sample_rate: f64,
+    pub websocket_sender: Option<Sender<BrokerMessage>>,
 }
 
 impl StageContext {

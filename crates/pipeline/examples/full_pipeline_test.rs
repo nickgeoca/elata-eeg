@@ -188,7 +188,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, _event_rx) = mpsc::unbounded::<PipelineEvent>();
     let test_allocator = Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024));
     let graph =
-        PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()))?;
+        PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()), &None, None)?;
 
     // 4. Create and start the executor
     let (executor, input_tx, _) = Executor::new(graph);
@@ -211,6 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 source_id: "acquire".to_string(),
                 ts_ns: i as u64,
                 batch_size: samples_per_packet as u32,
+                num_channels: 4,
                 meta: Arc::new(SensorMeta::default()),
             },
             samples,

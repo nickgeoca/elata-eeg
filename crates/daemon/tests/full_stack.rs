@@ -74,6 +74,7 @@ async fn setup_test_daemon() -> (
             event_tx.clone(),
             None,
             &None,
+            None,
         )
         .unwrap();
         Executor::new(graph)
