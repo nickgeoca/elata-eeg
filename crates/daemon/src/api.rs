@@ -10,7 +10,6 @@ use axum::{
 };
 use futures::{
     stream::{self, Stream, StreamExt},
-    SinkExt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -29,8 +28,8 @@ pub struct AppState {
     pub sse_tx: broadcast::Sender<String>,
     pub pipeline_handle: Arc<Mutex<Option<PipelineHandle>>>,
     pub source_meta_cache: Arc<Mutex<Option<SensorMeta>>>,
-    pub websocket_tx: flume::Sender<BrokerMessage>,
     pub broker: Arc<WebSocketBroker>,
+    pub websocket_sender: broadcast::Sender<Arc<BrokerMessage>>,
 }
 
 impl FromRef<AppState> for Arc<WebSocketBroker> {
@@ -156,7 +155,7 @@ pub async fn start_pipeline_handler(
         event_tx,
         None,
         &None,
-        Some(state.websocket_tx.clone()),
+        Some(state.websocket_sender.clone()),
     ) {
         Ok(g) => g,
         Err(e) => {

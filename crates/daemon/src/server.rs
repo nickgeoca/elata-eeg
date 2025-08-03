@@ -3,25 +3,50 @@ use crate::{
     websocket_broker::WebSocketBroker,
 };
 use axum::{
+    body::Body,
     extract::{ConnectInfo, State, WebSocketUpgrade},
     response::{IntoResponse, Response},
     routing::get,
 };
-use std::{net::SocketAddr, sync::Arc};
+use http::StatusCode;
+use log::error;
+use std::{any::Any, net::SocketAddr, sync::Arc};
 use tower_http::{
-    cors::{Any, CorsLayer},
-    trace::TraceLayer,
+    catch_panic::CatchPanicLayer,
+    cors::{Any as CorsAny, CorsLayer},
 };
+
+fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response<Body> {
+    let details = if let Some(s) = err.downcast_ref::<String>() {
+        s.clone()
+    } else if let Some(s) = err.downcast_ref::<&str>() {
+        s.to_string()
+    } else {
+        "Unknown panic message".to_string()
+    };
+
+    error!("PANIC CAUGHT: {}", details);
+
+    // Optionally, you can also try to get a backtrace if RUST_BACKTRACE is set
+    // This requires the backtrace crate and might be more involved.
+    // For now, just logging the message is a huge step forward.
+
+    Response::builder()
+        .status(StatusCode::INTERNAL_SERVER_ERROR)
+        .body(Body::from(format!("Internal Server Error: {}", details)))
+        .unwrap()
+}
 
 #[axum::debug_handler]
 async fn websocket_handler(
     ws: WebSocketUpgrade,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<AppState>,
-) -> Response {
-    tracing::info!("Client attempting to connect: {}", addr);
-    let broker = state.broker;
-    ws.on_upgrade(move |socket| broker.handle_connection(socket, addr))
+) -> impl IntoResponse {
+    ws.on_upgrade(|socket| async move {
+        // For now, we'll just subscribe to a default "all" topic.
+        // A more robust implementation would allow the client to specify topics.
+        state.broker.add_client(socket, "all".to_string()).await;
+    })
 }
 
 pub async fn run(
@@ -29,10 +54,15 @@ pub async fn run(
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     let app = api::create_router()
-        .route("/ws", get(websocket_handler))
+        .route("/ws/data", get(websocket_handler))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
-        .layer(TraceLayer::new_for_http());
+        .layer(
+            CorsLayer::new()
+                .allow_origin(CorsAny)
+                .allow_methods(CorsAny)
+                .allow_headers(CorsAny),
+        )
+;
 
     // run it
     let addr = SocketAddr::from(([0, 0, 0, 0], 9000));

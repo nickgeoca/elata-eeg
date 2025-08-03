@@ -1,7 +1,6 @@
 'use client';
 
 import React, { createContext, useContext, useState, ReactNode, useMemo, useRef, useCallback, useEffect } from 'react';
-import { useEegDataHandler } from '../components/EegDataHandler';
 import { useEventStream } from './EventStreamContext';
 import { usePipeline } from './PipelineContext'; // Import the usePipeline hook
 import { EegSample, SampleChunk } from '../types/eeg'; // Import shared types
@@ -265,19 +264,76 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, [isReconnecting]);
 
-  // The WebSocket handler is now conditionally enabled
-  const { status: wsStatus } = useEegDataHandler({
-    enabled: isReady, // Only enable when the system is fully ready
-    pipelineState: pipelineState,
-    onDataUpdate: handleDataUpdate,
-    onError: handleError,
-    onSamples: handleSamples,
-    onFftData: handleFftData,
-    // Use stable refs to prevent unnecessary WebSocket reconnections
-    lastDataChunkTimeRef,
-    latestTimestampRef,
-    debugInfoRef,
-  });
+  const [wsStatus, setWsStatus] = useState('Disconnected');
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const handleWsMessage = useCallback((event: MessageEvent) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (data.topic === 'eeg_voltage' && data.payload.data) {
+        // This part requires knowing the exact structure of `data.payload.data`
+        // For now, we will log it.
+        console.log("Received RtPacket:", data.payload);
+        // TODO: Adapt `data.payload` to the format expected by `onSamples`.
+      } else if (data.topic === 'fft') {
+        handleFftData(data.payload);
+      }
+    } catch (error) {
+      console.error("[EegDataContext] Error in onmessage handler:", error);
+    }
+  }, [handleFftData]);
+
+  const connect = useCallback(() => {
+    if (wsRef.current || !isReady) return;
+
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host;
+    const url = `${protocol}//${host}/ws/data`;
+
+    console.log('[EegDataContext] Connecting to WebSocket:', url);
+    setWsStatus('Connecting...');
+    const newWebSocket = new WebSocket(url);
+    wsRef.current = newWebSocket;
+
+    newWebSocket.onopen = () => {
+      console.log('[EegDataContext] WebSocket connection established');
+      setWsStatus('Connected');
+      const subscriptionMessage = { subscribe: "eeg_voltage" };
+      newWebSocket.send(JSON.stringify(subscriptionMessage));
+    };
+
+    newWebSocket.onmessage = handleWsMessage;
+
+    newWebSocket.onerror = (err) => {
+      console.error('[EegDataContext] WebSocket error:', err);
+      setWsStatus('Error');
+    };
+
+    newWebSocket.onclose = () => {
+      console.log('[EegDataContext] WebSocket connection closed');
+      setWsStatus('Disconnected');
+      wsRef.current = null;
+    };
+  }, [isReady, handleWsMessage]);
+
+  const disconnect = useCallback(() => {
+    if (wsRef.current) {
+      console.log('[EegDataContext] Disconnecting from WebSocket');
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isReady) {
+      connect();
+    } else {
+      disconnect();
+    }
+    return () => {
+      disconnect();
+    };
+  }, [isReady, connect, disconnect]);
 
   const value = useMemo(() => ({
     dataVersion,

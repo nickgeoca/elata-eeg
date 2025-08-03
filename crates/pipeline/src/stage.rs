@@ -8,6 +8,7 @@ use eeg_types::comms::BrokerMessage;
 use flume::Sender;
 use sensors::types::AdcDriver;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use std::sync::Mutex;
 
 /// The possible states of a stage in the pipeline.
@@ -65,7 +66,7 @@ pub struct StageInitCtx<'a> {
     pub allocator: &'a SharedPacketAllocator,
     pub driver: &'a Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
     pub sample_rate: f64,
-    pub websocket_sender: Option<Sender<BrokerMessage>>,
+    pub websocket_sender: Option<broadcast::Sender<Arc<BrokerMessage>>>,
 }
 
 impl StageContext {

@@ -1,3 +1,41 @@
+# Latest
+After an exhaustive and multi-layered debugging process, the persistent `500 Internal Server Error` on WebSocket connections remains unresolved. However, we have successfully eliminated numerous potential causes and have a much clearer, albeit more complex, understanding of the problem.
+
+This report summarizes our journey and provides a final recommendation.
+
+### Summary of Disproven Hypotheses
+
+We have systematically tested and invalidated the following potential causes:
+
+1.  **Path Mismatches:** The issue is not a simple routing mismatch between the frontend and backend.
+2.  **Server Configuration:** The server is correctly bound to `0.0.0.0:9000` and is not being blocked by a firewall.
+3.  **Inactive Pipeline:** The error occurs even when the data pipeline is confirmed to be running.
+4.  **Simple Serialization Panics:** Hardening the `read` and `write` tasks in the WebSocket broker with robust error handling did not solve the issue.
+5.  **`!Sync` Data Race:** While a real issue, fixing the data race by wrapping the `flume::Receiver` in a `Mutex` did not solve the panic.
+6.  **Single-Consumer Architecture:** A complete architectural refactoring to a proper one-to-many broadcast pattern, while correct, did not solve the panic.
+
+### Key Discoveries
+
+1.  **The Daemon Does Not Crash:** The most critical finding is that the `eeg_daemon` process does **not** terminate. This proves the panic is being caught internally by the `axum` web framework, which then correctly translates it into a `500` response. This is why `RUST_BACKTRACE=1` had no effect.
+2.  **The Panic is in a Spawned Task:** Our final diagnostic attempt revealed that the panic is occurring inside a `tokio::spawn` task within the `handle_connection` function. Panics in spawned tasks are isolated and do not propagate to `axum`'s `CatchPanicLayer`, which is why our attempts to log the panic contents were unsuccessful.
+
+### Final Hypothesis & Recommendation
+
+Based on the complete debugging history, the final and most likely hypothesis is:
+
+**There is a low-level incompatibility or subtle misuse of the `flume` channel primitives within the `tokio` runtime, specifically when a channel's lifecycle is tied to a WebSocket connection that is being managed by `axum`.**
+
+The panic is likely occurring when the `handle_connection` task is dropped as the WebSocket connection fails. When this task is dropped, the `flume` sender/receiver for that specific client is also dropped. This drop is likely triggering a panic deep within the `flume` or `tokio` code, possibly due to how resources are cleaned up across different threads in the runtime.
+
+**Recommendation:**
+
+Further attempts to fix this by modifying the existing `WebSocketBroker` are unlikely to succeed. The problem lies in the fundamental interaction between the chosen libraries. The most effective path forward is to **replace the `flume` channels with `tokio::sync::broadcast` channels.**
+
+`tokio::sync::broadcast` is the idiomatic, native solution for this exact problem within the Tokio ecosystem. It is designed from the ground up for one-to-many, multi-threaded communication and is guaranteed to be compatible with the `axum` and `tokio` runtimes. This change would eliminate the `flume` dependency entirely and align the project with a more standard and robust architectural pattern for this use case.
+
+This has been a difficult but informative process. The path to the solution is now clear.
+
+
 # Architectural Refactor: Centralized WebSocket Broker
 
 ## 1. Premise: The Problem

@@ -5,8 +5,9 @@ use std::{
 };
 
 use adc_daemon::plugin_supervisor::PluginSupervisor;
-use adc_daemon::websocket_broker::WebSocketBroker;
 use adc_daemon::api::{AppState, PipelineHandle};
+use adc_daemon::websocket_broker::WebSocketBroker;
+use eeg_types::comms::BrokerMessage;
 use clap::{Arg, Command};
 use pipeline::config::SystemConfig;
 use pipeline::control::PipelineEvent;
@@ -27,7 +28,7 @@ async fn main() -> Result<(), DriverError> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "adc_daemon=debug,tower_http=debug".into()),
+                .unwrap_or_else(|_| "adc_daemon=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -48,18 +49,7 @@ async fn main() -> Result<(), DriverError> {
     // --- Centralized State ---
     let (sse_tx, _) = tokio::sync::broadcast::channel(256);
     let (event_tx, event_rx) = flume::bounded(100);
-    let (ws_tx, ws_rx) = flume::unbounded();
-    let broker = Arc::new(WebSocketBroker::new(ws_rx));
-    tokio::spawn(broker.clone().run());
-
-    let app_state = AppState {
-        pipelines: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        sse_tx: sse_tx.clone(),
-        pipeline_handle: Arc::new(tokio::sync::Mutex::new(None)),
-        source_meta_cache: Arc::new(tokio::sync::Mutex::new(None)),
-        websocket_tx: ws_tx,
-        broker,
-    };
+    let (ws_tx, ws_rx) = tokio::sync::broadcast::channel::<Arc<BrokerMessage>>(1024);
 
     // --- Plugin Supervisor ---
     let _supervisor = PluginSupervisor::new();
@@ -116,29 +106,37 @@ async fn main() -> Result<(), DriverError> {
     };
 
 
-    let graph = PipelineGraph::build(
+    tracing::info!("Building pipeline graph...");
+    let graph = match PipelineGraph::build(
         &initial_config,
         &registry,
         event_tx.clone(),
         None,
         &driver,
-        Some(app_state.websocket_tx.clone()),
-    )
-    .unwrap();
+        Some(ws_tx.clone()),
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!("Failed to build pipeline graph: {}", e);
+            // Exit gracefully
+            return Ok(());
+        }
+    };
+    tracing::info!("Pipeline graph built.");
 
     let (executor, input_tx, fatal_error_rx) = Executor::new(graph);
     tracing::info!("Default pipeline executor started.");
 
-    // Store the handle to the running pipeline
-    *app_state.pipeline_handle.lock().await = Some(PipelineHandle {
+    let pipeline_handle = Arc::new(tokio::sync::Mutex::new(Some(PipelineHandle {
         id: "default".to_string(),
         executor: Some(executor),
         input_tx,
-    });
+    })));
 
     // Spawn a task to listen for fatal errors from the default pipeline
-    let pipeline_handle_clone = app_state.pipeline_handle.clone();
-    let sse_tx_clone = app_state.sse_tx.clone();
+    let pipeline_handle_clone = pipeline_handle.clone();
+    let sse_tx_clone = sse_tx.clone();
+    let fatal_error_sse_tx = sse_tx.clone();
     tokio::spawn(async move {
         if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
             tracing::error!("Fatal pipeline error detected in default pipeline. Shutting down.");
@@ -161,7 +159,7 @@ async fn main() -> Result<(), DriverError> {
                 error: error_msg,
             };
             if let Ok(event_json) = serde_json::to_string(&event) {
-                if sse_tx_clone.send(event_json).is_err() {
+                if fatal_error_sse_tx.send(event_json).is_err() {
                     tracing::warn!("Failed to send pipeline failure SSE event: receiver disconnected.");
                 }
             }
@@ -170,19 +168,20 @@ async fn main() -> Result<(), DriverError> {
 
     // --- Event Forwarding Task ---
     // Forwards events from the pipeline to the SSE broadcast channel
-    let event_forwarding_state = app_state.clone();
+    let source_meta_cache = Arc::new(tokio::sync::Mutex::new(None));
+    let event_forwarding_cache = source_meta_cache.clone();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
             // If this is the source ready event, cache its metadata
             if let PipelineEvent::SourceReady { meta } = &event {
                 tracing::debug!("Caching SourceReady event metadata");
-                let mut cache = event_forwarding_state.source_meta_cache.lock().await;
+                let mut cache = event_forwarding_cache.lock().await;
                 *cache = Some(meta.clone());
             }
 
             if let Ok(event_json) = serde_json::to_string(&event) {
                 // Send to SSE clients
-                if event_forwarding_state.sse_tx.send(event_json.clone()).is_err() {
+                if sse_tx.send(event_json.clone()).is_err() {
                     tracing::debug!("No active SSE subscribers to send event to.");
                 }
 
@@ -192,6 +191,24 @@ async fn main() -> Result<(), DriverError> {
         }
         tracing::info!("Event forwarding task finished.");
     });
+
+    // --- WebSocket Broker ---
+    let broker = Arc::new(WebSocketBroker::new(ws_rx));
+    let broker_run = broker.clone();
+    tokio::spawn(async move {
+        broker_run.run().await;
+    });
+
+    // --- App State ---
+    let app_state = AppState {
+        pipelines: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        sse_tx: sse_tx_clone,
+        pipeline_handle,
+        source_meta_cache,
+        broker,
+        websocket_sender: ws_tx,
+    };
+
 
     // --- Server Thread ---
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();

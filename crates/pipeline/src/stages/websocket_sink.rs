@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use eeg_types::comms::BrokerMessage;
-use flume::Sender;
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::broadcast;
 
 use crate::{
     data::{PacketData, PacketOwned, RtPacket},
@@ -21,7 +21,7 @@ pub struct WebsocketSinkParams {
 pub struct WebsocketSink {
     id: String,
     topic: String,
-    sender: Sender<BrokerMessage>,
+    sender: broadcast::Sender<Arc<BrokerMessage>>,
 }
 
 impl Stage for WebsocketSink {
@@ -39,11 +39,9 @@ impl Stage for WebsocketSink {
             packet: from_rt_packet(&packet),
         };
 
-        if self.sender.send(message).is_err() {
-            return Err(StageError::Fatal(
-                "WebSocket broker disconnected".into(),
-            ));
-        }
+        // Send errors are ignored, since they just mean there are no
+        // active subscribers. This is not a pipeline-terminating error.
+        let _ = self.sender.send(Arc::new(message));
 
         Ok(Some(packet))
     }

@@ -144,28 +144,41 @@ sequenceDiagram
 
 ### WebSocket Data Streaming
 
-The daemon provides a central WebSocket endpoint for streaming data from pipelines to clients. This uses a topic-based publish-subscribe model.
+The daemon provides a single, centralized WebSocket endpoint for streaming high-performance data from pipelines to clients. This endpoint operates on a topic-based publish-subscribe model.
 
-*   **Endpoint:** `ws://<daemon_address>/ws/data`
-    *   **Description:** A single, unified WebSocket endpoint for all data streaming. Clients connect to this endpoint and subscribe to specific "topics" to receive data. A topic is typically associated with the output of a specific pipeline stage.
-    *   **Connection:** `ws://<daemon_address>/ws/data` (e.g., `ws://127.0.0.1:9000/ws/data`)
+*   **Endpoint:** `/ws/data`
+    *   **URL:** `ws://<daemon_address>/ws/data` (e.g., `ws://127.0.0.1:9000/ws/data`)
+    *   **Description:** This is the sole endpoint for real-time data transmission. Any client wishing to receive data from a pipeline must connect to it.
 
-#### Subscription Model
+#### Topic-Based Subscription Model
 
-1.  **Connect:** The client establishes a WebSocket connection to `ws://<daemon_address>/ws/data`.
-2.  **Subscribe:** After connecting, the client **must** send a `subscribe` message to receive data. The message is a JSON string specifying the topic.
+To receive data, a client must first connect to the WebSocket endpoint and then subscribe to one or more data "topics." A topic is a named stream of data, typically corresponding to the output of a specific stage in a pipeline (e.g., raw data, filtered data, etc.).
+
+The subscription process is as follows:
+
+1.  **Establish Connection:** The client initiates a WebSocket connection to the `/ws/data` endpoint.
+
+2.  **Subscribe to a Topic:** Immediately after the connection is established, the client must send a JSON message to specify which topic it wants to receive data from. The message must be a JSON object with a single key, `"subscribe"`, whose value is the name of the topic.
+
     *   **Example `subscribe` message:**
         ```json
-        {"subscribe": "eeg_raw"}
-        ```
-3.  **Receive Data:** Once subscribed, the client will receive binary data packets published to that topic.
-4.  **Unsubscribe:** The client can stop receiving data by sending an `unsubscribe` message.
-    *   **Example `unsubscribe` message:**
-        ```json
-        {"unsubscribe": "eeg_raw"}
+        {
+          "subscribe": "eeg_voltage"
+        }
         ```
 
-A client can be subscribed to multiple topics simultaneously.
+3.  **Receive Data:** Once successfully subscribed, the client will begin receiving a stream of binary data packets published to that topic. The format of these packets is the raw binary representation of an `RtPacket`.
+
+4.  **Unsubscribe (Optional):** To stop receiving data from a topic, the client can send an `unsubscribe` message.
+
+    *   **Example `unsubscribe` message:**
+        ```json
+        {
+          "unsubscribe": "eeg_voltage"
+        }
+        ```
+
+A single client can be subscribed to multiple topics simultaneously by sending multiple `subscribe` messages.
 
 #### `websocket_sink` Stage
 

@@ -21,6 +21,7 @@ csv = "1.2"
 csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
 eeg_types = { path = "../eeg_types" }
 flume = "0.11.0"
+http = "1.1.0"
 futures = "0.3"
 futures-util = "0.3"
 log = "0.4"
@@ -35,7 +36,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 toml = "0.8"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower-http = { version = "0.5.2", features = ["fs", "trace", "cors", "catch-panic"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1.0", features = ["v4"] }

@@ -14,6 +14,7 @@ use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::broadcast;
 
 use sensors::types::AdcDriver;
 
@@ -56,7 +57,7 @@ impl PipelineGraph {
         event_tx: flume::Sender<crate::control::PipelineEvent>,
         allocator: Option<SharedPacketAllocator>,
         driver: &Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
-        websocket_sender: Option<Sender<BrokerMessage>>,
+        websocket_sender: Option<broadcast::Sender<Arc<BrokerMessage>>>,
     ) -> Result<Self, StageError> {
         let mut nodes = HashMap::new();
         let allocator = allocator

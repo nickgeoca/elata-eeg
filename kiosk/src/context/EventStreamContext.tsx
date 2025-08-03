@@ -119,7 +119,7 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
-  const webSocketRef = useRef<WebSocket | null>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const addEvent = useCallback((event: EventData) => {
     setEvents(prevEvents => [...prevEvents, event]);
@@ -130,40 +130,52 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const disconnect = useCallback(() => {
-    if (webSocketRef.current) {
-      console.log('[EventStream] Disconnecting from WebSocket endpoint');
-      webSocketRef.current.close();
-      webSocketRef.current = null;
+    if (eventSourceRef.current) {
+      console.log('[EventStream] Disconnecting from SSE endpoint');
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
       setIsConnected(false);
     }
   }, []);
 
   const connect = useCallback(() => {
-    if (webSocketRef.current) {
+    // Manual connection is not the focus of this refactor.
+    // The primary goal is a stable auto-connection on mount.
+    if (eventSourceRef.current) {
+        console.log('[EventStream] Already connected.');
+        return;
+    }
+    console.log('[EventStream] Manual connect is not implemented, connection is handled by useEffect.');
+  }, []);
+
+  useEffect(() => {
+    if (eventSourceRef.current) {
       return;
     }
 
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const url = `${protocol}//${host}/ws`;
-
-    console.log('[EventStream] Connecting to WebSocket endpoint:', url);
+    const relativeUrl = '/api/events';
+    console.log('[EventStream] Connecting to SSE endpoint:', relativeUrl);
     setFatalError(null);
 
-    const newWebSocket = new WebSocket(url);
-    webSocketRef.current = newWebSocket;
+    const es = new EventSource(relativeUrl);
+    eventSourceRef.current = es;
 
-    newWebSocket.onopen = () => {
-      console.log('[EventStream] WebSocket connection established');
-      setIsConnected(true);
-      setError(null);
-      const subscriptionMessage = {
-        subscribe: "eeg_voltage"
-      };
-      newWebSocket.send(JSON.stringify(subscriptionMessage));
+    const handleDisconnect = () => {
+      if (eventSourceRef.current) {
+        console.log('[EventStream] Closing SSE connection.');
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+        setIsConnected(false);
+      }
     };
 
-    newWebSocket.onmessage = (event) => {
+    es.onopen = () => {
+      console.log('[EventStream] SSE connection established');
+      setIsConnected(true);
+      setError(null);
+    };
+
+    es.onmessage = (event) => {
       try {
         const parsedData = JSON.parse(event.data);
         const eventType = Object.keys(parsedData)[0];
@@ -173,34 +185,26 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
         if (eventData.type === 'PipelineFailed') {
           console.error(`[EventStream] Fatal pipeline error: ${eventData.data.error}`);
           setFatalError(eventData.data.error);
-          disconnect();
+          handleDisconnect();
         } else {
-          addEvent(eventData);
+          setEvents(prevEvents => [...prevEvents, eventData]);
         }
       } catch (err) {
         console.error('[EventStream] Error parsing event data:', err);
       }
     };
 
-    newWebSocket.onerror = (err) => {
-      console.error('[EventStream] WebSocket error:', err);
-      setError('WebSocket connection failed. Retrying...');
+    es.onerror = (err) => {
+      console.error('[EventStream] SSE error:', err);
+      setError('SSE connection failed. Retrying...');
       setIsConnected(false);
+      // EventSource handles reconnection automatically.
     };
 
-    newWebSocket.onclose = () => {
-      console.log('[EventStream] WebSocket connection closed. Attempting to reconnect...');
-      setIsConnected(false);
-      setTimeout(connect, 5000); // Reconnect after 5 seconds
-    };
-  }, [addEvent, disconnect]);
-
-  useEffect(() => {
-    connect();
     return () => {
-      disconnect();
+      handleDisconnect();
     };
-  }, [connect, disconnect]);
+  }, []); // Empty dependency array ensures this runs only once on mount.
 
   const value = useMemo(() => ({
     events,

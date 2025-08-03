@@ -285,13 +285,13 @@ Fail on typos via `#[serde(deny_unknown_fields)]`.
 
 ### `websocket_sink`
 
-The `websocket_sink` stage has a specialized role. It no longer creates a WebSocket server. Instead, it acts as a client to a central `WebSocketBroker` that lives in the `daemon`.
+The `websocket_sink` stage's role is to forward data from the pipeline to the central `WebSocketBroker` located in the `daemon`. It does not host a server or manage any network connections directly.
 
-Its responsibilities are:
-1.  **Receive a Sender:** During initialization, it receives a `flume::Sender<BrokerMessage>` from the `StageInitCtx`. This channel connects it directly to the `WebSocketBroker`.
-2.  **Forward Packets:** Its only job in the `process` loop is to take an incoming `Arc<RtPacket>`, wrap it in a `BrokerMessage` with its configured `topic`, and send it to the broker.
+Its responsibilities are strictly limited to:
+1.  **Connecting to the Broker:** During initialization, the `StageInitCtx` provides it with an in-memory channel sender (`tokio::sync::broadcast::Sender`). This sender connects the stage to the `WebSocketBroker`.
+2.  **Forwarding Data:** In its `process` loop, the stage takes the incoming `Arc<RtPacket>`, wraps it in a `BrokerMessage` containing the destination `topic`, and sends it to the broker over the channel.
 
-This design decouples the pipeline from the complexities of network protocols and connection management, centralizing that logic in the `daemon`. The pipeline only needs to know how to send a message to a channel.
+This architecture cleanly separates the data processing logic of the pipeline from the network and client management logic of the `daemon`. The pipeline remains unaware of how many clients are connected or the specifics of the WebSocket protocol.
 
 ---
 
@@ -337,3 +337,18 @@ Extensibility / Hot‑swap
 * YAML graph reload via `ArcSwap`; no restart needed
 
 *Last updated 2025‑07‑16*
+
+
+---
+
+## 10 · Architectural Lessons: Channeling and Runtimes
+
+An important lesson was learned during the implementation of the `WebSocketBroker` regarding the choice of in-memory channels.
+
+Initially, the high-performance, multi-producer, multi-consumer (MPMC) channel library `flume` was used to connect the `websocket_sink` to the broker. However, this led to a difficult-to-diagnose `panic` that occurred specifically when a WebSocket client disconnected.
+
+The root cause was a subtle incompatibility between `flume` and the `tokio` runtime's task lifecycle. When `axum` (the web framework) handled a client disconnection, it would drop the associated `tokio` task. This task held a `flume` receiver. The way `flume`'s internals interact with thread-local storage and task destruction was not perfectly aligned with `tokio`'s expectations, leading to an intermittent panic.
+
+The resolution was to replace `flume` with `tokio::sync::broadcast`, the `tokio` runtime's native MPMC broadcast channel. Because `tokio::sync::broadcast` is designed as a core part of the `tokio` ecosystem, it is guaranteed to be compatible with `tokio`'s task management and lifecycle. The switch immediately resolved the panic and stabilized the system.
+
+This experience serves as a key architectural reminder: **when building on an async runtime like `tokio`, prefer using the runtime's native synchronization primitives (`tokio::sync`) over external libraries unless there is a compelling and well-understood reason to do otherwise.** The tight integration ensures compatibility and avoids subtle, hard-to-debug runtime issues.
