@@ -10,8 +10,6 @@ type EventType =
   | 'info'
   | 'data_update'
   | 'PipelineFailed'
-  | 'FilteredEeg'
-  | 'Fft'
   | 'SourceReady';
 
 interface PipelineStateEvent {
@@ -72,16 +70,6 @@ interface PipelineFailedEvent {
   };
 }
 
-interface FilteredEegEvent {
-  type: 'FilteredEeg';
-  data: any; // Base64 encoded binary data
-}
-
-interface FftEvent {
-  type: 'Fft';
-  data: any;
-}
-
 type EventData =
   | PipelineStateEvent
   | ParameterUpdateEvent
@@ -89,44 +77,61 @@ type EventData =
   | InfoEvent
   | DataUpdateEvent
   | SourceReadyEvent
-  | PipelineFailedEvent
-  | FilteredEegEvent
-  | FftEvent;
+  | PipelineFailedEvent;
 
-interface EventStreamContextType {
-  events: EventData[];
-  addEvent: (event: EventData) => void;
-  clearEvents: () => void;
-  isConnected: boolean;
-  error: string | null;
-  fatalError: string | null; // New state for unrecoverable errors
+// Separate stable and dynamic context values
+interface EventStreamContextStableType {
+  subscribe: (eventType: string, callback: (data: any) => void) => () => void;
   connect: () => void;
   disconnect: () => void;
 }
 
-const EventStreamContext = createContext<EventStreamContextType | undefined>(undefined);
+interface EventStreamContextDynamicType {
+  isConnected: boolean;
+  error: string | null;
+  fatalError: string | null;
+}
+
+const EventStreamStableContext = createContext<EventStreamContextStableType | undefined>(undefined);
+const EventStreamDynamicContext = createContext<EventStreamContextDynamicType | undefined>(undefined);
 
 export const useEventStream = () => {
-  const context = useContext(EventStreamContext);
+  const context = useContext(EventStreamStableContext);
   if (!context) {
     throw new Error('useEventStream must be used within an EventStreamProvider');
   }
   return context;
 };
 
+export const useEventStreamData = () => {
+  const context = useContext(EventStreamDynamicContext);
+  if (!context) {
+    throw new Error('useEventStreamData must be used within an EventStreamProvider');
+  }
+  return context;
+};
+
 export function EventStreamProvider({ children }: { children: React.ReactNode }) {
-  const [events, setEvents] = useState<EventData[]>([]);
   const [isConnected, setIsConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
+  const listeners = useRef<Record<string, Record<string, (data: any) => void>>>({});
 
-  const addEvent = useCallback((event: EventData) => {
-    setEvents(prevEvents => [...prevEvents, event]);
-  }, []);
+  const subscribe = useCallback((eventType: string, callback: (data: any) => void) => {
+    const id = Math.random().toString(36).substring(2, 9);
+    if (!listeners.current[eventType]) {
+      listeners.current[eventType] = {};
+    }
+    listeners.current[eventType][id] = callback;
 
-  const clearEvents = useCallback(() => {
-    setEvents([]);
+    // Return an unsubscribe function
+    return () => {
+      delete listeners.current[eventType][id];
+      if (Object.keys(listeners.current[eventType]).length === 0) {
+        delete listeners.current[eventType];
+      }
+    };
   }, []);
 
   const disconnect = useCallback(() => {
@@ -139,87 +144,96 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const connect = useCallback(() => {
-    // Manual connection is not the focus of this refactor.
-    // The primary goal is a stable auto-connection on mount.
-    if (eventSourceRef.current) {
-        console.log('[EventStream] Already connected.');
-        return;
-    }
-    console.log('[EventStream] Manual connect is not implemented, connection is handled by useEffect.');
+    // This is a no-op as the connection is managed by useEffect
+    console.log('[EventStream] Connection is managed automatically by the provider.');
   }, []);
 
   useEffect(() => {
+    // Ensure we don't create duplicate connections
     if (eventSourceRef.current) {
+      console.log('[EventStream] Duplicate connection.');
       return;
     }
 
-    const relativeUrl = '/api/events';
-    console.log('[EventStream] Connecting to SSE endpoint:', relativeUrl);
+    console.log('[EventStream] Connecting to SSE endpoint...');
+    const eventSource = new EventSource('/api/events');
+    eventSourceRef.current = eventSource;
     setFatalError(null);
 
-    const es = new EventSource(relativeUrl);
-    eventSourceRef.current = es;
-
-    const handleDisconnect = () => {
-      if (eventSourceRef.current) {
-        console.log('[EventStream] Closing SSE connection.');
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-        setIsConnected(false);
-      }
-    };
-
-    es.onopen = () => {
-      console.log('[EventStream] SSE connection established');
+    eventSource.onopen = () => {
+      console.log('[EventStream] SSE connection established.');
       setIsConnected(true);
       setError(null);
     };
 
-    es.onmessage = (event) => {
+    eventSource.onmessage = (event) => {
       try {
         const parsedData = JSON.parse(event.data);
-        const eventType = Object.keys(parsedData)[0];
+        const eventType = Object.keys(parsedData)[0] as EventType;
         const eventPayload = parsedData[eventType];
         const eventData = { type: eventType, data: eventPayload } as EventData;
 
         if (eventData.type === 'PipelineFailed') {
           console.error(`[EventStream] Fatal pipeline error: ${eventData.data.error}`);
           setFatalError(eventData.data.error);
-          handleDisconnect();
-        } else {
-          setEvents(prevEvents => [...prevEvents, eventData]);
+          // On fatal error, permanently close the connection.
+          eventSource.close();
+          setIsConnected(false);
+        }
+
+        // Publish the event to all registered listeners for this event type
+        if (listeners.current[eventType]) {
+          Object.values(listeners.current[eventType]).forEach(callback => {
+            try {
+              callback(eventPayload);
+            } catch (e) {
+              console.error(`[EventStream] Error in event listener for ${eventType}:`, e);
+            }
+          });
         }
       } catch (err) {
         console.error('[EventStream] Error parsing event data:', err);
       }
     };
 
-    es.onerror = (err) => {
-      console.error('[EventStream] SSE error:', err);
-      setError('SSE connection failed. Retrying...');
-      setIsConnected(false);
-      // EventSource handles reconnection automatically.
+    eventSource.onerror = (err) => {
+      // In React Strict Mode, a quick mount/unmount/remount cycle can trigger a benign error
+      // when the initial connection is aborted. We check the readyState to ensure we only
+      // act on genuine errors from an active or connecting stream.
+      if (eventSource.readyState === EventSource.OPEN || eventSource.readyState === EventSource.CONNECTING) {
+        console.error('[EventStream] SSE connection error:', err);
+        setError('SSE connection failed. The connection will be retried automatically.');
+        setIsConnected(false);
+      }
+      // If the state is CLOSED, we assume it was intentional (e.g., via the cleanup function)
+      // and we don't want to display an error.
     };
 
+    // Return a cleanup function to be called on component unmount
     return () => {
-      handleDisconnect();
+      console.log('[EventStream] Closing SSE connection on unmount.');
+      eventSource.close();
+      eventSourceRef.current = null;
     };
-  }, []); // Empty dependency array ensures this runs only once on mount.
+  }, []); // Empty dependency array ensures this effect runs only once on mount
 
-  const value = useMemo(() => ({
-    events,
-    addEvent,
-    clearEvents,
+  const stableValue = useMemo(() => ({
+    subscribe,
+    connect,
+    disconnect,
+  }), [subscribe, connect, disconnect]);
+
+  const dynamicValue = useMemo(() => ({
     isConnected,
     error,
     fatalError,
-    connect,
-    disconnect
-  }), [events, addEvent, clearEvents, isConnected, error, fatalError, connect, disconnect]);
+  }), [isConnected, error, fatalError]);
 
   return (
-    <EventStreamContext.Provider value={value}>
-      {children}
-    </EventStreamContext.Provider>
+    <EventStreamStableContext.Provider value={stableValue}>
+      <EventStreamDynamicContext.Provider value={dynamicValue}>
+        {children}
+      </EventStreamDynamicContext.Provider>
+    </EventStreamStableContext.Provider>
   );
 }

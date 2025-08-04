@@ -2,7 +2,7 @@
 import React, { useRef, useState, useEffect, useLayoutEffect } from 'react';
 import { EegRenderer } from './EegRenderer';
 import { FftRenderer } from '../../../plugins/brain_waves_fft/ui/FftRenderer';
-import { useEegData } from '../context/EegDataContext';
+import { useEegData, useEegDynamicData } from '../context/EegDataContext';
 import { useDataBuffer } from '../hooks/useDataBuffer';
 import { SampleChunk } from '../types/eeg';
 
@@ -18,11 +18,10 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, appletBrainWaves: false });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-  const [localDataVersion, setLocalDataVersion] = useState(0);
+  const signalGraphBuffer = useDataBuffer<SampleChunk>();
 
-    const signalGraphBuffer = useDataBuffer<SampleChunk>();
-
-  const { subscribeRaw, fftData, fullFftPacket } = useEegData();
+  const { subscribeRaw } = useEegData();
+  const { fftData, fullFftPacket } = useEegDynamicData();
 
   // Effect for all data subscriptions
   useEffect(() => {
@@ -37,7 +36,6 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
       unsubRaw = subscribeRaw((newSampleChunks) => {
         if (newSampleChunks.length > 0) {
           targetBuffer.addData(newSampleChunks);
-          setLocalDataVersion(v => v + 1);
         }
       });
     } else if (activeView === 'appletBrainWaves') {
@@ -56,7 +54,7 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
         console.log('[Visualizer] Unsubscribing from Fft');
       }
     };
-  }, [activeView, subscribeRaw, signalGraphBuffer]);
+  }, [activeView, subscribeRaw]);
 
   // Effect to setup ResizeObserver
   useLayoutEffect(() => {

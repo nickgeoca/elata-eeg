@@ -71,10 +71,16 @@ impl WebSocketBroker {
         // Task to forward messages from the broker to the client
         tokio::spawn(async move {
             while let Ok(msg) = topic_rx.recv().await {
-                let json_msg = serde_json::to_string(&*msg).unwrap();
-                if ws_tx.send(Message::Text(json_msg)).await.is_err() {
-                    // Client disconnected
-                    break;
+                match bincode::serialize(&*msg) {
+                    Ok(binary_msg) => {
+                        if ws_tx.send(Message::Binary(binary_msg)).await.is_err() {
+                            // Client disconnected
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to serialize message for WebSocket: {}", e);
+                    }
                 }
             }
         });

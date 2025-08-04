@@ -1,13 +1,13 @@
 'use client';
 
-import React, { useEffect } from 'react';
+import React, { useEffect, ReactNode } from 'react';
 import { CommandProvider } from "@/context/CommandWebSocketContext";
 import { EventStreamProvider } from "@/context/EventStreamContext";
 import { PipelineProvider, usePipeline } from "@/context/PipelineContext";
 import { EegDataProvider } from "@/context/EegDataContext";
 
 // A component to handle the pipeline initialization logic.
-const PipelineInitializer = ({ children }: { children: React.ReactNode }) => {
+const PipelineInitializer = ({ children }: { children: ReactNode }) => {
   const { pipelines, selectAndStartPipeline, pipelineStatus } = usePipeline();
 
   useEffect(() => {
@@ -21,7 +21,8 @@ const PipelineInitializer = ({ children }: { children: React.ReactNode }) => {
   return <>{children}</>;
 };
 
-export function AppProviders({ children }: { children: React.ReactNode }) {
+// All providers composed into a single, stable component.
+const ComposedProviders = ({ children }: { children: ReactNode }) => {
   return (
     <CommandProvider>
       <EventStreamProvider>
@@ -35,4 +36,8 @@ export function AppProviders({ children }: { children: React.ReactNode }) {
       </EventStreamProvider>
     </CommandProvider>
   );
+};
+
+export function AppProviders({ children }: { children: React.ReactNode }) {
+  return <ComposedProviders>{children}</ComposedProviders>;
 }

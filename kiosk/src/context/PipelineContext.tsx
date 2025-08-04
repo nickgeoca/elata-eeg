@@ -21,7 +21,6 @@ interface PipelineContextType {
   pipelineConfig: SystemConfig | null;
   pipelineStatus: 'stopped' | 'starting' | 'started' | 'error';
   selectAndStartPipeline: (id: string) => Promise<void>;
-  pipelineState: PipelineState;
 }
 
 const PipelineContext = createContext<PipelineContextType | undefined>(undefined);
@@ -37,7 +36,7 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     status: 'stopped',
     config: null,
   });
-  const { events } = useEventStream();
+  const { subscribe } = useEventStream();
   const initializationStarted = useRef(false);
 
   const selectAndStartPipeline = useCallback(async (id: string) => {
@@ -80,7 +79,15 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
           console.log('[PipelineProvider] No pipeline running. Starting default pipeline.');
           const defaultPipeline = availablePipelines.find((p: Pipeline) => p.id === 'default');
           if (defaultPipeline) {
-            await selectAndStartPipeline(defaultPipeline.id);
+            setPipelineState(prevState => ({ ...prevState, status: 'starting' }));
+            setSelectedPipeline(defaultPipeline);
+            try {
+              await apiStartPipeline(defaultPipeline.id);
+              console.log(`Pipeline ${defaultPipeline.id} start command issued successfully.`);
+            } catch (error) {
+              console.error(`Failed to start pipeline ${defaultPipeline.id}:`, error);
+              setPipelineState({ status: 'error', config: null });
+            }
           } else {
             console.error("No 'default' pipeline found.");
             setPipelineState({ status: 'error', config: null });
@@ -93,25 +100,30 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     };
 
     initialize();
-  }, [selectAndStartPipeline]);
+  }, []);
 
   useEffect(() => {
-    const lastEvent = events[events.length - 1];
-    if (!lastEvent) return;
-
-    if (lastEvent.type === 'pipeline_state') {
-      const { data } = lastEvent;
+    const handlePipelineState = (data: any) => {
       const newStatus = data.status === 'running' ? 'started' : data.status;
       setPipelineState(prevState => ({
         ...prevState,
         status: newStatus,
-        // Do not update config from this event, as the shape is different.
-        // The full config is loaded on initialization.
+        // Config is not updated here to preserve the full config from initialization
       }));
-    } else if (lastEvent.type === 'PipelineFailed') {
+    };
+
+    const handlePipelineFailed = () => {
       setPipelineState(prevState => ({ ...prevState, status: 'error' }));
-    }
-  }, [events]);
+    };
+
+    const unsubscribeState = subscribe('pipeline_state', handlePipelineState);
+    const unsubscribeFailed = subscribe('PipelineFailed', handlePipelineFailed);
+
+    return () => {
+      unsubscribeState();
+      unsubscribeFailed();
+    };
+  }, [subscribe]);
 
   const value = useMemo(() => ({
     pipelines,
@@ -119,8 +131,7 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     pipelineConfig: pipelineState.config,
     pipelineStatus: pipelineState.status,
     selectAndStartPipeline,
-    pipelineState: pipelineState,
-  }), [pipelines, selectedPipeline, pipelineState, selectAndStartPipeline]);
+  }), [pipelines, selectedPipeline, pipelineState.config, pipelineState.status, selectAndStartPipeline]);
 
   return (
     <PipelineContext.Provider value={value}>

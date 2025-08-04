@@ -4,8 +4,8 @@ import React from 'react'; // Added to resolve React.Fragment error
 import { useRef, useState, useEffect, useContext } from 'react';
 import EegRecordingControls from './EegRecordingControls';
 import { useCommand } from '../context/CommandWebSocketContext';
-import { useEegData } from '../context/EegDataContext';
-import { useEventStream } from '../context/EventStreamContext';
+import { useEegData, useEegStatus } from '../context/EegDataContext';
+import { useEventStream, useEventStreamData } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
 
 export default function EegMonitorWebGL() {
@@ -23,9 +23,10 @@ export default function EegMonitorWebGL() {
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
 
   // Get all data and config from the new central context
-  const { config, dataStatus } = useEegData();
+  const { config } = useEegData();
+  const { dataStatus } = useEegStatus();
   const { dataReceived, driverError, wsStatus } = dataStatus;
-  const { fatalError } = useEventStream();
+  const { fatalError } = useEventStreamData();
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);

@@ -25,28 +25,39 @@ export interface FftPacket {
 }
 
  // Define the shape of the context data
-interface EegDataContextType {
-  dataVersion: number; // Increments on new data
-  getRawSamples: () => SampleChunk[]; // Function to get the current samples
-  subscribeRaw: (callback: RawDataCallback) => () => void; // Returns an unsubscribe function
-  fftData: Record<number, number[]>; // Latest FFT data per channel
-  fullFftPacket: FftPacket | null; // The complete, most recent FFT packet
-  config: any;
+// --- Start of new context structure ---
+
+// 1. Stable Context: For functions and stable configuration
+interface EegDataStableContextType {
+  subscribeRaw: (callback: RawDataCallback) => () => void;
+  getRawSamples: () => SampleChunk[];
+  clearOldData: () => void;
+  config: any; // Config is considered stable; changes should be infrequent
+}
+
+// 2. Dynamic Context: For frequently updated data
+interface EegDataDynamicContextType {
+  dataVersion: number;
+  fftData: Record<number, number[]>;
+  fullFftPacket: FftPacket | null;
+}
+
+// 3. Status Context: For connection and data flow status
+interface EegDataStatusContextType {
   dataStatus: {
     dataReceived: boolean;
     driverError: string | null;
     wsStatus: string;
     isReconnecting: boolean;
   };
-  isReady: boolean; // New flag to signal when the system is fully initialized
-  // Add methods for data management
-  clearOldData: () => void;
-  // Subscription management
-  setConfig: (config: any) => void;
+  isReady: boolean;
 }
 
-// Create the context with a default value
-const EegDataContext = createContext<EegDataContextType | undefined>(undefined);
+const EegDataStableContext = createContext<EegDataStableContextType | undefined>(undefined);
+const EegDataDynamicContext = createContext<EegDataDynamicContextType | undefined>(undefined);
+const EegDataStatusContext = createContext<EegDataStatusContextType | undefined>(undefined);
+
+// --- End of new context structure ---
 
 // Define the props for the provider component
 interface EegDataProviderProps {
@@ -62,15 +73,25 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [driverError, setDriverError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isReady, setIsReady] = useState(false); // State to track final configuration readiness
-  const rawDataSubscribersRef = useRef<Set<RawDataCallback>>(new Set());
+  const rawDataSubscribersRef = useRef({ raw: {} as Record<string, RawDataCallback> });
 
-  const { pipelineConfig, pipelineState } = usePipeline(); // Get the pipeline state object
-  const { events } = useEventStream();
+  const { pipelineConfig, pipelineStatus } = usePipeline(); // Get the pipeline state object
+  const { subscribe } = useEventStream();
+  const [sourceReadyMeta, setSourceReadyMeta] = useState<any | null>(null);
 
-  const sourceReadyMeta = useMemo(() => {
-    const event = events.find(e => e.type === 'SourceReady');
-    return event && event.type === 'SourceReady' ? event.data : null;
-  }, [events]);
+  useEffect(() => {
+    const unsubscribe = subscribe('SourceReady', (data: any) => {
+      // The actual metadata is nested inside the 'meta' property of the event data
+      if (data.meta) {
+        console.log('[EegDataContext] Received SourceReady event with meta:', data.meta);
+        setSourceReadyMeta(data.meta);
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [subscribe]);
 
   const config = useMemo(() => {
     if (sourceReadyMeta) {
@@ -172,7 +193,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     setDataVersion(v => v + 1);
     
     // Publish the new data to all subscribers
-    rawDataSubscribersRef.current.forEach(callback => callback(newSampleChunks));
+    Object.values(rawDataSubscribersRef.current.raw).forEach(callback => callback(newSampleChunks));
     
     // Periodic cleanup of old data (every 10 seconds)
     if (now - lastCleanupTime.current > 10000) {
@@ -197,6 +218,16 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, []);
 
+  // Create refs to hold the latest versions of the data handlers.
+  // This prevents them from becoming dependencies in the main WebSocket useEffect.
+  const handleSamplesRef = useRef(handleSamples);
+  const handleFftDataRef = useRef(handleFftData);
+
+  useEffect(() => {
+    handleSamplesRef.current = handleSamples;
+    handleFftDataRef.current = handleFftData;
+  }, [handleSamples, handleFftData]);
+
   const clearOldData = useCallback(() => {
     rawSamplesRef.current = [];
     sampleTimestamps.current = [];
@@ -209,12 +240,12 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   }, []);
 
  const subscribeRaw = useCallback((callback: RawDataCallback) => {
-   rawDataSubscribersRef.current.add(callback);
-   // Return an unsubscribe function
-   return () => {
-     rawDataSubscribersRef.current.delete(callback);
-   };
- }, []);
+    const id = Date.now().toString();
+    rawDataSubscribersRef.current.raw[id] = callback;
+    return () => {
+      delete rawDataSubscribersRef.current.raw[id];
+    };
+  }, [rawDataSubscribersRef]);
 
  // Clear buffer when configuration changes to prevent misalignment
  // Create a stable key for the configuration to prevent unnecessary effect runs
@@ -239,13 +270,13 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   // Effect to determine when the system is truly ready
   useEffect(() => {
     // Ready when pipeline is started and the final config with channel names is available
-    if (pipelineState.status === 'started' && sourceReadyMeta?.channel_names) {
+    if (pipelineStatus === 'started' && sourceReadyMeta?.channel_names) {
       setIsReady(true);
       console.log('[EegDataContext] System is ready. Final configuration has been received.');
     } else {
       setIsReady(false);
     }
-  }, [pipelineState.status, sourceReadyMeta]);
+  }, [pipelineStatus, sourceReadyMeta]);
 
   // Handle WebSocket status changes to detect reconnections
   const handleDataUpdate = useCallback((received: boolean) => {
@@ -265,83 +296,167 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   }, [isReconnecting]);
 
   const [wsStatus, setWsStatus] = useState('Disconnected');
-  const wsRef = useRef<WebSocket | null>(null);
+  const ws = useRef<WebSocket | null>(null);
+  const connectionGuard = useRef(false); // Prevents race conditions
 
-  const handleWsMessage = useCallback((event: MessageEvent) => {
-    try {
-      const data = JSON.parse(event.data);
-      if (data.topic === 'eeg_voltage' && data.payload.data) {
-        // This part requires knowing the exact structure of `data.payload.data`
-        // For now, we will log it.
-        console.log("Received RtPacket:", data.payload);
-        // TODO: Adapt `data.payload` to the format expected by `onSamples`.
-      } else if (data.topic === 'fft') {
-        handleFftData(data.payload);
+  // This useEffect manages the WebSocket connection lifecycle.
+  useEffect(() => {
+    // If the system isn't ready, ensure any existing connection is closed
+    // and reset the connection guard to allow a new connection attempt later.
+    if (!isReady) {
+      if (ws.current) {
+        console.log('[EegDataContext] System not ready, closing existing WebSocket.');
+        ws.current.close();
+        ws.current = null;
       }
-    } catch (error) {
-      console.error("[EegDataContext] Error in onmessage handler:", error);
+      connectionGuard.current = false;
+      return;
     }
-  }, [handleFftData]);
 
-  const connect = useCallback(() => {
-    if (wsRef.current || !isReady) return;
-
+    // If a connection exists or is already in progress, do nothing.
+    // The connectionGuard prevents a race condition from React Strict Mode's double-render.
+    if (ws.current || connectionGuard.current) {
+      return;
+    }
+    
+    connectionGuard.current = true; // Set the guard
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.host;
-    const url = `${protocol}//${host}/ws/data`;
+    const host = window.location.hostname;
+    const url = `${protocol}//${host}:9000/ws/data`;
 
     console.log('[EegDataContext] Connecting to WebSocket:', url);
     setWsStatus('Connecting...');
-    const newWebSocket = new WebSocket(url);
-    wsRef.current = newWebSocket;
+    const socket = new WebSocket(url);
+    socket.binaryType = 'arraybuffer';
+    ws.current = socket;
 
-    newWebSocket.onopen = () => {
+    socket.onopen = () => {
       console.log('[EegDataContext] WebSocket connection established');
       setWsStatus('Connected');
-      const subscriptionMessage = { subscribe: "eeg_voltage" };
-      newWebSocket.send(JSON.stringify(subscriptionMessage));
+      socket.send(JSON.stringify({ subscribe: 'eeg_voltage' }));
     };
 
-    newWebSocket.onmessage = handleWsMessage;
-
-    newWebSocket.onerror = (err) => {
-      console.error('[EegDataContext] WebSocket error:', err);
-      setWsStatus('Error');
+    // Define the message handler inside the effect to create a stable closure
+    // over the handleSamples and handleFftData callbacks.
+    socket.onmessage = (event: MessageEvent) => {
+      if (!(event.data instanceof ArrayBuffer)) {
+        console.warn('[EegDataContext] Received non-binary WebSocket message, ignoring.');
+        return;
+      }
+      try {
+        const buffer = event.data;
+        const dataView = new DataView(buffer);
+        let offset = 0;
+        const readString = () => {
+          const len = Number(dataView.getBigUint64(offset, true));
+          offset += 8;
+          const str = new TextDecoder().decode(buffer.slice(offset, offset + Number(len)));
+          offset += Number(len);
+          return str;
+        };
+        const topic = readString();
+        if (topic === 'eeg_voltage') {
+          const variant = dataView.getUint32(offset, true);
+          offset += 4;
+          if (variant !== 1) return;
+          const source_id = readString();
+          const ts_ns = dataView.getBigUint64(offset, true);
+          offset += 8;
+          const batch_size = dataView.getUint32(offset, true);
+          offset += 4;
+          const num_channels = dataView.getUint32(offset, true);
+          offset += 4;
+          const sensor_id = dataView.getUint32(offset, true); offset += 4;
+          const meta_rev = dataView.getUint32(offset, true); offset += 4;
+          const schema_ver = dataView.getUint8(offset); offset += 1;
+          const source_type = readString();
+          const v_ref = dataView.getFloat32(offset, true); offset += 4;
+          const adc_bits = dataView.getUint8(offset); offset += 1;
+          const gain = dataView.getFloat32(offset, true); offset += 4;
+          const sample_rate = dataView.getUint32(offset, true); offset += 4;
+          const offset_code = dataView.getInt32(offset, true); offset += 4;
+          const is_twos_complement = dataView.getUint8(offset) === 1; offset += 1;
+          const channel_names_len = Number(dataView.getBigUint64(offset, true)); offset += 8;
+          const channel_names = [];
+          for (let i = 0; i < channel_names_len; i++) {
+              channel_names.push(readString());
+          }
+          const samples_len = Number(dataView.getBigUint64(offset, true));
+          offset += 8;
+          const samples = new Float32Array(buffer, offset, samples_len);
+          if (num_channels === 0 || batch_size === 0) return;
+          const channelSamples = Array.from({ length: num_channels }, () => ({
+            values: new Float32Array(batch_size),
+            timestamps: new BigUint64Array(batch_size),
+          }));
+          const nsPerSample = 1_000_000_000 / sample_rate;
+          for (let i = 0; i < batch_size; i++) {
+            const sampleTimestamp = BigInt(ts_ns) + BigInt(i * nsPerSample);
+            for (let j = 0; j < num_channels; j++) {
+              const sampleIndex = i * num_channels + j;
+              channelSamples[j].values[i] = samples[sampleIndex];
+              channelSamples[j].timestamps[i] = sampleTimestamp;
+            }
+          }
+          handleSamplesRef.current(channelSamples);
+        } else if (topic === 'fft') {
+          // The FFT data is expected to be a JSON string, so we parse it.
+          handleFftDataRef.current(JSON.parse(new TextDecoder().decode(event.data)));
+        }
+      } catch (error) {
+        console.error("Failed to parse or handle binary WebSocket message:", error);
+      }
     };
 
-    newWebSocket.onclose = () => {
+    socket.onerror = (err) => {
+      // Only handle errors if the socket is in a connecting or open state.
+      // This prevents logging errors when the connection is intentionally closed by the cleanup function.
+      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+        console.error('[EegDataContext] WebSocket error:', err);
+        setWsStatus('Error');
+      }
+    };
+
+    socket.onclose = () => {
       console.log('[EegDataContext] WebSocket connection closed');
-      setWsStatus('Disconnected');
-      wsRef.current = null;
+      // Only update state if this is the active socket that was closed.
+      if (ws.current === socket) {
+        setWsStatus('Disconnected');
+        ws.current = null;
+      }
+      // Reset the guard to allow for new connection attempts.
+      // NOTE: The guard is now reset only when isReady is false, to prevent race conditions.
+      // connectionGuard.current = false;
     };
-  }, [isReady, handleWsMessage]);
 
-  const disconnect = useCallback(() => {
-    if (wsRef.current) {
-      console.log('[EegDataContext] Disconnecting from WebSocket');
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-  }, []);
-
-  useEffect(() => {
-    if (isReady) {
-      connect();
-    } else {
-      disconnect();
-    }
+    // The cleanup function is critical for preventing memory leaks and race conditions.
     return () => {
-      disconnect();
+      console.log('[EegDataContext] Cleanup: Closing WebSocket');
+      // Remove event listeners to prevent them from being called on a stale socket instance.
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+      socket.close();
     };
-  }, [isReady, connect, disconnect]);
+  }, [isReady]);
 
-  const value = useMemo(() => ({
-    dataVersion,
-    getRawSamples,
+  const setConfig = useCallback(() => {}, []); // No-op, since config is now derived
+
+  const stableValue = useMemo(() => ({
     subscribeRaw,
+    getRawSamples,
+    clearOldData,
+    config,
+  }), [subscribeRaw, getRawSamples, clearOldData, config]);
+
+  const dynamicValue = useMemo(() => ({
+    dataVersion,
     fftData,
     fullFftPacket,
-    config,
+  }), [dataVersion, fftData, fullFftPacket]);
+
+  const statusValue = useMemo(() => ({
     dataStatus: {
       dataReceived,
       driverError,
@@ -349,22 +464,34 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       isReconnecting,
     },
     isReady,
-    clearOldData,
-    setConfig: () => {}, // No-op, since config is now derived
-  }), [dataVersion, fftData, fullFftPacket, config, dataReceived, driverError, wsStatus, isReconnecting, isReady, getRawSamples, subscribeRaw, clearOldData]);
+  }), [dataReceived, driverError, wsStatus, isReconnecting, isReady]);
 
   return (
-    <EegDataContext.Provider value={value}>
-      {children}
-    </EegDataContext.Provider>
+    <EegDataStableContext.Provider value={stableValue}>
+      <EegDataDynamicContext.Provider value={dynamicValue}>
+        <EegDataStatusContext.Provider value={statusValue}>
+          {children}
+        </EegDataStatusContext.Provider>
+      </EegDataDynamicContext.Provider>
+    </EegDataStableContext.Provider>
   );
 };
 
-// Custom hook to use the EEG data context
+// Custom hooks to access the different contexts
 export const useEegData = () => {
-  const context = useContext(EegDataContext);
-  if (context === undefined) {
-    throw new Error('useEegData must be used within an EegDataProvider');
-  }
+  const context = useContext(EegDataStableContext);
+  if (context === undefined) throw new Error('useEegData must be used within an EegDataProvider');
+  return context;
+};
+
+export const useEegDynamicData = () => {
+  const context = useContext(EegDataDynamicContext);
+  if (context === undefined) throw new Error('useEegDynamicData must be used within an EegDataProvider');
+  return context;
+};
+
+export const useEegStatus = () => {
+  const context = useContext(EegDataStatusContext);
+  if (context === undefined) throw new Error('useEegStatus must be used within an EegDataProvider');
   return context;
 };

@@ -3,12 +3,12 @@
 import EegMonitor from '@/components/EegMonitor';
 import { PipelineProvider, usePipeline } from '@/context/PipelineContext';
 import { EventStreamProvider } from '@/context/EventStreamContext';
-import { EegDataProvider, useEegData } from '@/context/EegDataContext';
+import { EegDataProvider, useEegStatus } from '@/context/EegDataContext';
 
 // This wrapper component now determines readiness based on the new isReady flag
 function EegMonitorWrapper() {
   const { pipelineStatus } = usePipeline();
-  const { isReady, dataStatus } = useEegData();
+  const { isReady, dataStatus } = useEegStatus();
 
   if (!isReady) {
     return (
