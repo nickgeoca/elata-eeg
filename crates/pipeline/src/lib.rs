@@ -15,6 +15,7 @@ pub mod error;
 pub mod registry;
 pub mod plugin;
 pub mod bridge;
+pub mod daemon_protocol;
 #[macro_use]
 pub mod macros;
 

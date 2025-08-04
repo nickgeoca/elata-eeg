@@ -95,6 +95,8 @@ pub enum StageError {
     JsonError(String),
     #[error("live reconfiguration is not supported by this stage")]
     UnsupportedReconfig,
+    #[error("processing error: {0}")]
+    Processing(String),
     #[error("stream closed")]
     StreamClosed,
     #[error("driver error: {0}")]

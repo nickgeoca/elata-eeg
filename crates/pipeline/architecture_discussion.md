@@ -1,117 +1,136 @@
-# Pipeline Architecture: Metadata Propagation Decision Log
+# Architecture Discussion: Pipeline vs. Functional Array
 
-## 1. Problem Statement
+This document compares two potential architectures for the EEG data processing pipeline:
+1.  **Current Pipeline Architecture:** A multi-threaded, graph-based system defined in `architecture.md`.
+2.  **Proposed Functional Array:** A simpler, single-pass chain of functions.
 
-A robust and scalable pipeline requires a mechanism to provide configuration and context to its various stages. This metadata (e.g., sensor sample rate, voltage reference, calibration constants) must be available to any stage that needs it. The system must handle:
-
-*   **Multiple, heterogeneous sensors** running concurrently.
-*   **Live configuration changes** from a GUI or other controller.
-*   **Minimal performance overhead** (latency, bandwidth, CPU).
-*   **High maintainability** and clear separation of concerns.
+The goal is to evaluate the trade-offs and decide if the complexity of the current system is justified.
 
 ---
 
-## 2. Explored Options & Deliberation
+## 1. At a Glance
 
-### Option A: Local State per Stage
-
-*   **Mechanism:** Each pipeline stage holds its own configuration in local fields (e.g., `struct Filter { cutoff: f32 }`). A central controller (like a GUI) is responsible for calling updater methods on each stage (`filter.set_cutoff(50.0)`).
-*   **Initial Appeal:** This model is simple and intuitive for a single, static pipeline.
-*   **Critical Flaw:** This pattern fails catastrophically when multiple data sources are present. If packets from two different sensors (with different sample rates) flow through the same filter stage, the stage has no way of knowing which `cutoff` to apply to which packet. Its local state can be updated by the controller for one sensor, leading to silent data corruption for the other. The data and the metadata needed to process it are decoupled, creating a race condition.
-
-### Option B: Self-Describing Data Packets (The "Arc-Meta" Pattern)
-
-*   **Mechanism:** Instead of stages holding state, the data packet itself carries its own configuration metadata. This is achieved by including a shared, immutable reference to a metadata struct in each packet's header.
-    ```rust
-    pub struct PacketHeader {
-        // ... other fields
-        pub meta: Arc<SensorMeta>,
-    }
-    ```
-*   **How it Solves the Flaw:** Each packet is now self-contained. A stage inspects the `meta` from the packet it is currently processing. It doesn't matter if packets from different sensors are interleaved; the correct metadata is always attached to the correct data.
-*   **Performance:** Using `Arc` (Atomic Reference Counter) is a zero-copy strategy. The `SensorMeta` struct is allocated once. Each packet only carries a lightweight (16-byte) smart pointer. Cloning a packet is extremely cheap, as it only copies the pointer and increments a reference count.
+| Feature | Current Pipeline Architecture | Proposed Functional Array |
+| :--- | :--- | :--- |
+| **Core Model** | Directed Acyclic Graph (DAG) | Linear Array `[f(..), g(..)]` |
+| **Execution** | Multi-threaded, parallel groups | Single-threaded, sequential |
+| **Data Flow** | Zero-copy `Arc<RtPacket>` | Potential for copies between functions |
+| **Flexibility** | High (fan-in/fan-out, dynamic changes) | Low (linear path only) |
+| **Complexity** | High | Low |
+| **Use Case** | High-performance, real-time systems | Simple, single-purpose processing |
 
 ---
 
-## 3. Refinement: Driver Responsibility
+## 2. Visual Comparison
 
-A key question arose: *where* should the initial raw-to-physical-unit conversion happen?
+### Current Pipeline Architecture (Graph-based)
 
-### Sub-Option B1: "Smart Driver"
+This model allows for complex routing, like splitting a data stream to multiple sinks (fan-out) or combining multiple sources (fan-in).
 
-*   **Mechanism:** The sensor driver itself performs the `raw -> volts` conversion. It would output a tuple of `(Vec<f32>, Arc<SensorMeta>)`.
-*   **Pros:** One less stage in the pipeline.
-*   **Cons:**
-    *   Ties physical conversion logic to the hardware driver crate.
-    *   Makes it impossible to replay or re-process the original raw data.
-    *   Harder to unit-test the conversion logic in isolation.
+```mermaid
+graph TD
+    subgraph Acquire Thread
+        A[eeg_source]
+    end
+    subgraph DSP Thread
+        B[to_voltage]
+    end
+    subgraph Sinks Thread
+        C[csv_sink]
+        D[websocket_sink]
+    end
 
-### Sub-Option B2: "Thin Driver" + Universal `ToVoltage` Stage (Recommended)
+    A -- "raw_data" --> B
+    B -- "voltage_data" --> C
+    B -- "voltage_data" --> D
+```
 
-*   **Mechanism:** The driver's sole responsibility is to acquire raw data and package it with the correct metadata. It outputs a `Packet<i32>` containing the raw samples and the `Arc<SensorMeta>`. The very first stage in the pipeline is a dedicated, universal `ToVoltage` stage.
-*   **Pros:**
-    *   **Decoupling:** The driver knows about hardware; the pipeline knows about processing. Clean separation.
-    *   **Maintainability:** All scaling logic lives in one, easily testable place. Adding a new sensor often only requires adding a `match` arm to the `ToVoltage` stage.
-    *   **Replayability & Debugging:** The original, untouched raw data is available at the start of the pipeline, which is invaluable for debugging, logging, and future analysis.
+### Proposed Functional Array (Linear)
 
----
+This model is simpler but inherently sequential. It doesn't naturally support branching paths.
 
-## 4. Final Decision
-
-The chosen architecture is **Option B2: Thin Driver + Universal `ToVoltage` Stage using the `Arc<SensorMeta>` pattern.**
-
-*   **Sensor drivers** are responsible for managing hardware state and producing packets of **raw data** (`i32`) along with an `Arc<SensorMeta>` describing the configuration at the moment of acquisition.
-*   A dedicated **`ToVoltage` stage** is the first step in the pipeline. It uses the metadata within each packet to convert raw samples to physical units (`f32` volts).
-*   All subsequent stages operate on these physical units, while still having access to the original `SensorMeta` for context (e.g., logging, parameterization).
-
-This model provides the best balance of performance, correctness, and long-term maintainability. It explicitly prevents data corruption from multiple sources and provides a clean, extensible framework for adding new sensors and processing stages.
-
-## Misallaneous notes
-### “Arc-meta header” cheat-sheet — every question & answer in one place
-
-| #  | Question / “what-if”                                                 | Answer / design choice                                                                                                                                                       |
-| -- | -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1  | **Why not just repeat YAML fields in every stage?**                  | Human error and drift; we need a *single source of truth*.                                                                                                                   |
-| 2  | **Why not let the graph builder copy params at start-up?**           | Breaks on run-time edits and mixed-sensor graphs; debugging becomes opaque.                                                                                                  |
-| 3  | **Is embedding metadata in every packet wasteful?**                  | Raw JSON copy *would* be (≈7 % size bump). Solution: wrap once in `Arc<SensorMeta>` → header holds only a shared pointer (16 B).                                             |
-| 4  | **What if the config blob grows to 1 kB+?**                          | `Arc` still shares one allocation; per-packet overhead stays 16 B. Throughput hit is <1 %.                                                                                   |
-| 5  | **But that’s still a pointer deref each packet—cache miss?**         | Usually L1-hot. If profiling ever shows cost, add a “sticky cache”: compare pointer, refresh scalars only when it changes (≈1 ns check).                                     |
-| 6  | **What if we introduce a totally new sensor with different fields?** | `SensorMeta` carries `source_type` + `version`. Consumers `match` on that and handle new keys locally; unaffected stages keep forwarding the same `Arc`. No global refactor. |
-| 7  | **What if configs become *huge* (tens of kB)?**                      | Switch to **registry hybrid**: header stores `u32 cfg_id`; global slab maps id → `Arc<SensorMeta>`. Wire-compatible; only builder & first-lookup code change.                |
-| 8  | **Who updates configs at run-time?**                                 | The GUI (or any controller) sends `ControlMsg::UpdateParam`. Source stage builds a *new* `Arc<SensorMeta>`; downstream stages see the new pointer on next packet.            |
-| 9  | **Does every stage now know JSON?**                                  | No. `SensorMeta` is a typed struct—`meta.vref` is a direct field access. We keep an optional `Map<String, Value>` inside for “user tags” if truly freeform keys are needed.  |
-| 10 | **What about boilerplate when adding new stages?**                   | Introduce `stage_def!` macro: param struct + `update_param` + Serde derives auto-generated; new stage ≈ 5 lines.                                                             |
-| 11 | **How do we avoid silent ABI drift?**                                | Add `schema_ver: u8` to `PacketHeader`; CI test fails if version mismatch.                                                                                                   |
-| 12 | **Anything else to future-proof?**                                   | *Benchmark gate* in CI (fail on >1 % perf regression) and a small `pipeline-messages` crate to keep GUI/runtime control enums in sync.                                       |
-
----
-
-#### Recommended baseline
-
-```rust
-#[derive(Clone)]
-pub struct PacketHeader {
-    pub ts_ns: u64,
-    pub batch_size: u16,
-    pub meta: Option<Arc<SensorMeta>>,   // shared, typed, zero-copy
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct SensorMeta {
-    pub schema_ver: u8,
-    pub source_type: String,   // "ADS1299", "ADS2000", …
-    pub vref: f32,
-    pub adc_bits: u8,
-    pub sample_rate: u32,
-    // optional: tags: HashMap<String, Value>
-}
+```mermaid
+graph TD
+    A[sensor.aquire_raw] --> B[sensor.to_voltage] --> C[filter.low_pass] --> D[websocket.send]
 ```
 
 ---
 
-### TL;DR for the next engineer / AI
+## 3. Detailed Pros and Cons
 
-* **Use the Arc-meta header pattern** (Questions 1-6).
-* If configs ever dwarf a few kB, **flip to cfg-id + registry** (Q 7).
-* GUI orchestrates live updates; pipeline remains stateless apart from packet headers (Q 8).
-* Stick to typed structs, macro-generated stage boilerplate, and versioned headers to keep things safe and fast (Q 9-12).
+### Approach 1: Current Pipeline Architecture
+
+This is the system detailed in [`architecture.md`](crates/pipeline/architecture.md).
+
+**✅ Pros:**
+
+*   **Performance & Parallelism:** Explicitly designed for multi-core CPUs. By pinning I/O, DSP, and sinks to different cores, it minimizes latency and prevents a slow stage (like writing a file) from blocking the real-time acquisition loop.
+*   **Robust Data Flow:** The `Arc<RtPacket>` system ensures zero-copy data handling. This is critical for high-throughput (4000 sps) data to avoid performance bottlenecks from memory allocation and copying.
+*   **Flexibility (Fan-out/Fan-in):** Natively supports complex topologies. The `default.yaml` example demonstrates this by fanning out the `voltage_data` to both a CSV sink and a WebSocket sink. This is impossible in a simple linear array.
+*   **Resilience & Error Handling:** Features advanced, per-stage error policies (e.g., `DrainThenStop`, `SkipPacket`). A fault in one branch (e.g., the CSV writer fails) doesn't have to tear down the entire pipeline; the WebSocket branch could continue streaming.
+*   **Dynamic Configuration:** The architecture is built to be controlled at runtime. You can start, stop, and even hot-swap stages without killing the daemon, which is crucial for a system that needs to be highly available.
+*   **Decoupling:** The separation of `pipeline_core`, `plugin_api`, and the actual stages is a strong design principle. It allows the core runtime to be refactored without breaking every plugin, which is vital for long-term maintenance and community contributions.
+
+**❌ Cons:**
+
+*   **Complexity:** This is the main drawback. The learning curve is steep. A new contributor needs to understand the executor, allocators, stage traits, and the graph structure. This complexity can be a barrier to entry.
+*   **Boilerplate:** While macros like `simple_stage!` help, there is still more boilerplate required to add a new stage compared to just writing a function.
+
+### Approach 2: Proposed Functional Array
+
+This is the model of running a simple array of functions, like `[sensor.aquire_raw, sensor.to_voltage, ...]`.
+
+**✅ Pros:**
+
+*   **Simplicity:** The concept is incredibly easy to grasp. The code would be almost self-documenting. A new contributor could add a new processing step in minutes.
+*   **Low Boilerplate:** Adding a new stage is as simple as writing a new function and adding it to the array in the configuration.
+*   **Reconfigurability:** The pipeline definition in YAML is straightforward and easy to modify.
+
+**❌ Cons:**
+
+*   **Single-Threaded Performance:** A simple array of functions would execute sequentially on a single thread. At 4000 sps, any function that takes a significant amount of time (file I/O, complex DSP) will introduce latency and could lead to dropped packets, as the acquisition would be blocked.
+*   **No Fan-Out:** It cannot handle one-to-many data flows. You couldn't send the same data to a WebSocket and a file simultaneously. You would have to run two separate, redundant pipelines.
+*   **Primitive Error Handling:** If one function in the array panics, the entire pipeline crashes. There's no built-in mechanism for the fine-grained error recovery the current system provides.
+*   **Inefficient Data Handling:** Passing large vectors of data between functions can lead to frequent memory allocations and copies, which would be a major performance hit at the target sample rates.
+*   **Static Configuration:** Any change to the pipeline (e.g., changing a filter's cutoff frequency) would likely require a full restart.
+
+---
+
+## 4. Initial Conclusion
+
+The current architecture, while complex, directly solves several non-trivial problems that are critical for a high-performance EEG system: **parallelism, back-pressure, and flexible data routing (fan-out).**
+
+A simpler functional array would be much easier to understand but would likely fail to meet the system's performance and reliability requirements, especially regarding fan-out to multiple sinks and preventing I/O from blocking data acquisition.
+
+The complexity seems to be a direct and necessary consequence of the system's requirements. The question then becomes: are the requirements themselves "overkill"?
+
+
+---
+
+## 5. Recommendation: Tame the Complexity
+
+The consensus is that the current architecture's features (parallelism, fan-out, resilience) are necessary to meet the project's goals. The high-level design is sound.
+
+However, the concern about complexity is the most critical issue for the project's health. A powerful but unusable system is a failed system.
+
+The path forward is not to remove the power but to **aggressively manage the complexity**. We must improve the developer experience so that a new contributor can add a simple filter stage without needing to understand the entire multi-threading model.
+
+### Strategies to Reduce Cognitive Overhead
+
+1.  **Create a `Stage Developer's Guide`.**
+    *   A short, focused tutorial (`TUTORIAL.md`) that walks a contributor through creating a simple `pass-through` stage.
+    *   It should explicitly tell them what they *don't* need to worry about (e.g., "You don't have to think about threads or allocators, just focus on the `process` function.").
+    *   Include a "Cookbook" section with recipes for common patterns (e.g., modifying data in-place, creating a new buffer, handling errors).
+
+2.  **Enhance the `simple_stage!` Macro.**
+    *   The existing macro is a great start. We could extend it or create new ones to handle more boilerplate automatically.
+    *   Could we add a `#[derive(Stage)]` proc-macro to make it even cleaner? This would be the ultimate goal for boilerplate reduction.
+
+3.  **Improve Configuration & Introspection.**
+    *   The YAML configuration is good. We can make it better by adding more validation and clearer error messages. If a stage is wired incorrectly, the daemon should provide a human-readable error pointing to the exact line in the YAML.
+    *   Add a `GET /pipeline/graph` endpoint to the daemon that returns the current pipeline structure in a machine-readable format (e.g., JSON or DOT graph format). This would allow for building visualizers and debugging tools.
+
+4.  **Add a "Sanity Check" Test Suite.**
+    *   Create a set of simple integration tests that new contributors can run to verify their stage hasn't broken the pipeline. This builds confidence.
+
+By focusing on these developer-centric improvements, we can keep the high-performance core while making the project far more welcoming and sustainable.

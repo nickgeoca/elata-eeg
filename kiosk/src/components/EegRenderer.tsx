@@ -138,16 +138,22 @@ export const EegRenderer = React.memo(function EegRenderer({
       // Process all available chunks to keep the visualization as real-time as possible,
       // but be mindful of performance. The underlying data handling should be efficient.
       if (chunks.length > 0) {
+        // 1. De-interleave all incoming samples into per-channel batches
         const batches: number[][] = Array.from({ length: NCH }, () => []);
         chunks.forEach(chk => {
-          // Ensure the chunk has samples and the first sample has a valid channelIndex
-          if (chk.samples.length > 0 && chk.samples[0].channelIndex < NCH) {
-            const channelIndex = chk.samples[0].channelIndex;
-            const values = chk.samples.map(s => s.value);
-            batches[channelIndex].push(...values);
+          const samples = chk.samples; // This is a Float32Array
+          const numChannels = chk.meta.channel_names.length;
+          if (numChannels === 0) return;
+
+          for (let i = 0; i < samples.length; i++) {
+            const channelIndex = i % numChannels;
+            if (channelIndex < NCH) { // Safety check
+              batches[channelIndex].push(samples[i]);
+            }
           }
         });
 
+        // 2. Update WebGL buffers with the new batches
         for (let ch = 0; ch < NCH; ch++) {
           if (!batches[ch].length) continue;
 

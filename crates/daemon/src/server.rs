@@ -42,11 +42,7 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| async move {
-        // For now, we'll just subscribe to a default "all" topic.
-        // A more robust implementation would allow the client to specify topics.
-        state.broker.add_client(socket, "all".to_string()).await;
-    })
+    ws.on_upgrade(|socket| async move { state.broker.add_client(socket).await })
 }
 
 pub async fn run(

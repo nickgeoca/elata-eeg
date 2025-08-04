@@ -4,6 +4,7 @@ import React from 'react'; // Added to resolve React.Fragment error
 import { useRef, useState, useEffect, useContext } from 'react';
 import EegRecordingControls from './EegRecordingControls';
 import { useCommand } from '../context/CommandWebSocketContext';
+import { sendControlCommand } from '../utils/api';
 import { useEegData, useEegStatus } from '../context/EegDataContext';
 import { useEventStream, useEventStreamData } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
@@ -49,27 +50,24 @@ export default function EegMonitorWebGL() {
 
   const { sendPowerlineFilterCommand, startRecording, stopRecording, recordingStatus, recordingFilePath } = useCommand();
 
-  const handleUpdateConfig = () => {
-    // In the new API, configuration updates are sent via POST /api/control
-    // We'll use the existing command WebSocket for now, but this should eventually use HTTP
-
+  const handleUpdateConfig = async () => {
     if (recordingStatus.startsWith('Currently recording')) {
-        setConfigUpdateStatus('Cannot change configuration during recording.');
-        return;
+      setConfigUpdateStatus('Cannot change configuration during recording.');
+      return;
     }
 
-    const newConfigPayload: { channels?: number[]; sample_rate?: number; powerline_filter_hz?: number | null } = {};
+    const driverParams: any = {};
     let changesMade = false;
 
     if (selectedChannelCount !== undefined) {
       const numChannels = parseInt(selectedChannelCount, 10);
-      if (!isNaN(numChannels) && numChannels >= 0 && numChannels <= 8) { // Max 8 channels for ADS1299
+      if (!isNaN(numChannels) && numChannels >= 0 && numChannels <= 8) {
         const currentChannels = config?.channels || [];
         const newChannelsArray = Array.from({ length: numChannels }, (_, i) => i);
-        // Compare arrays properly
         if (JSON.stringify(currentChannels) !== JSON.stringify(newChannelsArray)) {
-            newConfigPayload.channels = newChannelsArray;
-            changesMade = true;
+          // The backend expects a structure like { chips: [{ channels: [0, 1, ...] }] }
+          driverParams.chips = [{ channels: newChannelsArray }];
+          changesMade = true;
         }
       } else {
         setConfigUpdateStatus('Invalid number of channels selected.');
@@ -79,18 +77,18 @@ export default function EegMonitorWebGL() {
 
     if (selectedSampleRate !== undefined) {
       const rate = parseInt(selectedSampleRate, 10);
-      const validRates = [250, 500, 1000, 2000]; // Example valid rates
+      const validRates = [250, 500, 1000, 2000];
       if (!isNaN(rate) && validRates.includes(rate)) {
         if (config?.sample_rate !== rate) {
-            newConfigPayload.sample_rate = rate;
-            changesMade = true;
+          driverParams.sample_rate = rate;
+          changesMade = true;
         }
       } else {
         setConfigUpdateStatus(`Invalid sample rate: ${rate}. Valid: ${validRates.join(', ')}`);
         return;
       }
     }
-    
+
     if (selectedPowerlineFilter !== undefined) {
       let filterValue: number | null = null;
       if (selectedPowerlineFilter === 'off') {
@@ -105,26 +103,34 @@ export default function EegMonitorWebGL() {
         }
       }
       if (config?.powerline_filter_hz !== filterValue) {
-        newConfigPayload.powerline_filter_hz = filterValue;
-        changesMade = true;
+        // This parameter is not part of the driver config, so we handle it separately
+        // This will be removed once the backend handles this via SetParameter
+        sendPowerlineFilterCommand(filterValue);
+        // We don't set changesMade for this, as it's a separate command
       }
     }
-    
+
     if (!changesMade) {
       setConfigUpdateStatus('No changes selected to update.');
-      console.log('No changes to send for config update.');
       return;
     }
-    
-    console.log('Sending config update via EegMonitor /config WebSocket:', newConfigPayload);
+
+    const command = {
+      SetParameter: {
+        target_stage: 'eeg_source',
+        parameters: {
+          driver: driverParams,
+        },
+      },
+    };
+
     setConfigUpdateStatus('Sending configuration update...');
-    // Send the configuration update via the command WebSocket
-    // In a full implementation, this would be a POST /api/control request
-    // This should be replaced with a proper API call
-    // sendControlCommand(newConfigPayload);
-    console.warn("Configuration updates via WebSocket are deprecated. Please update to use POST /api/control.");
-    if (newConfigPayload.powerline_filter_hz !== undefined) {
-      sendPowerlineFilterCommand(newConfigPayload.powerline_filter_hz);
+    try {
+      await sendControlCommand(command);
+      setConfigUpdateStatus('Configuration update sent successfully.');
+    } catch (error) {
+      console.error('Failed to send configuration update:', error);
+      setConfigUpdateStatus(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
  

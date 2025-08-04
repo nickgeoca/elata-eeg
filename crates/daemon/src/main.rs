@@ -70,36 +70,29 @@ async fn main() -> Result<(), DriverError> {
         .find(|s| s.stage_type == "eeg_source")
         .expect("No eeg_source stage found in config");
 
-    let driver_type = eeg_source_config
+    let driver_config_value = eeg_source_config
         .params
         .get("driver")
-        .and_then(|d| d.get("type"))
+        .expect("No driver configuration found in eeg_source stage");
+
+    let driver_type = driver_config_value
+        .get("type")
         .and_then(|t| t.as_str())
         .unwrap_or("Mock");
 
     let driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver>>>> = if use_mock || driver_type == "Mock" {
         tracing::info!("Using mock EEG driver");
-        let adc_config = AdcConfig::default(); // Use default for mock
+        // Parse the driver configuration from the pipeline
+        let adc_config: AdcConfig = serde_json::from_value(driver_config_value.clone())
+            .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
         Some(Arc::new(std::sync::Mutex::new(Box::new(MockDriver::new(
             adc_config,
         )?))))
     } else {
         tracing::info!("Using ElataV2 hardware driver");
-        let adc_config = AdcConfig {
-            chips: vec![
-                sensors::types::ChipConfig {
-                    spi_bus: 0,
-                    cs_pin: 7,
-                    channels: vec![2],
-                },
-                sensors::types::ChipConfig {
-                    spi_bus: 0,
-                    cs_pin: 8,
-                    channels: vec![1],
-                },
-            ],
-            ..AdcConfig::default()
-        };
+        // Parse the driver configuration from the pipeline
+        let adc_config: AdcConfig = serde_json::from_value(driver_config_value.clone())
+            .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
         let mut driver_instance = ElataV2Driver::new(adc_config)?;
         driver_instance.initialize()?;
         Some(Arc::new(std::sync::Mutex::new(Box::new(driver_instance))))

@@ -3,15 +3,24 @@ use axum::{
     Error,
 };
 use dashmap::DashMap;
-use eeg_types::comms::BrokerMessage;
+use eeg_types::comms::{BrokerMessage, BrokerPayload};
 use futures::{
     stream::{SplitSink, SplitStream},
     SinkExt, StreamExt,
 };
+use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 const WEBSOCKET_BUFFER_SIZE: usize = 100;
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+enum ClientMessage {
+    Subscribe(String),
+    Unsubscribe(String),
+}
 
 /// Manages WebSocket connections and routes data from the pipeline to subscribed clients.
 pub struct WebSocketBroker {
@@ -54,43 +63,63 @@ impl WebSocketBroker {
     }
 
     /// Adds a new client to the broker, subscribing them to a specific topic.
-    pub async fn add_client(&self, ws: WebSocket, initial_topic: String) {
-        let topic_sender = self
-            .subscriptions
-            .entry(initial_topic.clone())
-            .or_insert_with(|| {
-                let (sender, _) = broadcast::channel(WEBSOCKET_BUFFER_SIZE);
-                sender
-            })
-            .value()
-            .clone();
-
-        let mut topic_rx = topic_sender.subscribe();
-        let (mut ws_tx, mut ws_rx) = ws.split();
-
-        // Task to forward messages from the broker to the client
-        tokio::spawn(async move {
-            while let Ok(msg) = topic_rx.recv().await {
-                match bincode::serialize(&*msg) {
-                    Ok(binary_msg) => {
-                        if ws_tx.send(Message::Binary(binary_msg)).await.is_err() {
-                            // Client disconnected
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to serialize message for WebSocket: {}", e);
-                    }
-                }
-            }
-        });
+    pub async fn add_client(self: Arc<Self>, ws: WebSocket) {
+        let (ws_tx, mut ws_rx) = ws.split();
+        let ws_tx = Arc::new(Mutex::new(ws_tx));
+        let client_subscriptions = Arc::new(Mutex::new(HashSet::new()));
 
         // Task to handle messages from the client (e.g., subscription changes)
-        // This part is not fully implemented as per instructions, but the task is spawned.
+        let broker = self.clone();
         tokio::spawn(async move {
             while let Some(Ok(msg)) = ws_rx.next().await {
-                // Handle incoming messages from client, e.g., to change subscriptions
-                if let Message::Close(_) = msg {
+                if let Message::Text(text) = msg {
+                    match serde_json::from_str::<ClientMessage>(&text) {
+                        Ok(ClientMessage::Subscribe(topic)) => {
+                            let mut subs = client_subscriptions.lock().await;
+                            if subs.insert(topic.clone()) {
+                                let topic_sender = broker
+                                    .subscriptions
+                                    .entry(topic.clone())
+                                    .or_insert_with(|| {
+                                        let (sender, _) =
+                                            broadcast::channel(WEBSOCKET_BUFFER_SIZE);
+                                        sender
+                                    })
+                                    .value()
+                                    .clone();
+                                let mut topic_rx = topic_sender.subscribe();
+                                let ws_tx_clone = ws_tx.clone();
+
+                                // Task to forward messages from the broker to the client
+                                tokio::spawn(async move {
+                                    while let Ok(msg) = topic_rx.recv().await {
+                                        let ws_message = match &msg.payload {
+                                            BrokerPayload::Meta(json_str) => {
+                                                Message::Text(json_str.clone())
+                                            }
+                                            BrokerPayload::Data(bin_vec) => {
+                                                Message::Binary(bin_vec.clone())
+                                            }
+                                        };
+
+                                        if ws_tx_clone.lock().await.send(ws_message).await.is_err()
+                                        {
+                                            // Client disconnected
+                                            break;
+                                        }
+                                    }
+                                });
+                            }
+                        }
+                        Ok(ClientMessage::Unsubscribe(topic)) => {
+                            let mut subs = client_subscriptions.lock().await;
+                            subs.remove(&topic);
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to parse client message: {}", e);
+                        }
+                    }
+                } else if let Message::Close(_) = msg {
                     break;
                 }
             }

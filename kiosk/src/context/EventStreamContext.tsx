@@ -117,6 +117,10 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   const [fatalError, setFatalError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const listeners = useRef<Record<string, Record<string, (data: any) => void>>>({});
+  
+  // Use window property to track connection attempts in React Strict Mode
+  // This persists across double executions unlike refs which are reset per component instance
+  const connectionGuardKey = '__eventstream_connection_guard__';
 
   const subscribe = useCallback((eventType: string, callback: (data: any) => void) => {
     const id = Math.random().toString(36).substring(2, 9);
@@ -149,11 +153,23 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   }, []);
 
   useEffect(() => {
+    // Check if we're in React Strict Mode development double-run scenario
+    // In Strict Mode, the first run sets the window guard, and the second run should be ignored
+    // @ts-ignore - Accessing custom property on window object
+    if (window[connectionGuardKey]) {
+      console.log('[EventStream] Connection attempt already made, skipping duplicate connection attempt.');
+      return;
+    }
+
     // Ensure we don't create duplicate connections
     if (eventSourceRef.current) {
       console.log('[EventStream] Duplicate connection.');
       return;
     }
+    
+    // Set the connection guard on window to prevent duplicate connections
+    // @ts-ignore - Adding custom property to window object
+    window[connectionGuardKey] = true;
 
     console.log('[EventStream] Connecting to SSE endpoint...');
     const eventSource = new EventSource('/api/events');
@@ -204,6 +220,10 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
         console.error('[EventStream] SSE connection error:', err);
         setError('SSE connection failed. The connection will be retried automatically.');
         setIsConnected(false);
+      } else {
+        // Reset connection guard on window when connection fails
+        // @ts-ignore - Adding custom property to window object
+        window[connectionGuardKey] = false;
       }
       // If the state is CLOSED, we assume it was intentional (e.g., via the cleanup function)
       // and we don't want to display an error.
@@ -214,6 +234,9 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
       console.log('[EventStream] Closing SSE connection on unmount.');
       eventSource.close();
       eventSourceRef.current = null;
+      // Reset the connection guard on window to allow for new connection attempts.
+      // @ts-ignore - Adding custom property to window object
+      window[connectionGuardKey] = false;
     };
   }, []); // Empty dependency array ensures this effect runs only once on mount
 
