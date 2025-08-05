@@ -38,11 +38,11 @@ impl StageFactory for StatefulTestStageFactory {
 
 /// Sets up a complete, running daemon instance for testing.
 async fn setup_test_daemon() -> (
-    thread::JoinHandle<()>,
     Receiver<PipelineEvent>,
     Sender<Arc<RtPacket>>,
     Arc<AtomicBool>,
     String, // WebSocket address
+    thread::JoinHandle<()>,
 ) {
     let (event_tx, event_rx) = flume::unbounded::<PipelineEvent>();
     let (bridge_tx, bridge_rx) = flume::unbounded::<BridgeMsg>();
@@ -61,7 +61,7 @@ async fn setup_test_daemon() -> (
     };
 
     // --- Pipeline Thread ---
-    let (executor, input_tx, _) = {
+    let (executor, input_tx, _fatal_error_rx, _control_tx) = {
         let mut registry = StageRegistry::new();
         registry.register(
             "stateful_test_stage",
@@ -152,14 +152,14 @@ async fn setup_test_daemon() -> (
         })
     };
 
-    (pipeline_handle, event_rx, input_tx, stop_flag, addr)
+    (event_rx, input_tx, stop_flag, addr, pipeline_handle)
 }
 
 #[tokio::test]
 async fn test_full_stack_command_and_shutdown() {
     // The server part is commented out as it requires more info to fix.
     // This test will focus on the pipeline and control logic.
-    let (_pipeline_handle, _event_rx, _runtime_tx, stop_flag, _addr) = setup_test_daemon().await;
+    let (_event_rx, _runtime_tx, stop_flag, _addr, pipeline_handle) = setup_test_daemon().await;
 
     // 2. Send command to change state
     // let cmd = ControlCommand::SetTestState(42);
@@ -176,6 +176,9 @@ async fn test_full_stack_command_and_shutdown() {
 
     // 5. Signal all threads to stop
     stop_flag.store(true, Ordering::Relaxed);
+
+    // 6. Wait for the pipeline to shut down
+    pipeline_handle.join().unwrap();
 
     // Test passed if it reaches here without panicking
 }

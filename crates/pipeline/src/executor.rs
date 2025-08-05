@@ -32,9 +32,9 @@ struct Node {
 ///
 /// This struct manages the thread pool and the communication channels between stages.
 pub struct Executor {
-    handles: HashMap<StageId, StageHandle>,
+    handles: Arc<Mutex<HashMap<StageId, StageHandle>>>,
     graph: PipelineGraph,
-    stop_txs: Vec<Sender<()>>,
+    stop_txs: Arc<Mutex<Vec<Sender<()>>>>,
     fatal_error_tx: Sender<Box<dyn Any + Send>>,
 }
 
@@ -46,23 +46,25 @@ impl Executor {
         Self,
         Sender<Arc<RtPacket>>,
         Receiver<Box<dyn Any + Send>>,
+        Sender<ControlCommand>,
     ) {
         let (input_tx, input_rx) = flume::unbounded();
         let (fatal_error_tx, fatal_error_rx) = flume::unbounded();
+        let (control_tx, control_rx) = flume::unbounded();
 
         let mut executor = Self {
-            handles: HashMap::new(),
+            handles: Arc::new(Mutex::new(HashMap::new())),
             graph,
-            stop_txs: Vec::new(),
+            stop_txs: Arc::new(Mutex::new(Vec::new())),
             fatal_error_tx,
         };
 
-        executor.wire_and_start(input_rx);
-        (executor, input_tx, fatal_error_rx)
+        executor.wire_and_start(input_rx, control_rx);
+        (executor, input_tx, fatal_error_rx, control_tx)
     }
 
     /// Wires the graph and starts the threads.
-    fn wire_and_start(&mut self, source_rx: Receiver<Arc<RtPacket>>) {
+    fn wire_and_start(&mut self, source_rx: Receiver<Arc<RtPacket>>, control_rx: Receiver<ControlCommand>) {
         let core_ids = core_affinity::get_core_ids().unwrap_or_default();
         let num_cores = core_ids.len();
         if num_cores < 4 {
@@ -96,7 +98,7 @@ impl Executor {
                 dsp_cores.clone()
             };
             let (stop_tx, stop_rx) = flume::bounded(1);
-            self.stop_txs.push(stop_tx);
+            self.stop_txs.lock().unwrap().push(stop_tx);
             let _stage_config = self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap().clone();
             let node = self.graph.nodes.remove(stage_id).unwrap();
             let context = self.graph.context.clone();
@@ -155,6 +157,7 @@ impl Executor {
 
             let node_clone = node.clone();
             let thread_name = node.lock().unwrap().name.clone();
+            let control_rx_clone = control_rx.clone();
             let thread_handle = thread::Builder::new()
                 .name(thread_name)
                 .spawn(move || {
@@ -176,6 +179,8 @@ impl Executor {
                             loop {
                                 let should_halt = Arc::new(AtomicBool::new(false));
                                 let should_halt_clone = should_halt.clone();
+                                let node_clone = node.clone();
+                                let mut context_clone = context.lock().unwrap();
 
                                 Selector::new()
                                     .recv(&input_rx, |msg| {
@@ -192,6 +197,14 @@ impl Executor {
                                     })
                                     .recv(&stop_rx, move |_| {
                                         should_halt.store(true, Ordering::SeqCst);
+                                    })
+                                    .recv(&control_rx_clone, move |msg| {
+                                        if let Ok(cmd) = msg {
+                                            let mut node_guard = node_clone.lock().unwrap();
+                                            if let Err(e) = node_guard.stage.control(&cmd, &mut context_clone) {
+                                                error!("Error handling control command: {}", e);
+                                            }
+                                        }
                                     })
                                     .wait();
 
@@ -320,7 +333,7 @@ impl Executor {
                 })
                 .unwrap();
 
-            self.handles.insert(
+            self.handles.lock().unwrap().insert(
                 stage_id.clone(),
                 StageHandle { thread_handle },
             );
@@ -328,15 +341,23 @@ impl Executor {
     }
 
     /// Stops the executor, shutting down all stage threads.
-    pub fn stop(mut self) {
+    pub fn stop(self) {
         info!("Stopping multi-threaded executor...");
-        for tx in self.stop_txs.drain(..) {
+        for tx in self.stop_txs.lock().unwrap().iter() {
             let _ = tx.send(());
         }
-        for (_name, handle) in self.handles.drain() {
-            let _ = handle.thread_handle.join();
+
+        if let Ok(handles_mutex) = Arc::try_unwrap(self.handles) {
+            let handles = handles_mutex.into_inner().unwrap();
+            for (stage_id, handle) in handles {
+                info!("Waiting for stage '{}' to shut down...", stage_id);
+                if let Err(e) = handle.thread_handle.join() {
+                    error!("Stage '{}' panicked during shutdown: {:?}", stage_id, e);
+                }
+            }
+        } else {
+            error!("Could not get exclusive access to stage handles for shutdown.");
         }
-        info!("All stage threads joined.");
     }
 
     pub fn get_current_config(&self) -> crate::config::SystemConfig {

@@ -14,17 +14,15 @@ stages:
         vref: 4.5
         gain: 1.0
         chips:
-          - channels: [7]
+          - channels: [0, 1, 2, 3, 4, 5, 6, 7]
             cs_pin: 7
-          - channels: [1]
-            cs_pin: 8
+          # - channels: [1]
+          #   cs_pin: 8
       batch_size: 32
     outputs: ["raw_data"]
 
   - name: "to_voltage"
     type: "to_voltage"
-    params:
-      vref: 4.5
     inputs:
       - "eeg_source.raw_data"
     outputs: ["voltage_data"]
@@ -33,6 +31,7 @@ stages:
     type: "csv_sink"
     params:
       path: "e2e_test_output.csv"
+      max_recording_length_minutes: 60
     inputs:
       - "to_voltage.voltage_data"
 

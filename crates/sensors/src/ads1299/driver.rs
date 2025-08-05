@@ -199,7 +199,7 @@ impl crate::types::AdcDriver for Ads1299Driver {
         &mut self,
         _batch_size: usize,
         _stop_flag: &AtomicBool,
-    ) -> Result<(Vec<i32>, u64), SensorError> {
+    ) -> Result<(Vec<i32>, u64, AdcConfig), SensorError> {
         unimplemented!("This will be implemented by the board-specific drivers (ElataV1/V2)");
     }
 

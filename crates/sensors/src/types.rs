@@ -9,7 +9,7 @@ use eeg_types::SensorError as EegSensorError;
 /// Configuration for ADC/sensor drivers
 use serde::{Serialize, Deserialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChipConfig {
     /// List of active channels for this chip (0-indexed for this chip)
     pub channels: Vec<u8>,
@@ -35,7 +35,7 @@ impl Default for ChipConfig {
 }
 
 /// Configuration for ADC/sensor drivers
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct AdcConfig {
     /// Target sample rate in Hz
     pub sample_rate: u32,
@@ -121,6 +121,9 @@ pub enum DriverError {
     /// Generic error
     #[error("Error: {0}")]
     Other(String),
+    /// Feature not implemented
+    #[error("Feature not implemented: {0}")]
+    NotImplemented(String),
 }
 
 /// Trait that all sensor drivers must implement
@@ -141,13 +144,23 @@ pub trait AdcDriver: Send + Sync + 'static {
         &mut self,
         batch_size: usize,
         stop_flag: &AtomicBool,
-    ) -> Result<(Vec<i32>, u64), EegSensorError>;
+    ) -> Result<(Vec<i32>, u64, AdcConfig), EegSensorError>;
 
     /// Get current driver status
     fn get_status(&self) -> DriverStatus;
 
     /// Get current configuration
     fn get_config(&self) -> Result<AdcConfig, DriverError>;
+
+    /// Reconfigure the driver with new parameters.
+    ///
+    /// This method allows for dynamic reconfiguration of the driver while it is
+    /// running. Not all parameters may be reconfigurable.
+    fn reconfigure(&mut self, _config: &AdcConfig) -> Result<(), DriverError> {
+        Err(DriverError::NotImplemented(
+            "reconfigure is not implemented for this driver".to_string(),
+        ))
+    }
 
     /// Shutdown the driver and clean up resources
     fn shutdown(&mut self) -> Result<(), DriverError>;

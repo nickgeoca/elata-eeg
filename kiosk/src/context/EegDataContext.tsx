@@ -66,6 +66,7 @@ interface EegDataProviderProps {
 
 export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const rawSamplesRef = useRef<SampleChunk[]>([]);
+  const configUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
   const [fullFftPacket, setFullFftPacket] = useState<FftPacket | null>(null);
@@ -74,6 +75,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [driverError, setDriverError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [isReady, setIsReady] = useState(false); // State to track final configuration readiness
+  const [shouldConnect, setShouldConnect] = useState(false); // State to control when to connect
   const rawDataSubscribersRef = useRef({ raw: {} as Record<string, RawDataCallback> });
 
   const { pipelineConfig, pipelineStatus } = usePipeline(); // Get the pipeline state object
@@ -109,7 +111,12 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
 
     const eegSourceStage = pipelineConfig.stages.find(s => s.type === 'eeg_source');
-    const channels = eegSourceStage ? Array.from({ length: eegSourceStage.params.channel_count || 0 }, (_, i) => i) : [];
+    let channels: number[] = [];
+    if (eegSourceStage && eegSourceStage.params?.driver?.chips?.length > 0) {
+      // Sum up the number of channels from all chips
+      const channelCount = eegSourceStage.params.driver.chips.reduce((acc: number, chip: any) => acc + (chip.channels?.length || 0), 0);
+      channels = Array.from({ length: channelCount }, (_, i) => i);
+    }
 
     return {
       ...pipelineConfig,
@@ -232,27 +239,36 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const configChangeGuardKey = '__eeg_config_change_guard__';
 
   // Clear buffer when the stable configuration key changes
-  useEffect(() => {
-    // Don't clear the buffer on the initial load when configKey is null
-    if (configKey === null) return;
-
-    // Check if we're in React Strict Mode development double-run scenario
-    // @ts-ignore - Accessing custom property on window object
-    if (process.env.NODE_ENV === 'development' && window[configChangeGuardKey]) {
-      return;
-    }
-
-    rawSamplesRef.current = [];
-    sampleTimestamps.current = [];
-    setDataVersion(v => v + 1); // Atomically notify consumers of the change
-    
-    // Set the guard and log the message
-    if (process.env.NODE_ENV === 'development') {
-      // @ts-ignore - Adding custom property to window object
-      window[configChangeGuardKey] = true;
-    }
-    console.log('[EegDataContext] Cleared buffer due to configuration change');
-  }, [configKey]);
+    useEffect(() => {
+      // Don't clear the buffer on the initial load when configKey is null
+      if (configKey === null) return;
+  
+      // Clear existing timeout
+      if (configUpdateTimeoutRef.current) {
+          clearTimeout(configUpdateTimeoutRef.current);
+      }
+  
+      // Debounce buffer clearing
+      configUpdateTimeoutRef.current = setTimeout(() => {
+          rawSamplesRef.current = [];
+          sampleTimestamps.current = [];
+          setDataVersion(v => v + 1);
+          console.log('[EegDataContext] Cleared buffer due to configuration change');
+          
+          // Check if we're in React Strict Mode development double-run scenario
+          // @ts-ignore - Accessing custom property on window object
+          if (process.env.NODE_ENV === 'development' && window[configChangeGuardKey]) {
+            return;
+          }
+          
+          // Set the guard to prevent duplicate logging in development mode
+          if (process.env.NODE_ENV === 'development') {
+            // @ts-ignore - Adding custom property to window object
+            window[configChangeGuardKey] = true;
+          }
+      }, 100); // Small debounce to handle rapid config changes
+  
+    }, [configKey]);
 
   // Use a window property to prevent duplicate logging in development mode
   const systemReadyGuardKey = '__eeg_system_ready_guard__';
@@ -262,6 +278,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     // Ready when pipeline is started and the final config with channel names is available
     if (pipelineStatus === 'started' && sourceReadyMeta?.channel_names) {
       setIsReady(true);
+      setShouldConnect(true); // Signal that we should connect to data WebSocket
       
       // Check if we're in React Strict Mode development double-run scenario
       // @ts-ignore - Accessing custom property on window object
@@ -274,6 +291,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       }
     } else {
       setIsReady(false);
+      setShouldConnect(false); // Signal that we should not connect to data WebSocket
       // Reset the guard when system is not ready
       if (process.env.NODE_ENV === 'development') {
         // @ts-ignore - Adding custom property to window object
@@ -308,6 +326,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [wsStatus, setWsStatus] = useState('Disconnected');
   const ws = useRef<WebSocket | null>(null);
   const isCleanupRef = useRef(false); // Track if we're in cleanup phase
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null); // For managing reconnection timer
   
   // Use window property to track connection attempts in React Strict Mode
   // This persists across double executions unlike refs which are reset per component instance
@@ -315,6 +334,11 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
   // This useEffect manages the WebSocket connection lifecycle. It runs once on mount.
   useEffect(() => {
+    // Only connect when we've received the SourceReady event
+    if (!shouldConnect) {
+      return;
+    }
+    
     // Check if we're in React Strict Mode development double-run scenario
     // In Strict Mode, the first run sets the window guard, and the second run should be ignored
     // @ts-ignore - Accessing custom property on window object
@@ -395,11 +419,11 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
               sample_rate: 250,
               offset_code: 0,
               is_twos_complement: true,
-              channel_names: ["CH0", "CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7"]
+              channel_names: ["CH0", "CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7"],
             };
           }
 
-          // 4. Create Float332Array view on the sample data (zero-copy)
+          // 4. Create Float32Array view on the sample data (zero-copy)
           const samplesOffset = jsonHeaderOffset + jsonHeaderLen;
           
           // Calculate padding added by backend to ensure 4-byte alignment
@@ -409,13 +433,14 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           if (header.packet_type === 'Voltage') {
             const samples = new Float32Array(buffer, alignedOffset);
             
-            const newChunk: SampleChunk = {
-              meta: meta,
-              samples: samples,
-              timestamp: header.ts_ns,
-            };
-
-            handleSamplesRef.current(newChunk);
+            if (meta) {
+                const newChunk: SampleChunk = {
+                    meta: meta,
+                    samples: samples,
+                    timestamp: header.ts_ns,
+                };
+                handleSamplesRef.current(newChunk);
+            }
           } else {
             console.warn(`[EegDataContext] Received unhandled packet type: ${header.packet_type}`);
           }
@@ -438,6 +463,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         // Reset connection guard on window when connection fails
         // @ts-ignore - Adding custom property to window object
         window[connectionGuardKey] = false;
+        // Reset shouldConnect to allow reconnection attempts
+        setShouldConnect(false);
       }
     };
 
@@ -460,6 +487,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
             // Reset the connection attempt guard to allow reconnection
             // @ts-ignore - Adding custom property to window object
             window[connectionGuardKey] = false;
+            // Reset shouldConnect to allow reconnection attempts
+            setShouldConnect(false);
             // Trigger reconnection by forcing a re-render
             setDataReceived(false);
           }
@@ -472,17 +501,19 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // Mark this as intentional cleanup to prevent error handling
       isCleanupRef.current = true;
       // Remove event listeners to prevent them from being called on a stale socket instance.
-      socket.onopen = null;
-      socket.onmessage = null;
-      socket.onerror = null;
-      socket.onclose = null;
-      socket.close();
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      }
       // Reset the connection guard on window to allow for new connection attempts.
       // @ts-ignore - Adding custom property to window object
       window[connectionGuardKey] = false;
       ws.current = null;
     };
-  }, []); // Empty dependency array ensures this runs only once on mount.
+  }, [shouldConnect]); // Add shouldConnect as dependency to control when to connect
 
   // This useEffect manages sending subscribe/unsubscribe messages based on system readiness.
   useEffect(() => {

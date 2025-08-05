@@ -141,14 +141,30 @@ export const EegRenderer = React.memo(function EegRenderer({
         // 1. De-interleave all incoming samples into per-channel batches
         const batches: number[][] = Array.from({ length: NCH }, () => []);
         chunks.forEach(chk => {
-          const samples = chk.samples; // This is a Float32Array
-          const numChannels = chk.meta.channel_names.length;
-          if (numChannels === 0) return;
+          const samples = chk.samples;
+          const numMetaChannels = chk.meta.channel_names.length;
+          if (numMetaChannels === 0) return;
 
-          for (let i = 0; i < samples.length; i++) {
-            const channelIndex = i % numChannels;
-            if (channelIndex < NCH) { // Safety check
-              batches[channelIndex].push(samples[i]);
+          // Performance workaround: If we are in single-channel mode (NCH=1),
+          // we assume the data is not interleaved. This is to counteract a
+          // suspected issue where the backend sends 1-channel data but the
+          // metadata still reports 8 channels, causing the de-interleaving
+          // logic to discard 7/8th of the samples and leading to a very
+          // expensive data-shifting operation on the CPU.
+          if (NCH === 1) {
+            const batch = batches[0];
+            if (batch) {
+              for (let i = 0; i < samples.length; i++) {
+                batch.push(samples[i]);
+              }
+            }
+          } else {
+            // Original logic for correctly interleaved multi-channel data.
+            for (let i = 0; i < samples.length; i++) {
+              const channelIndex = i % numMetaChannels;
+              if (channelIndex < NCH) {
+                batches[channelIndex].push(samples[i]);
+              }
             }
           }
         });

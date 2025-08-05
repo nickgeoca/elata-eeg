@@ -20,16 +20,8 @@ impl StageFactory for ToVoltageFactory {
         config: &StageConfig,
         _: &StageInitCtx,
     ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
-        let v_ref = config.params["vref"]
-            .as_f64()
-            .ok_or_else(|| StageError::BadConfig("Missing vref".to_string()))? as f32;
-
         Ok((
-            Box::new(ToVoltage::new(
-                config.name.clone(),
-                v_ref,
-                config.outputs.clone(),
-            )),
+            Box::new(ToVoltage::new(config.name.clone(), config.outputs.clone())),
             None,
         ))
     }
@@ -37,19 +29,14 @@ impl StageFactory for ToVoltageFactory {
 
 pub struct ToVoltage {
     id: String,
-    v_ref: f32,
     output_name: String,
 }
 
 impl ToVoltage {
-    pub fn new(id: String, v_ref: f32, outputs: Vec<String>) -> Self {
+    pub fn new(id: String, outputs: Vec<String>) -> Self {
         let output_name =
             format!("{}.{}", id, outputs.get(0).cloned().unwrap_or_else(|| "0".to_string()));
-        Self {
-            id,
-            v_ref,
-            output_name,
-        }
+        Self { id, output_name }
     }
 }
 
@@ -65,15 +52,11 @@ impl Stage for ToVoltage {
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         match PacketView::from(&*pkt) {
             PacketView::RawI32 { header, data } => {
-                log::info!("to_voltage processing {} raw samples", data.len());
-                let gain = header.meta.gain;
-                let v_ref = header.meta.v_ref;
-
                 let mut voltage_samples =
                     RecycledF32Vec::with_capacity(ctx.allocator.clone(), data.len());
 
                 for &raw_sample in data.iter() {
-                    let voltage = ch_raw_to_voltage(raw_sample, v_ref, gain);
+                    let voltage = ch_raw_to_voltage(raw_sample, header.meta.v_ref, header.meta.gain);
                     voltage_samples.push(voltage);
                 }
 

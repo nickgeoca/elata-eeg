@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
 use std::sync::Arc;
 use eeg_types::DriverType;
+use sensors::types::AdcConfig;
 
 /// Configuration for the DSP filters
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,27 +27,21 @@ impl Default for FilterConfig {
 /// Configuration for the daemon
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DaemonConfig {
-    /// Maximum recording length in minutes before starting a new file
-    pub max_recording_length_minutes: u32,
-    /// Directory where recordings are stored
-    pub recordings_directory: String,
-    /// Session identifier for recordings
-    pub session: String,
     /// Batch size for processing data
     pub batch_size: usize,
     /// Type of board driver to use (Ads1299 or Mock)
     pub driver_type: DriverType,
     /// Configuration for the DSP filters
     pub filter_config: FilterConfig,
+    /// Configuration for the ADC
+    pub adc_config: AdcConfig,
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            max_recording_length_minutes: 60,
-            recordings_directory: "./recordings/".to_string(), // Changed to ./
-            session: "".to_string(),
             batch_size: 32,
+            adc_config: AdcConfig::default(),
             driver_type: DriverType::MockEeg, // Default to Mock driver for safety
             filter_config: FilterConfig::default(),
         }

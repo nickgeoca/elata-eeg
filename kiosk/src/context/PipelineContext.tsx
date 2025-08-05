@@ -103,13 +103,28 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
   }, []);
 
   useEffect(() => {
-    const handlePipelineState = (data: any) => {
+    const handlePipelineState = async (data: any) => {
       const newStatus = data.status === 'running' ? 'started' : data.status;
       setPipelineState(prevState => ({
         ...prevState,
         status: newStatus,
-        // Config is not updated here to preserve the full config from initialization
       }));
+
+      // If the pipeline has started or is running, fetch the full state
+      // to ensure the config is up-to-date.
+      if (newStatus === 'started') {
+        try {
+          const fullState = await getPipelineState();
+          if (fullState && fullState.stages.length > 0) {
+            setPipelineState(prevState => ({
+              ...prevState,
+              config: fullState,
+            }));
+          }
+        } catch (error) {
+          console.error("Failed to fetch full pipeline state after status change:", error);
+        }
+      }
     };
 
     const handlePipelineFailed = () => {

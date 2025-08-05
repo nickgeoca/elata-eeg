@@ -20,7 +20,7 @@ use crate::error::StageError;
 use crate::registry::StageFactory;
 use eeg_types::data::SensorMeta;
 use crate::stage::{Stage, StageContext, StageInitCtx};
-use crate::control::PipelineEvent;
+use crate::control::{ControlCommand, PipelineEvent};
 use flume::{Receiver, Sender};
 
 /// Factory for creating `EegSource` stages.
@@ -66,6 +66,7 @@ pub struct EegSource {
     stop_flag: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     dropped_packets: Arc<AtomicUsize>,
+    driver: Arc<std::sync::Mutex<Box<dyn AdcDriver>>>,
 }
 
 impl EegSource {
@@ -93,44 +94,48 @@ impl EegSource {
         let handle = thread::Builder::new()
             .name(format!("{}_acq", id))
             .spawn(move || {
-                let mut driver = driver_clone.lock().unwrap();
-
-                let config = driver.get_config().unwrap();
-
-                // Generate channel names based on their numbers, as the config only provides numbers.
-                let channel_names: Vec<String> = config
-                    .chips
-                    .iter()
-                    .flat_map(|chip| chip.channels.iter().map(|&c| format!("CH{}", c)))
-                    .collect();
-
-                let sensor_meta = SensorMeta {
-                    sensor_id: 1, // Set appropriate sensor ID
-                    meta_rev: 1,
-                    schema_ver: 1,
-                    source_type: "eeg_source".to_string(),
-                    v_ref: config.vref,
-                    adc_bits: 24,
-                    gain: config.gain, // Propagate gain from hardware config
-                    sample_rate: config.sample_rate,
-                    offset_code: 0,
-                    is_twos_complement: true,
-                    channel_names, // Use the extracted channel names
-                    #[cfg(feature = "meta-tags")]
-                    tags: HashMap::new(),
+                let mut last_config = {
+                    let mut driver = driver_clone.lock().unwrap();
+                    driver.initialize().unwrap();
+                    driver.get_config().unwrap()
                 };
-                let sensor_meta = Arc::new(sensor_meta);
+
+                let mut sensor_meta = Arc::new({
+                    let channel_names: Vec<String> = last_config
+                        .chips
+                        .iter()
+                        .flat_map(|chip| chip.channels.iter().map(|&c| format!("CH{}", c)))
+                        .collect();
+
+                    SensorMeta {
+                        sensor_id: 1, // Set appropriate sensor ID
+                        meta_rev: 1,
+                        schema_ver: 1,
+                        source_type: "eeg_source".to_string(),
+                        v_ref: last_config.vref,
+                        adc_bits: 24,
+                        gain: last_config.gain,
+                        sample_rate: last_config.sample_rate,
+                        offset_code: 0,
+                        is_twos_complement: true,
+                        channel_names,
+                        #[cfg(feature = "meta-tags")]
+                        tags: HashMap::new(),
+                    }
+                });
 
                 // EMIT THE SOURCE READY EVENT
-                let event = PipelineEvent::SourceReady {
-                    meta: (*sensor_meta).clone(),
-                };
-                if event_tx.send(event).is_err() {
+                if event_tx
+                    .send(PipelineEvent::SourceReady {
+                        meta: (*sensor_meta).clone(),
+                    })
+                    .is_err()
+                {
                     log::error!("Failed to send source ready event");
                 }
 
-                // Calculate total channels from all chips
-                let num_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+                let mut num_channels: usize =
+                    last_config.chips.iter().map(|chip| chip.channels.len()).sum();
 
                 if num_channels == 0 {
                     log::error!("No channels configured for driver");
@@ -138,44 +143,86 @@ impl EegSource {
                 }
 
                 log::info!("Driver configured with {} total channels", num_channels);
-                let sample_interval_ns = (1_000_000_000.0 / config.sample_rate as f64) as u64;
 
                 loop {
                     if stop_clone.load(Ordering::Relaxed) {
                         break;
                     }
-                    match driver.acquire_batched(batch_size, &stop_clone) {
-                        Ok((samples, timestamp)) => {
-                            if samples.is_empty() {
-                                continue;
-                            }
-                            log::info!("eeg_source acquired {} samples", samples.len());
 
-                            let mut packet_samples =
-                                crate::allocator::RecycledI32Vec::new(allocator.clone());
-                            packet_samples.extend_from_slice(&samples);
-
-                            let num_samples_in_batch = samples.len() / num_channels;
-
-                            let packet = Arc::new(RtPacket::RawI32(PacketData {
-                                header: PacketHeader {
-                                    source_id: output_name.clone(),
-                                    ts_ns: timestamp,
-                                    batch_size: num_samples_in_batch as u32,
-                                    num_channels: num_channels as u32,
-                                    meta: sensor_meta.clone(),
-                                },
-                                samples: packet_samples,
-                            }));
-
-                            if packet_tx.send(packet).is_err() {
-                                dropped_packets_clone.fetch_add(1, Ordering::Relaxed);
+                    let (samples, timestamp, current_config) = {
+                        let mut driver = driver_clone.lock().unwrap();
+                        match driver.acquire_batched(batch_size, &stop_clone) {
+                            Ok(data) => data,
+                            Err(e) => {
+                                log::error!("Driver error in acquire_batched: {}", e);
+                                break;
                             }
                         }
-                        Err(e) => {
-                            log::error!("Driver error in acquire_batched: {}", e);
-                            break;
+                    };
+
+                    if current_config != last_config {
+                        log::info!("Driver configuration changed. Updating sensor metadata.");
+                        sensor_meta = Arc::new({
+                            let channel_names: Vec<String> = current_config
+                                .chips
+                                .iter()
+                                .flat_map(|chip| chip.channels.iter().map(|&c| format!("CH{}", c)))
+                                .collect();
+
+                            SensorMeta {
+                                sensor_id: 1, // Set appropriate sensor ID
+                                meta_rev: 1,
+                                schema_ver: 1,
+                                source_type: "eeg_source".to_string(),
+                                v_ref: current_config.vref,
+                                adc_bits: 24,
+                                gain: current_config.gain,
+                                sample_rate: current_config.sample_rate,
+                                offset_code: 0,
+                                is_twos_complement: true,
+                                channel_names,
+                                #[cfg(feature = "meta-tags")]
+                                tags: HashMap::new(),
+                            }
+                        });
+                        num_channels =
+                            current_config.chips.iter().map(|chip| chip.channels.len()).sum();
+
+                        if event_tx
+                            .send(PipelineEvent::SourceReady {
+                                meta: (*sensor_meta).clone(),
+                            })
+                            .is_err()
+                        {
+                            log::error!("Failed to send source ready event after reconfig");
                         }
+                        last_config = current_config;
+                    }
+
+                    if samples.is_empty() {
+                        continue;
+                    }
+                    log::info!("eeg_source acquired {} samples", samples.len());
+
+                    let mut packet_samples =
+                        crate::allocator::RecycledI32Vec::new(allocator.clone());
+                    packet_samples.extend_from_slice(&samples);
+
+                    let num_samples_in_batch = samples.len() / num_channels;
+
+                    let packet = Arc::new(RtPacket::RawI32(PacketData {
+                        header: PacketHeader {
+                            source_id: output_name.clone(),
+                            ts_ns: timestamp,
+                            batch_size: num_samples_in_batch as u32,
+                            num_channels: num_channels as u32,
+                            meta: sensor_meta.clone(),
+                        },
+                        samples: packet_samples,
+                    }));
+
+                    if packet_tx.send(packet).is_err() {
+                        dropped_packets_clone.fetch_add(1, Ordering::Relaxed);
                     }
                 }
             })
@@ -187,6 +234,7 @@ impl EegSource {
                 stop_flag,
                 handle: Some(handle),
                 dropped_packets,
+                driver,
             },
             packet_rx,
         ))
@@ -196,6 +244,81 @@ impl EegSource {
 impl Stage for EegSource {
     fn id(&self) -> &str {
         &self.id
+    }
+
+    fn control(&mut self, cmd: &ControlCommand, ctx: &mut StageContext) -> Result<(), StageError> {
+        if let ControlCommand::SetParameter {
+            target_stage,
+            parameters,
+        } = cmd
+        {
+            if target_stage == self.id() {
+                log::info!(
+                    "EegSource received SetParameter with parameters: {:?}",
+                    parameters
+                );
+                let mut driver = self.driver.lock().unwrap();
+                let mut config = driver.get_config()?;
+
+                log::info!("Attempting to parse SetParameter command...");
+                if let Some(driver_params) = parameters.get("driver") {
+                    log::info!("Found 'driver' parameters: {:?}", driver_params);
+                    let mut needs_reconfigure = false;
+
+                    if let Some(chips) = driver_params.get("chips") {
+                        log::info!("Found 'chips' parameters.");
+                        if let Some(chips_array) = chips.as_array() {
+                            if let Some(first_chip) = chips_array.get(0) {
+                                if let Some(channels_val) = first_chip.get("channels") {
+                                    if let Some(channels_array) = channels_val.as_array() {
+                                        let channels: Vec<u8> = channels_array
+                                            .iter()
+                                            .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                            .collect();
+                                        if !config.chips.is_empty() {
+                                            config.chips[0].channels = channels;
+                                            needs_reconfigure = true;
+                                            log::info!(
+                                                "Staged channels for reconfig: {:?}",
+                                                config.chips[0].channels
+                                            );
+                                        }
+                                    } else {
+                                        log::warn!("'channels' parameter is not an array.");
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(sample_rate_val) = driver_params.get("sample_rate") {
+                        if let Some(sample_rate) = sample_rate_val.as_u64() {
+                            config.sample_rate = sample_rate as u32;
+                            needs_reconfigure = true;
+                            log::info!("Staged sample_rate for reconfig: {}", config.sample_rate);
+                        } else {
+                            log::warn!("'sample_rate' parameter is not a valid number.");
+                        }
+                    }
+
+                    if needs_reconfigure {
+                        log::info!("Reconfiguring driver with new settings: {:?}", config);
+                        if let Err(e) = driver.reconfigure(&config) {
+                            log::error!("Failed to reconfigure driver: {}", e);
+                            let _ = ctx.event_tx.send(PipelineEvent::ErrorOccurred {
+                                stage_id: self.id.clone(),
+                                error_message: format!("Reconfiguration failed: {}", e),
+                            });
+                        }
+                    } else {
+                        log::warn!("No valid parameters found to update in 'driver' config.");
+                    }
+                } else {
+                    log::warn!("'driver' parameter not found.");
+                }
+            }
+        }
+        Ok(())
     }
 
     fn process(
@@ -210,6 +333,9 @@ impl Stage for EegSource {
 impl Drop for EegSource {
     fn drop(&mut self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+        if let Ok(mut driver) = self.driver.lock() {
+            let _ = driver.shutdown();
+        }
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }

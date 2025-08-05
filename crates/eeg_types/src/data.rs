@@ -62,6 +62,8 @@ pub struct SensorMeta {
     pub tags: HashMap<String, String>,
 }
 
+
+
 impl Default for SensorMeta {
     fn default() -> Self {
         Self {

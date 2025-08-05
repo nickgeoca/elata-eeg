@@ -87,17 +87,17 @@ pub fn gen_realistic_eeg_data(config: &AdcConfig, relative_micros: u64) -> Vec<i
     // Create or get the EEG generator
     // We use a static mutex to ensure thread safety and preserve state between calls
     lazy_static! {
-        static ref EEG_GENERATORS: std::sync::Mutex<std::collections::HashMap<u32, EegGenerator>> =
+        static ref EEG_GENERATORS: std::sync::Mutex<std::collections::HashMap<(u32, usize), EegGenerator>> =
             std::sync::Mutex::new(std::collections::HashMap::new());
     }
 
     // Get or create an EEG generator for this sample rate and channel count
     let mut generators = EEG_GENERATORS.lock().unwrap();
-    let generator_key = config.sample_rate;
+    let total_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+    let generator_key = (config.sample_rate, total_channels);
 
     if !generators.contains_key(&generator_key) {
-        debug!("Creating new EEG generator for sample rate {} Hz", config.sample_rate);
-        let total_channels: usize = config.chips.iter().map(|chip| chip.channels.len()).sum();
+        debug!("Creating new EEG generator for sample rate {} Hz and {} channels", config.sample_rate, total_channels);
         generators.insert(generator_key, EegGenerator::new(config.sample_rate, total_channels));
     }
 

@@ -12,7 +12,7 @@ import EegDataVisualizer from './EegDataVisualizer';
 export default function EegMonitorWebGL() {
   type DataView = 'signalGraph' | 'appletBrainWaves';
   type ActiveView = DataView | 'settings';
- 
+  
   const [activeView, setActiveView] = useState<ActiveView>('signalGraph');
   const [lastActiveDataView, setLastActiveDataView] = useState<DataView>('signalGraph');
   
@@ -22,6 +22,9 @@ export default function EegMonitorWebGL() {
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
   const [canScrollSettings, setCanScrollSettings] = useState(false); // True if settings panel has enough content to scroll
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
+
+  // useRef for tracking last configuration to prevent duplicate commands
+  const lastConfigRef = useRef<any>(null);
 
   // Get all data and config from the new central context
   const { config } = useEegData();
@@ -115,12 +118,20 @@ export default function EegMonitorWebGL() {
       return;
     }
 
+    // Check if config actually changed using the useRef hook
+    const newConfig = { driver: driverParams };
+    if (JSON.stringify(newConfig) === JSON.stringify(lastConfigRef.current)) {
+      setConfigUpdateStatus('No changes to apply');
+      return;
+    }
+
+    // Update the last config ref
+    lastConfigRef.current = newConfig;
+
     const command = {
       SetParameter: {
         target_stage: 'eeg_source',
-        parameters: {
-          driver: driverParams,
-        },
+        parameters: newConfig,
       },
     };
 

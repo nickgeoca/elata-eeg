@@ -43,6 +43,7 @@ pub struct PipelineHandle {
     pub id: String,
     pub executor: Option<Executor>,
     pub input_tx: Sender<Arc<RtPacket>>,
+    pub control_tx: Sender<ControlCommand>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -167,18 +168,26 @@ pub async fn start_pipeline_handler(
         }
     };
 
-    let (executor, input_tx, fatal_error_rx) = Executor::new(graph);
+    let (executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
 
     *handle = Some(PipelineHandle {
         id: pipeline_id.clone(),
         executor: Some(executor),
         input_tx,
+        control_tx,
     });
 
     // Spawn a task to forward pipeline events to SSE clients
     let sse_tx_clone_for_event = state.sse_tx.clone();
+    let cache_clone_for_event = state.source_meta_cache.clone();
     tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
+            if let PipelineEvent::SourceReady { meta } = &event {
+                tracing::debug!("Caching SourceReady event metadata from API handler");
+                let mut cache = cache_clone_for_event.lock().await;
+                *cache = Some(meta.clone());
+            }
+
             let event_json = match serde_json::to_string(&event) {
                 Ok(json) => json,
                 Err(e) => {
@@ -294,16 +303,11 @@ pub async fn control_handler(
     tracing::info!("Received control command: {:?}", payload);
 
     if let Some(ref mut handle) = *state.pipeline_handle.lock().await {
-        if let Some(ref mut executor) = handle.executor {
-            // Forward the control command to the executor
-            if let Err(e) = executor.handle_control_command(&payload) {
-                tracing::error!("Failed to handle control command: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Command failed").into_response();
-            }
-            (StatusCode::ACCEPTED, "Command received").into_response()
-        } else {
-            (StatusCode::NOT_FOUND, "No pipeline running").into_response()
+        if handle.control_tx.send(payload).is_err() {
+            tracing::error!("Failed to send control command to pipeline");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Command failed").into_response();
         }
+        (StatusCode::ACCEPTED, "Command received").into_response()
     } else {
         (StatusCode::NOT_FOUND, "No pipeline running").into_response()
     }

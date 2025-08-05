@@ -117,20 +117,22 @@ async fn main() -> Result<(), DriverError> {
     };
     tracing::info!("Pipeline graph built.");
 
-    let (executor, input_tx, fatal_error_rx) = Executor::new(graph);
+    let (mut executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
     tracing::info!("Default pipeline executor started.");
+
 
     let pipeline_handle = Arc::new(tokio::sync::Mutex::new(Some(PipelineHandle {
         id: "default".to_string(),
         executor: Some(executor),
         input_tx,
+        control_tx,
     })));
 
     // Spawn a task to listen for fatal errors from the default pipeline
     let pipeline_handle_clone = pipeline_handle.clone();
     let sse_tx_clone = sse_tx.clone();
     let fatal_error_sse_tx = sse_tx.clone();
-    tokio::spawn(async move {
+    let fatal_error_handle = tokio::spawn(async move {
         if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
             tracing::error!("Fatal pipeline error detected in default pipeline. Shutting down.");
 
@@ -163,7 +165,7 @@ async fn main() -> Result<(), DriverError> {
     // Forwards events from the pipeline to the SSE broadcast channel
     let source_meta_cache = Arc::new(tokio::sync::Mutex::new(None));
     let event_forwarding_cache = source_meta_cache.clone();
-    tokio::spawn(async move {
+    let event_forwarding_handle = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
             // If this is the source ready event, cache its metadata
             if let PipelineEvent::SourceReady { meta } = &event {
@@ -188,7 +190,7 @@ async fn main() -> Result<(), DriverError> {
     // --- WebSocket Broker ---
     let broker = Arc::new(WebSocketBroker::new(ws_rx));
     let broker_run = broker.clone();
-    tokio::spawn(async move {
+    let broker_handle = tokio::spawn(async move {
         broker_run.run().await;
     });
 
@@ -218,10 +220,25 @@ async fn main() -> Result<(), DriverError> {
         }
     }
 
+    // By dropping the event_tx, we signal the event forwarding task to terminate.
+    drop(event_tx);
+
     // Signal the server to shut down
     let _ = shutdown_tx.send(());
+
+    // The server holds the last clone of the app_state, but we need to drop
+    // the main one here to release the WebSocket sender and allow the broker
+    // to terminate.
+    drop(app_state);
+
     // Wait for the server to shut down
     server_handle.await.unwrap().unwrap();
+
+    // Wait for the background tasks to complete.
+    broker_handle.await.unwrap();
+    event_forwarding_handle.await.unwrap();
+    fatal_error_handle.await.unwrap();
+
     tracing::info!("EEG Daemon stopped gracefully.");
 
     Ok(())

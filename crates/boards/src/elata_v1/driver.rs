@@ -26,6 +26,12 @@ pub struct ElataV1Driver {
 
 impl ElataV1Driver {
     pub fn new(config: AdcConfig) -> Result<Self, DriverError> {
+        if config.chips.len() != 1 {
+            return Err(DriverError::ConfigurationError(
+                "ElataV1 driver only supports single-chip configurations".to_string(),
+            ));
+        }
+        
         let chip_config = config.chips.get(0).ok_or_else(|| {
             DriverError::ConfigurationError("At least one chip must be configured for ElataV1".to_string())
         })?;
@@ -85,30 +91,16 @@ impl AdcDriver for ElataV1Driver {
 
     fn acquire_batched(
         &mut self,
-        batch_size: usize,
-        stop_flag: &AtomicBool,
-    ) -> Result<(Vec<i32>, u64), SensorError> {
-        let num_channels = self.config.chips[0].channels.len();
-        let mut batch_buffer = Vec::with_capacity(batch_size * num_channels);
-
-        // The DRDY handler thread needs to be running.
-        // This is a simplified implementation. A full implementation would
-        // manage the DRDY thread lifecycle.
-        // For now, we assume it's started externally or as part of `initialize`.
-
-        for _ in 0..batch_size {
-            if stop_flag.load(Ordering::Relaxed) {
-                break;
-            }
-
-            // This is a placeholder for the actual sample acquisition logic
-            // which would be driven by DRDY interrupts.
-            // The `acquire_raw` method from Ads1299Driver would be adapted here.
-            // For now, we'll just error out.
-            return Err(SensorError::HardwareFault("Batched acquisition not yet fully implemented for ElataV1".to_string()));
-        }
-
-        Ok((batch_buffer, 0))
+        _batch_size: usize,
+        _stop_flag: &AtomicBool,
+    ) -> Result<(Vec<i32>, u64, AdcConfig), SensorError> {
+        // This is a placeholder for the actual sample acquisition logic
+        // which would be driven by DRDY interrupts.
+        // The `acquire_raw` method from Ads1299Driver would be adapted here.
+        // For now, we'll just error out.
+        Err(SensorError::HardwareFault(
+            "Batched acquisition not yet fully implemented for ElataV1".to_string(),
+        ))
     }
 
     fn get_status(&self) -> DriverStatus {

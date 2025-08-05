@@ -245,16 +245,19 @@ impl AdcDriver for ElataV2Driver {
         &mut self,
         batch_size: usize,
         stop_flag: &AtomicBool,
-    ) -> Result<(Vec<i32>, u64), SensorError> {
+    ) -> Result<(Vec<i32>, u64, AdcConfig), SensorError> {
         *self.status.lock().unwrap() = DriverStatus::Running;
 
         let total_channels: usize = self.config.chips.iter().map(|c| c.channels.len()).sum();
         if total_channels == 0 {
-            return Ok((Vec::new(), 0));
+            return Ok((Vec::new(), 0, self.config.clone()));
         }
 
         let mut batch_buffer: Vec<i32> = Vec::with_capacity(batch_size * total_channels);
-        let first_sample_timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+        let first_sample_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as u64;
 
         for i in 0..batch_size {
             if stop_flag.load(Ordering::Relaxed) {
@@ -279,7 +282,7 @@ impl AdcDriver for ElataV2Driver {
         }
 
         *self.status.lock().unwrap() = DriverStatus::Stopped;
-        Ok((batch_buffer, first_sample_timestamp))
+        Ok((batch_buffer, first_sample_timestamp, self.config.clone()))
     }
 
     fn get_status(&self) -> DriverStatus {
@@ -288,6 +291,18 @@ impl AdcDriver for ElataV2Driver {
 
     fn get_config(&self) -> Result<AdcConfig, DriverError> {
         Ok(self.config.clone())
+    }
+    fn reconfigure(&mut self, config: &AdcConfig) -> Result<(), DriverError> {
+        self.config = config.clone();
+        // Reconfigure each chip driver with new settings
+        for (i, chip_driver) in self.chip_drivers.iter_mut().enumerate() {
+            if let Some(chip_config) = config.chips.get(i) {
+                let mut single_chip_adc_config = config.clone();
+                single_chip_adc_config.chips = vec![chip_config.clone()];
+                chip_driver.reconfigure(&single_chip_adc_config)?;
+            }
+        }
+        Ok(())
     }
 
     fn shutdown(&mut self) -> Result<(), DriverError> {
