@@ -54,7 +54,7 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
         console.log('[Visualizer] Unsubscribing from Fft');
       }
     };
-  }, [activeView, subscribeRaw]);
+  }, [activeView]);
 
   // Effect to setup ResizeObserver
   useLayoutEffect(() => {

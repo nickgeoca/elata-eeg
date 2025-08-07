@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, createContext, useContext, useCallback, useMemo, useRef } from 'react';
-import { useEventStream } from '@/context/EventStreamContext';
+import { useEventStream, useEventStreamData } from '@/context/EventStreamContext';
 
 // Define the EEG configuration interface
 export interface EegConfig {
@@ -42,7 +42,8 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState('Initializing...'); // Start as Initializing
   const [isConfigReady, setIsConfigReady] = useState(false);
   const isProduction = process.env.NODE_ENV === 'production';
-  const { events, isConnected, error } = useEventStream();
+  const { subscribe } = useEventStream();
+  const { isConnected, error } = useEventStreamData();
 
   // Helper function to deeply compare relevant parts of EEG configurations
   // Compares server-provided data against the current state (excluding client-added 'fps')
@@ -62,7 +63,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     );
   };
 
-  // Main effect to handle SSE events
+  // Main effect to handle SSE connection status
   useEffect(() => {
     // Update status based on SSE connection
     if (error) {
@@ -74,68 +75,116 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     }
   }, [isConnected, error]);
 
-  // Effect to process incoming events from the EventStream
+  // Effect to subscribe to pipeline_state events
   useEffect(() => {
-    // Process the latest event
-    if (events.length > 0) {
-      const latestEvent = events[events.length - 1];
+    const unsubscribe = subscribe('pipeline_state', (pipelineData: any) => {
+      // Extract configuration from pipeline stages if available
+      // Look for a stage that might contain configuration parameters
+      let sampleRate = 250;
+      let channels: number[] = [];
+      let gain = 1;
+      let boardDriver = 'default';
+      let batchSize = 128;
+      let powerlineFilterHz: number | null = null;
       
-      // Only process pipeline_state events which contain the full configuration
-      if (latestEvent.type === 'pipeline_state') {
-        const pipelineData = latestEvent.data;
-        
-        // Extract configuration from pipeline stages if available
-        // Look for a stage that might contain configuration parameters
-        let sampleRate = 250;
-        let channels = [0, 1, 2, 3];
-        let gain = 1;
-        let boardDriver = 'default';
-        let batchSize = 128;
-        let powerlineFilterHz: number | null = null;
-        
-        // Check if there's a stage with configuration parameters
-        if (pipelineData.stages && Array.isArray(pipelineData.stages)) {
-          for (const stage of pipelineData.stages) {
-            if (stage.parameters) {
-              if (stage.parameters.sample_rate) {
-                sampleRate = stage.parameters.sample_rate;
-              }
-              if (stage.parameters.gain) {
-                gain = stage.parameters.gain;
-              }
-              if (stage.parameters.powerline_filter_hz !== undefined) {
-                powerlineFilterHz = stage.parameters.powerline_filter_hz;
-              }
+      // Check if there's a stage with configuration parameters
+      if (pipelineData.stages && Array.isArray(pipelineData.stages)) {
+        for (const stage of pipelineData.stages) {
+          if (stage.parameters) {
+            if (stage.parameters.sample_rate) {
+              sampleRate = stage.parameters.sample_rate;
+            }
+            // Extract channels from the first stage that has them
+            if (stage.parameters.channels) {
+              channels = stage.parameters.channels;
+            }
+            if (stage.parameters.gain) {
+              gain = stage.parameters.gain;
+            }
+            if (stage.parameters.powerline_filter_hz !== undefined) {
+              powerlineFilterHz = stage.parameters.powerline_filter_hz;
             }
           }
         }
+      }
+      
+      // If no channels were found in pipeline stages, set a default
+      if (channels.length === 0) {
+        channels = [0, 1, 2, 3];
+      }
+      
+      const serverConfig = {
+        sample_rate: sampleRate,
+        channels: channels,
+        gain: gain,
+        board_driver: boardDriver,
+        batch_size: batchSize,
+        fps: 60.0,
+        powerline_filter_hz: powerlineFilterHz
+      };
+      
+      // Check if the configuration has changed
+      if (!areConfigsEqual(configRef.current, serverConfig)) {
+        console.log('EegConfigProvider: Received new configuration via SSE, applying update.');
+        setConfig(serverConfig); // This will trigger a re-render for consumers
         
-        const serverConfig = {
-          sample_rate: sampleRate,
-          channels: channels,
-          gain: gain,
-          board_driver: boardDriver,
-          batch_size: batchSize,
-          fps: 60.0,
-          powerline_filter_hz: powerlineFilterHz
+        if (!isConfigReady) {
+          setIsConfigReady(true);
+        }
+      } else {
+        if (!isProduction) {
+          console.log('EegConfigProvider: Received identical configuration via SSE. No update needed.');
+        }
+      }
+    });
+    
+    return () => {
+      unsubscribe();
+    };
+  }, [subscribe, areConfigsEqual, isConfigReady, isProduction]);
+
+  // Effect to also listen for SourceReady events that contain channel metadata
+  useEffect(() => {
+    const unsubscribe = subscribe('SourceReady', (data: any) => {
+      // The actual metadata is nested inside the 'meta' property of the event data
+      if (data && data.meta && data.meta.channel_names && Array.isArray(data.meta.channel_names)) {
+        // Update the channel configuration based on received metadata
+        const newChannelCount = data.meta.channel_names.length;
+        const newChannels = Array.from({ length: newChannelCount }, (_, i) => i);
+        
+        // Create updated config object with new channel information
+        const updatedConfig = {
+          ...(configRef.current || {
+            sample_rate: 250,
+            gain: 1,
+            board_driver: 'default',
+            batch_size: 128,
+            fps: 60.0,
+            powerline_filter_hz: null
+          }),
+          channels: newChannels
         };
         
         // Check if the configuration has changed
-        if (!areConfigsEqual(configRef.current, serverConfig)) {
-          console.log('EegConfigProvider: Received new configuration via SSE, applying update.');
-          setConfig(serverConfig); // This will trigger a re-render for consumers
+        if (!areConfigsEqual(configRef.current, updatedConfig)) {
+          console.log('EegConfigProvider: Received new channel configuration via SourceReady event, applying update.');
+          setConfig(updatedConfig); // This will trigger a re-render for consumers
           
           if (!isConfigReady) {
             setIsConfigReady(true);
           }
         } else {
           if (!isProduction) {
-            console.log('EegConfigProvider: Received identical configuration via SSE. No update needed.');
+            console.log('EegConfigProvider: Received identical channel configuration via SourceReady. No update needed.');
           }
         }
       }
-    }
-  }, [events, areConfigsEqual, configRef, setConfig, isConfigReady, isProduction]);
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [subscribe, areConfigsEqual, isConfigReady, isProduction]);
 
   // Effect to keep configRef updated
   useEffect(() => {

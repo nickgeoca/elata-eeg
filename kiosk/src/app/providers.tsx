@@ -5,6 +5,7 @@ import { CommandProvider } from "@/context/CommandWebSocketContext";
 import { EventStreamProvider } from "@/context/EventStreamContext";
 import { PipelineProvider, usePipeline } from "@/context/PipelineContext";
 import { EegDataProvider } from "@/context/EegDataContext";
+import { EegConfigProvider } from "@/components/EegConfig";
 
 // A component to handle the pipeline initialization logic.
 const PipelineInitializer = ({ children }: { children: ReactNode }) => {
@@ -28,9 +29,11 @@ const ComposedProviders = ({ children }: { children: ReactNode }) => {
       <EventStreamProvider>
         <PipelineProvider>
           <EegDataProvider>
-            <PipelineInitializer>
-              {children}
-            </PipelineInitializer>
+            <EegConfigProvider>
+              <PipelineInitializer>
+                {children}
+              </PipelineInitializer>
+            </EegConfigProvider>
           </EegDataProvider>
         </PipelineProvider>
       </EventStreamProvider>

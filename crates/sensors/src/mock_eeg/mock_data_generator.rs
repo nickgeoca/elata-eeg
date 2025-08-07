@@ -294,7 +294,7 @@ impl EegGenerator {
         let signal = delta + theta + alpha + beta + gamma + line_noise_50 + line_noise_60 + noise;
         
         // Scale to 24-bit range and convert to i32
-        let amplitude = 2000.0 * 256.0; // Scale up by 2^8 for 24-bit vs 16-bit
+        let amplitude = 10.0 * 256.0; // Scale up by 2^8 for 24-bit vs 16-bit
         (signal * amplitude) as i32
     }
 }

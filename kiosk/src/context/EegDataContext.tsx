@@ -125,6 +125,11 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     };
   }, [pipelineConfig ? JSON.stringify(pipelineConfig) : null, sourceReadyMeta]);
  
+  // Create a ref to hold the latest config to avoid stale closures in WebSocket handler
+  const configRef = useRef(config);
+  useEffect(() => {
+    configRef.current = config;
+  }, [config]);
   
   // Use refs to track data timestamps for cleanup
   const sampleTimestamps = useRef<number[]>([]);
@@ -290,12 +295,16 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         console.log('[EegDataContext] System is ready. Final configuration has been received.');
       }
     } else {
-      setIsReady(false);
-      setShouldConnect(false); // Signal that we should not connect to data WebSocket
-      // Reset the guard when system is not ready
-      if (process.env.NODE_ENV === 'development') {
-        // @ts-ignore - Adding custom property to window object
-        window[systemReadyGuardKey] = false;
+      // Only reset isReady and shouldConnect if we're not in a reconnection state
+      // During reconnection, we want to maintain the previous configuration
+      if (!isReconnecting) {
+        setIsReady(false);
+        setShouldConnect(false); // Signal that we should not connect to data WebSocket
+        // Reset the guard when system is not ready
+        if (process.env.NODE_ENV === 'development') {
+          // @ts-ignore - Adding custom property to window object
+          window[systemReadyGuardKey] = false;
+        }
       }
     }
   }, [pipelineStatus, sourceReadyMeta]);
@@ -408,18 +417,23 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           if (!meta) {
             console.warn(`[EegDataContext] Received data packet for topic "${header.topic}" without metadata. Using default metadata.`);
             // Create default metadata to prevent data loss
+            // If metadata is missing, create a dynamic fallback using the latest config
+            // This avoids race conditions where data arrives before the meta_update message
+            const currentConfig = configRef.current;
+            const channelCount = currentConfig?.channels?.length || 1;
+            const sampleRate = currentConfig?.sample_rate || 250;
+
             meta = {
               sensor_id: 1,
-              meta_rev: 1,
-              schema_ver: 1,
+              meta_rev: 0, // Indicates this is a fallback
               source_type: "eeg_source",
               v_ref: 4.5,
               adc_bits: 24,
               gain: 1,
-              sample_rate: 250,
+              sample_rate: sampleRate,
               offset_code: 0,
               is_twos_complement: true,
-              channel_names: ["CH0", "CH1", "CH2", "CH3", "CH4", "CH5", "CH6", "CH7"],
+              channel_names: Array.from({ length: channelCount }, (_, i) => `CH${i}`),
             };
           }
 
@@ -487,8 +501,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
             // Reset the connection attempt guard to allow reconnection
             // @ts-ignore - Adding custom property to window object
             window[connectionGuardKey] = false;
-            // Reset shouldConnect to allow reconnection attempts
-            setShouldConnect(false);
+            // Set shouldConnect to true to trigger reconnection attempts
+            setShouldConnect(true);
             // Trigger reconnection by forcing a re-render
             setDataReceived(false);
           }
@@ -512,6 +526,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // @ts-ignore - Adding custom property to window object
       window[connectionGuardKey] = false;
       ws.current = null;
+      // Reset the cleanup flag
+      isCleanupRef.current = false;
     };
   }, [shouldConnect]); // Add shouldConnect as dependency to control when to connect
 
