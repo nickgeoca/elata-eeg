@@ -91,6 +91,7 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
             ) : (
               <div className="relative h-full min-h-[300px]">
                 <EegRenderer
+                  key={config.channels.join(',')}
                   isActive={activeView === 'signalGraph'}
                   config={config}
                   dataBuffer={signalGraphBuffer}

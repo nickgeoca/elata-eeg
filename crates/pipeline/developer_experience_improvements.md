@@ -186,7 +186,7 @@ This requires building a more robust parser in the `daemon` that tracks line/col
 This endpoint would provide live introspection of the running pipeline.
 
 **Request:**
-`GET http://localhost:8080/pipeline/graph`
+`GET http://localhost:9000/pipeline/graph`
 
 **Response (JSON):**
 ```json

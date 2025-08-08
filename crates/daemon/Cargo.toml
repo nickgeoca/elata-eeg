@@ -22,6 +22,7 @@ csv = "1.2"
 csv_recorder_plugin = { path = "../../plugins/csv_recorder" }
 eeg_types = { path = "../eeg_types" }
 flume = "0.11.0"
+async-stream = "0.3"
 http = "1.1.0"
 futures = "0.3"
 futures-util = "0.3"

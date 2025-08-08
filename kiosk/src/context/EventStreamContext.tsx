@@ -117,10 +117,8 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   const [fatalError, setFatalError] = useState<string | null>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
   const listeners = useRef<Record<string, Record<string, (data: any) => void>>>({});
-  
-  // Use window property to track connection attempts in React Strict Mode
-  // This persists across double executions unlike refs which are reset per component instance
-  const connectionGuardKey = '__eventstream_connection_guard__';
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
 
   const subscribe = useCallback((eventType: string, callback: (data: any) => void) => {
     const id = Math.random().toString(36).substring(2, 9);
@@ -148,28 +146,16 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
   }, []);
 
   const connect = useCallback(() => {
-    // This is a no-op as the connection is managed by useEffect
-    console.log('[EventStream] Connection is managed automatically by the provider.');
-  }, []);
-
-  useEffect(() => {
-    // Check if we're in React Strict Mode development double-run scenario
-    // In Strict Mode, the first run sets the window guard, and the second run should be ignored
-    // @ts-ignore - Accessing custom property on window object
-    if (window[connectionGuardKey]) {
-      console.log('[EventStream] Connection attempt already made, skipping duplicate connection attempt.');
-      return;
-    }
-
-    // Ensure we don't create duplicate connections
     if (eventSourceRef.current) {
-      console.log('[EventStream] Duplicate connection.');
+      console.log('[EventStream] Already connected or connecting.');
       return;
     }
-    
-    // Set the connection guard on window to prevent duplicate connections
-    // @ts-ignore - Adding custom property to window object
-    window[connectionGuardKey] = true;
+
+    // Clear any existing reconnect timer
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     console.log('[EventStream] Connecting to SSE endpoint...');
     const eventSource = new EventSource('/api/events');
@@ -180,6 +166,7 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
       console.log('[EventStream] SSE connection established.');
       setIsConnected(true);
       setError(null);
+      reconnectAttemptsRef.current = 0; // Reset reconnect attempts on successful connection
     };
 
     eventSource.onmessage = (event) => {
@@ -192,12 +179,10 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
         if (eventData.type === 'PipelineFailed') {
           console.error(`[EventStream] Fatal pipeline error: ${eventData.data.error}`);
           setFatalError(eventData.data.error);
-          // On fatal error, permanently close the connection.
           eventSource.close();
           setIsConnected(false);
         }
 
-        // Publish the event to all registered listeners for this event type
         if (listeners.current[eventType]) {
           Object.values(listeners.current[eventType]).forEach(callback => {
             try {
@@ -213,32 +198,29 @@ export function EventStreamProvider({ children }: { children: React.ReactNode })
     };
 
     eventSource.onerror = (err) => {
-      // In React Strict Mode, a quick mount/unmount/remount cycle can trigger a benign error
-      // when the initial connection is aborted. We check the readyState to ensure we only
-      // act on genuine errors from an active or connecting stream.
-      if (eventSource.readyState === EventSource.OPEN || eventSource.readyState === EventSource.CONNECTING) {
-        console.error('[EventStream] SSE connection error:', err);
-        setError('SSE connection failed. The connection will be retried automatically.');
-        setIsConnected(false);
-      } else {
-        // Reset connection guard on window when connection fails
-        // @ts-ignore - Adding custom property to window object
-        window[connectionGuardKey] = false;
-      }
-      // If the state is CLOSED, we assume it was intentional (e.g., via the cleanup function)
-      // and we don't want to display an error.
-    };
-
-    // Return a cleanup function to be called on component unmount
-    return () => {
-      console.log('[EventStream] Closing SSE connection on unmount.');
+      console.error('[EventStream] SSE connection error:', err);
+      setIsConnected(false);
       eventSource.close();
       eventSourceRef.current = null;
-      // Reset the connection guard on window to allow for new connection attempts.
-      // @ts-ignore - Adding custom property to window object
-      window[connectionGuardKey] = false;
+
+      // Implement exponential backoff for reconnection
+      const attempt = reconnectAttemptsRef.current;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 30000); // Max 30s delay
+      reconnectAttemptsRef.current++;
+
+      setError(`Connection lost. Retrying in ${delay / 1000}s...`);
+      console.log(`[EventStream] Attempting to reconnect in ${delay}ms (attempt ${attempt + 1})`);
+
+      reconnectTimerRef.current = setTimeout(connect, delay);
     };
-  }, []); // Empty dependency array ensures this effect runs only once on mount
+  }, []);
+
+  useEffect(() => {
+    connect();
+    return () => {
+      disconnect();
+    };
+  }, [connect, disconnect]);
 
   const stableValue = useMemo(() => ({
     subscribe,

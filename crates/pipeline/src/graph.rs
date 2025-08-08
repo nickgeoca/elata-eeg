@@ -13,7 +13,7 @@ use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 
 use sensors::types::AdcDriver;
@@ -56,7 +56,7 @@ impl PipelineGraph {
         registry: &StageRegistry,
         event_tx: flume::Sender<crate::control::PipelineEvent>,
         allocator: Option<SharedPacketAllocator>,
-        driver: &Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
+        driver: &Option<Arc<Mutex<Box<dyn AdcDriver + Send>>>>,
         websocket_sender: Option<broadcast::Sender<Arc<BrokerMessage>>>,
     ) -> Result<Self, StageError> {
         let mut nodes = HashMap::new();
@@ -80,14 +80,6 @@ impl PipelineGraph {
                 .and_then(|sr| sr.as_f64())
                 .unwrap_or(250.0);
 
-            let sample_rate = config
-                .stages
-                .iter()
-                .find(|s| s.stage_type == "eeg_source")
-                .and_then(|s| s.params.get("driver"))
-                .and_then(|d| d.get("sample_rate"))
-                .and_then(|sr| sr.as_f64())
-                .unwrap_or(250.0);
 
             let init_ctx = crate::stage::StageInitCtx {
                 event_tx: &event_tx,
@@ -225,11 +217,9 @@ impl PipelineGraph {
 
         let runtime_packet = match pkt {
             PacketOwned::RawI32(data) => {
-                let mut initial_packet = RecycledI32Vec::new(self.allocator.clone());
-                initial_packet.extend(data.samples.iter());
                 let packet_data = crate::data::PacketData {
                     header: data.header,
-                    samples: initial_packet,
+                    samples: data.samples,
                 };
                 RtPacket::RawI32(packet_data)
             }

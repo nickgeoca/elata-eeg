@@ -155,7 +155,6 @@ impl Executor {
             }));
             let context = Arc::new(Mutex::new(context));
 
-            let node_clone = node.clone();
             let thread_name = node.lock().unwrap().name.clone();
             let control_rx_clone = control_rx.clone();
             let thread_handle = thread::Builder::new()

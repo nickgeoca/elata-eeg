@@ -63,8 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let allocator = Arc::new(PacketAllocator::with_capacity(1, 1, 1, 4));
-    let mut samples = RecycledI32Vec::new(allocator.clone());
-    samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
+    let samples = vec![1000i32, 2000, -1000, -2000];
     let input_packet = Arc::new(RtPacket::RawI32(PacketData {
         header: PacketHeader {
             source_id: "test_source".to_string(),

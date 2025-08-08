@@ -40,6 +40,7 @@ pub struct CsvSink {
     header_written: Mutex<bool>,
     is_recording: Mutex<bool>,
     start_time: Mutex<Option<Instant>>,
+    last_frame_id: Mutex<Option<u64>>,
 }
 
 impl CsvSink {
@@ -60,6 +61,7 @@ impl CsvSink {
             header_written: Mutex::new(false),
             is_recording: Mutex::new(false),
             start_time: Mutex::new(None),
+            last_frame_id: Mutex::new(None),
         })
     }
 
@@ -109,7 +111,7 @@ impl Stage for CsvSink {
         _ctx: &mut StageContext,
     ) -> Result<Option<Arc<RtPacket>>, StageError> {
         if let RtPacket::RawAndVoltage(packet) = &*packet {
-            let mut is_recording = self.is_recording.lock().unwrap();
+            let is_recording = self.is_recording.lock().unwrap();
             if !*is_recording {
                 return Ok(None); // Not recording, so drop the packet.
             }
@@ -117,6 +119,21 @@ impl Stage for CsvSink {
             let mut writer_opt = self.writer.lock().unwrap();
             let mut header_written = self.header_written.lock().unwrap();
             let mut start_time = self.start_time.lock().unwrap();
+            let mut last_frame_id = self.last_frame_id.lock().unwrap();
+
+            // Frame gap detection
+            if let Some(last_id) = *last_frame_id {
+                if packet.header.frame_id != last_id + 1 {
+                    // Stop recording and return a fatal error
+                    *self.is_recording.lock().unwrap() = false;
+                    return Err(StageError::Fatal(format!(
+                        "Data gap detected! Expected frame {}, but got {}. Recording stopped.",
+                        last_id + 1,
+                        packet.header.frame_id
+                    )));
+                }
+            }
+            *last_frame_id = Some(packet.header.frame_id);
 
             // Check for file rotation
             if let (Some(st), Some(max_mins)) = (*start_time, self.params.max_recording_length_minutes) {
@@ -174,6 +191,7 @@ impl Stage for CsvSink {
                         writer.flush().ok();
                     }
                     *self.start_time.lock().unwrap() = None;
+                    *self.last_frame_id.lock().unwrap() = None;
                 }
             }
             _ => {} // Ignore other commands

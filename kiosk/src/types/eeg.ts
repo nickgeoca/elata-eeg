@@ -44,6 +44,7 @@ export interface DataPacketHeader {
   batch_size: number;
   num_channels: number;
   packet_type: 'Voltage' | 'RawI32';
+  meta_rev: number;
 }
 
 export interface SampleChunk {

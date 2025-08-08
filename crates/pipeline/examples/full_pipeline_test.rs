@@ -191,7 +191,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()), &None, None)?;
 
     // 4. Create and start the executor
-    let (executor, input_tx, _) = Executor::new(graph);
+    let (executor, input_tx, _, _) = Executor::new(graph);
 
     // 5. Send a large number of packets into the pipeline
     let num_packets = 1_000;
@@ -204,8 +204,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     for i in 0..num_packets {
-        let mut samples = RecycledI32Vec::new(test_allocator.clone());
-        samples.extend_from_slice(&[1000i32, 2000, -1000, -2000]);
+        let samples = vec![1000i32, 2000, -1000, -2000];
         let packet = RtPacket::RawI32(PacketData {
             header: PacketHeader {
                 source_id: "acquire".to_string(),

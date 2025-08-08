@@ -87,6 +87,8 @@ pub enum StageError {
     Busy,
     #[error("send error: {0}")]
     SendError(String),
+    #[error("operation would block: {0}")]
+    WouldBlock(String),
     #[error("invalid context: {0}")]
     InvalidContext(String),
     #[error("IO error: {0}")]

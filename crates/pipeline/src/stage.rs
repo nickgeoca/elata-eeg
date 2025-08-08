@@ -9,7 +9,7 @@ use flume::Sender;
 use sensors::types::AdcDriver;
 use std::sync::Arc;
 use tokio::sync::broadcast;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 /// The possible states of a stage in the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +64,7 @@ pub struct StageContext {
 pub struct StageInitCtx<'a> {
     pub event_tx: &'a Sender<PipelineEvent>,
     pub allocator: &'a SharedPacketAllocator,
-    pub driver: &'a Option<Arc<Mutex<Box<dyn AdcDriver>>>>,
+    pub driver: &'a Option<Arc<Mutex<Box<dyn AdcDriver + Send>>>>,
     pub sample_rate: f64,
     pub websocket_sender: Option<broadcast::Sender<Arc<BrokerMessage>>>,
 }

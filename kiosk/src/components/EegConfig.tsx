@@ -2,6 +2,7 @@
 
 import { useEffect, useState, createContext, useContext, useCallback, useMemo, useRef } from 'react';
 import { useEventStream, useEventStreamData } from '@/context/EventStreamContext';
+import { usePipeline } from '@/context/PipelineContext';
 
 // Define the EEG configuration interface
 export interface EegConfig {
@@ -23,6 +24,7 @@ interface EegConfigContextType {
   status: string;
   refreshConfig: () => void;
   isConfigReady: boolean;
+  updateConfig: (newConfig: Partial<EegConfig>) => void;
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
@@ -30,6 +32,7 @@ export const EegConfigContext = createContext<EegConfigContextType>({
   status: 'Initializing...',
   refreshConfig: () => { console.warn('EegConfigContext: refreshConfig called before provider initialization'); },
   isConfigReady: false,
+  updateConfig: () => { console.warn('EegConfigContext: updateConfig called before provider initialization'); },
 });
 
 // Hook to use the EEG configuration
@@ -44,6 +47,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const isProduction = process.env.NODE_ENV === 'production';
   const { subscribe } = useEventStream();
   const { isConnected, error } = useEventStreamData();
+  const { sendCommand } = usePipeline();
 
   // Helper function to deeply compare relevant parts of EEG configurations
   // Compares server-provided data against the current state (excluding client-added 'fps')
@@ -197,12 +201,38 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     console.log('refreshConfig called, but manual refresh is not supported with SSE. Configuration updates are pushed automatically.');
   }, []);
 
+  const updateConfig = useCallback((newConfig: Partial<EegConfig>) => {
+    if (!configRef.current) {
+      console.warn("Cannot update config before it's initialized.");
+      return;
+    }
+
+    const updatedConfig = { ...configRef.current, ...newConfig };
+
+    const command = {
+      "eeg_source": {
+        "driver": {
+          "chips": [
+            {
+              "channels": updatedConfig.channels
+            }
+          ],
+          "sample_rate": updatedConfig.sample_rate
+        }
+      }
+    };
+
+    console.log("Sending SetParameter command with full config:", command);
+    sendCommand('SetParameter', command);
+  }, [sendCommand]);
+
   const contextValue = useMemo(() => ({
     config,
     status,
     refreshConfig,
     isConfigReady,
-  }), [config, status, refreshConfig, isConfigReady]);
+    updateConfig,
+  }), [config, status, refreshConfig, isConfigReady, updateConfig]);
 
   return (
     <EegConfigContext.Provider value={contextValue}>

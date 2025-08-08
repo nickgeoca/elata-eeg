@@ -47,7 +47,7 @@ async fn main() -> Result<(), DriverError> {
         .get_matches();
 
     // --- Centralized State ---
-    let (sse_tx, _) = tokio::sync::broadcast::channel(256);
+    let (sse_tx, _) = tokio::sync::broadcast::channel(1024);
     let (event_tx, event_rx) = flume::bounded(100);
     let (ws_tx, ws_rx) = tokio::sync::broadcast::channel::<Arc<BrokerMessage>>(1024);
 
@@ -80,12 +80,12 @@ async fn main() -> Result<(), DriverError> {
         .and_then(|t| t.as_str())
         .unwrap_or("Mock");
 
-    let driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver>>>> = if use_mock || driver_type == "Mock" {
+    let driver: Option<Arc<tokio::sync::Mutex<Box<dyn AdcDriver + Send>>>> = if use_mock || driver_type == "Mock" {
         tracing::info!("Using mock EEG driver");
         // Parse the driver configuration from the pipeline
         let adc_config: AdcConfig = serde_json::from_value(driver_config_value.clone())
             .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
-        Some(Arc::new(std::sync::Mutex::new(Box::new(MockDriver::new(
+        Some(Arc::new(tokio::sync::Mutex::new(Box::new(MockDriver::new(
             adc_config,
         )?))))
     } else {
@@ -95,7 +95,7 @@ async fn main() -> Result<(), DriverError> {
             .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
         let mut driver_instance = ElataV2Driver::new(adc_config)?;
         driver_instance.initialize()?;
-        Some(Arc::new(std::sync::Mutex::new(Box::new(driver_instance))))
+        Some(Arc::new(tokio::sync::Mutex::new(Box::new(driver_instance))))
     };
 
 
@@ -130,7 +130,6 @@ async fn main() -> Result<(), DriverError> {
 
     // Spawn a task to listen for fatal errors from the default pipeline
     let pipeline_handle_clone = pipeline_handle.clone();
-    let sse_tx_clone = sse_tx.clone();
     let fatal_error_sse_tx = sse_tx.clone();
     let fatal_error_handle = tokio::spawn(async move {
         if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
@@ -165,6 +164,7 @@ async fn main() -> Result<(), DriverError> {
     // Forwards events from the pipeline to the SSE broadcast channel
     let source_meta_cache = Arc::new(tokio::sync::Mutex::new(None));
     let event_forwarding_cache = source_meta_cache.clone();
+    let sse_tx_clone_for_forwarding = sse_tx.clone();
     let event_forwarding_handle = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv_async().await {
             // If this is the source ready event, cache its metadata
@@ -176,7 +176,7 @@ async fn main() -> Result<(), DriverError> {
 
             if let Ok(event_json) = serde_json::to_string(&event) {
                 // Send to SSE clients
-                if sse_tx.send(event_json.clone()).is_err() {
+                if sse_tx_clone_for_forwarding.send(event_json.clone()).is_err() {
                     tracing::debug!("No active SSE subscribers to send event to.");
                 }
 
@@ -189,19 +189,18 @@ async fn main() -> Result<(), DriverError> {
 
     // --- WebSocket Broker ---
     let broker = Arc::new(WebSocketBroker::new(ws_rx));
-    let broker_run = broker.clone();
-    let broker_handle = tokio::spawn(async move {
-        broker_run.run().await;
-    });
+    broker.clone().start();
 
     // --- App State ---
     let app_state = AppState {
         pipelines: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-        sse_tx: sse_tx_clone,
+        sse_tx,
         pipeline_handle,
         source_meta_cache,
         broker,
         websocket_sender: ws_tx,
+        driver: driver.clone(),
+        event_tx: event_tx.clone(),
     };
 
 
@@ -235,7 +234,6 @@ async fn main() -> Result<(), DriverError> {
     server_handle.await.unwrap().unwrap();
 
     // Wait for the background tasks to complete.
-    broker_handle.await.unwrap();
     event_forwarding_handle.await.unwrap();
     fatal_error_handle.await.unwrap();
 

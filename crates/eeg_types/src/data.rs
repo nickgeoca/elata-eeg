@@ -94,6 +94,9 @@ pub struct PacketHeader {
     /// A unique identifier for the data source, typically the stage name.
     #[serde(default)]
     pub source_id: String,
+    /// A monotonically increasing sequence number for each packet from a source.
+    #[serde(default)]
+    pub frame_id: u64,
     /// Monotonic timestamp from the driver's sample acquisition clock (in nanoseconds).
     pub ts_ns: u64,
     /// The number of samples in the `samples` field of the `Packet`.

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, ReactNode, useEffect, useCallback, useMemo, useRef } from 'react';
-import { getPipelines, startPipeline as apiStartPipeline, getPipelineState } from '../utils/api';
+import { getPipelines, startPipeline as apiStartPipeline, getPipelineState, sendCommand as apiSendCommand } from '../utils/api';
 import { SystemConfig } from '@/types/eeg';
 import { useEventStream } from './EventStreamContext';
 
@@ -11,7 +11,7 @@ interface Pipeline {
 }
 
 export interface PipelineState {
-  status: 'stopped' | 'starting' | 'started' | 'error';
+  status: 'initializing' | 'stopped' | 'starting' | 'started' | 'error';
   config: SystemConfig | null;
 }
 
@@ -19,8 +19,9 @@ interface PipelineContextType {
   pipelines: Pipeline[];
   selectedPipeline: Pipeline | null;
   pipelineConfig: SystemConfig | null;
-  pipelineStatus: 'stopped' | 'starting' | 'started' | 'error';
+  pipelineStatus: 'initializing' | 'stopped' | 'starting' | 'started' | 'error';
   selectAndStartPipeline: (id: string) => Promise<void>;
+  sendCommand: (command: string, params: any) => Promise<void>;
 }
 
 const PipelineContext = createContext<PipelineContextType | undefined>(undefined);
@@ -33,7 +34,7 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [selectedPipeline, setSelectedPipeline] = useState<Pipeline | null>(null);
   const [pipelineState, setPipelineState] = useState<PipelineState>({
-    status: 'stopped',
+    status: 'initializing',
     config: null,
   });
   const { subscribe } = useEventStream();
@@ -60,16 +61,46 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     }
   }, [pipelines]);
 
+  const sendCommand = useCallback(async (command: string, params: any) => {
+    if (!selectedPipeline) {
+      console.error("No pipeline selected, cannot send command.");
+      return;
+    }
+    try {
+      await apiSendCommand(selectedPipeline.id, command, params);
+      console.log(`Command ${command} sent to pipeline ${selectedPipeline.id} with params:`, params);
+    } catch (error) {
+      console.error(`Failed to send command ${command} to pipeline ${selectedPipeline.id}:`, error);
+    }
+  }, [selectedPipeline]);
+
   useEffect(() => {
     if (initializationStarted.current) return;
     initializationStarted.current = true;
 
+    const resilientFetch = async <T,>(fetchFunc: () => Promise<T>, attempts = 5, delay = 1000): Promise<T> => {
+      for (let i = 0; i < attempts; i++) {
+        try {
+          return await fetchFunc();
+        } catch (error: any) {
+          if (error instanceof TypeError && error.message.includes('NetworkError')) {
+            if (i === attempts - 1) throw error;
+            console.warn(`Network error detected. Retrying in ${delay}ms... (Attempt ${i + 1}/${attempts})`);
+            await new Promise(resolve => setTimeout(resolve, delay * Math.pow(2, i)));
+          } else {
+            throw error;
+          }
+        }
+      }
+      throw new Error("Max retries reached");
+    };
+
     const initialize = async () => {
       try {
-        const availablePipelines = await getPipelines();
+        const availablePipelines = await resilientFetch(getPipelines);
         setPipelines(availablePipelines);
 
-        const currentState = await getPipelineState();
+        const currentState = await resilientFetch(getPipelineState);
         if (currentState && currentState.stages.length > 0) {
           console.log('[PipelineProvider] A pipeline is already running. Syncing state.');
           setPipelineState({ status: 'started', config: currentState });
@@ -81,13 +112,8 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
           if (defaultPipeline) {
             setPipelineState(prevState => ({ ...prevState, status: 'starting' }));
             setSelectedPipeline(defaultPipeline);
-            try {
-              await apiStartPipeline(defaultPipeline.id);
-              console.log(`Pipeline ${defaultPipeline.id} start command issued successfully.`);
-            } catch (error) {
-              console.error(`Failed to start pipeline ${defaultPipeline.id}:`, error);
-              setPipelineState({ status: 'error', config: null });
-            }
+            await resilientFetch(() => apiStartPipeline(defaultPipeline.id));
+            console.log(`Pipeline ${defaultPipeline.id} start command issued successfully.`);
           } else {
             console.error("No 'default' pipeline found.");
             setPipelineState({ status: 'error', config: null });
@@ -146,7 +172,8 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     pipelineConfig: pipelineState.config,
     pipelineStatus: pipelineState.status,
     selectAndStartPipeline,
-  }), [pipelines, selectedPipeline, pipelineState.config, pipelineState.status, selectAndStartPipeline]);
+    sendCommand,
+  }), [pipelines, selectedPipeline, pipelineState.config, pipelineState.status, selectAndStartPipeline, sendCommand]);
 
   return (
     <PipelineContext.Provider value={value}>

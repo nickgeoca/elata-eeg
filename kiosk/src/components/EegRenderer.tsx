@@ -106,9 +106,16 @@ export const EegRenderer = React.memo(function EegRenderer({
 
     return () => {
       cancelAnimationFrame(rafId.current);
-      vbos.current.forEach(b => gl.deleteBuffer(b));
-      gl.deleteProgram(prog);
-      vbos.current = []; cpuY.current = [];
+      const gl = glRef.current;
+      const prog = program.current;
+      if (gl && prog) {
+        vbos.current.forEach(b => gl.deleteBuffer(b));
+        gl.deleteProgram(prog);
+      }
+      vbos.current = [];
+      cpuY.current = [];
+      program.current = null;
+      glRef.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isActive, NCH, NPTS]);

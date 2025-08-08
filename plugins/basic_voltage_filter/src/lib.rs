@@ -79,7 +79,7 @@ impl Stage for BasicVoltageFilterPlugin {
 
                 let new_packet = RtPacket::Voltage(PacketData {
                     header: data.header.clone(),
-                    samples: (voltage_samples, data.samples.allocator().clone()).into(),
+                    samples: (voltage_samples, Default::default()).into(),
                 });
 
                 Ok(Some(Arc::new(new_packet)))

@@ -20,6 +20,7 @@ pub struct DataPacketHeader<'a> {
     pub batch_size: u32,
     pub num_channels: u32,
     pub packet_type: &'a str,
+    pub meta_rev: u32,
 }
 
 impl<'a> DataPacketHeader<'a> {
@@ -32,6 +33,7 @@ impl<'a> DataPacketHeader<'a> {
             batch_size: header.batch_size,
             num_channels: header.num_channels,
             packet_type,
+            meta_rev: header.meta.meta_rev,
         }
     }
 }

@@ -145,7 +145,7 @@ The Daemon is structured into several key Rust modules:
 
 ## 5. Client Interaction (WebSocket Endpoints)
 
-The Daemon exposes three WebSocket endpoints on `0.0.0.0:8080`:
+The Daemon exposes three WebSocket endpoints on `0.0.0.0:9000`:
 
 *   **`/eeg`**:
     *   **Purpose**: Streams continuous EEG data from the device.

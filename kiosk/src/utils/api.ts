@@ -96,3 +96,29 @@ export const sendControlCommand = async (command: any) => {
     throw error;
   }
 };
+
+/**
+ * Sends a command to a specific pipeline.
+ * @param pipelineId The ID of the pipeline to command.
+ * @param command The command to send (e.g., "SetParameter").
+ * @param params The parameters for the command.
+ * @returns A promise that resolves when the request is successful.
+ */
+export const sendCommand = async (pipelineId: string, command: string, params: any) => {
+  try {
+    const response = await fetch(`/api/pipelines/${pipelineId}/control`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ command, params }),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    return response;
+  } catch (error) {
+    console.error(`Failed to send command to pipeline ${pipelineId}:`, error);
+    throw error;
+  }
+};

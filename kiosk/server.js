@@ -7,7 +7,7 @@ const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev, dir: __dirname });
 const handle = app.getRequestHandler();
 
-const target = 'http://192.168.4.91:9000';
+const target = 'http://raspberrypi.local:9000';
 
 const apiProxy = createProxyMiddleware({
   target,

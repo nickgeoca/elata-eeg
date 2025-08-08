@@ -7,7 +7,7 @@ pub use eeg_types::data::{PacketData, PacketHeader, PacketOwned};
 /// into a `PacketOwned` (expensive).
 #[derive(Debug)]
 pub enum RtPacket {
-    RawI32(PacketData<RecycledI32Vec>),
+    RawI32(PacketData<Vec<i32>>),
     Voltage(PacketData<RecycledF32Vec>),
     RawAndVoltage(PacketData<RecycledI32F32TupleVec>),
 }
@@ -18,7 +18,7 @@ impl RtPacket {
         match self {
             RtPacket::RawI32(data) => RtPacket::RawI32(PacketData {
                 header: data.header.clone(),
-                samples: (data.samples.to_vec(), data.samples.allocator().clone()).into(),
+                samples: data.samples.clone(),
             }),
             RtPacket::Voltage(data) => RtPacket::Voltage(PacketData {
                 header: data.header.clone(),
@@ -34,7 +34,7 @@ impl RtPacket {
     pub fn new_raw_i32(samples: Vec<i32>) -> Self {
         let packet_data = PacketData {
             header: PacketHeader::default(),
-            samples: (samples, Default::default()).into(),
+            samples,
         };
         RtPacket::RawI32(packet_data)
     }
@@ -64,7 +64,7 @@ impl From<PacketOwned> for RtPacket {
         match owned_packet {
             PacketOwned::RawI32(data) => RtPacket::RawI32(PacketData {
                 header: data.header,
-                samples: (data.samples, Default::default()).into(),
+                samples: data.samples,
             }),
             PacketOwned::Voltage(data) => RtPacket::Voltage(PacketData {
                 header: data.header,

@@ -70,7 +70,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [dataVersion, setDataVersion] = useState(0);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
   const [fullFftPacket, setFullFftPacket] = useState<FftPacket | null>(null);
-  const [metadata, setMetadata] = useState<Map<string, SensorMeta>>(new Map());
+  const metadataRef = useRef<Map<string, SensorMeta>>(new Map());
   const [dataReceived, setDataReceived] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -84,10 +84,19 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
   useEffect(() => {
     const unsubscribe = subscribe('SourceReady', (data: any) => {
-      // The actual metadata is nested inside the 'meta' property of the event data
       if (data.meta) {
-        console.log('[EegDataContext] Received SourceReady event with meta:', data.meta);
+        console.log('[EegDataContext] HARD RESET: Received new SourceReady event.', data.meta);
+
+        // 1. Clear ALL existing data buffers
+        rawSamplesRef.current = [];
+        sampleTimestamps.current = [];
+
+        // 2. Set the new metadata as the source of truth
         setSourceReadyMeta(data.meta);
+        metadataRef.current.set('eeg_voltage', data.meta);
+
+        // 3. Force a re-render to propagate changes
+        setDataVersion(v => v + 1);
       }
     });
 
@@ -123,7 +132,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       channels,
       sample_rate: eegSourceStage?.params.sample_rate || 250,
     };
-  }, [pipelineConfig ? JSON.stringify(pipelineConfig) : null, sourceReadyMeta]);
+  }, [pipelineConfig, sourceReadyMeta]);
  
   // Create a ref to hold the latest config to avoid stale closures in WebSocket handler
   const configRef = useRef(config);
@@ -299,7 +308,10 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // During reconnection, we want to maintain the previous configuration
       if (!isReconnecting) {
         setIsReady(false);
-        setShouldConnect(false); // Signal that we should not connect to data WebSocket
+        // Do not set shouldConnect to false here.
+        // We want to keep the WebSocket connection alive during a pipeline restart
+        // to avoid a "Disconnected" state on the frontend. The connection
+        // will be reused when the new `SourceReady` event arrives.
         // Reset the guard when system is not ready
         if (process.env.NODE_ENV === 'development') {
           // @ts-ignore - Adding custom property to window object
@@ -341,9 +353,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   // This persists across double executions unlike refs which are reset per component instance
   const connectionGuardKey = '__eeg_websocket_connection_guard__';
 
-  // This useEffect manages the WebSocket connection lifecycle. It runs once on mount.
-  useEffect(() => {
-    // Only connect when we've received the SourceReady event
+  const connect = useCallback(() => {
+    // Check if we should connect to WebSocket
     if (!shouldConnect) {
       return;
     }
@@ -391,7 +402,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           if (msg.message_type === 'meta_update') {
             const metaUpdate = msg as MetaUpdateMsg;
             console.log(`[EegDataContext] Received metadata for topic: ${metaUpdate.topic}`, metaUpdate.meta);
-            setMetadata(prev => new Map(prev).set(metaUpdate.topic, metaUpdate.meta));
+            metadataRef.current.set(metaUpdate.topic, metaUpdate.meta);
           } else if (msg.topic === 'fft') {
             handleFftDataRef.current(msg);
           }
@@ -412,29 +423,15 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           const jsonHeaderStr = new TextDecoder().decode(jsonHeaderBytes);
           const header = JSON.parse(jsonHeaderStr) as DataPacketHeader;
 
-          // 3. Look up metadata
-          let meta = metadata.get(header.topic);
-          if (!meta) {
-            console.warn(`[EegDataContext] Received data packet for topic "${header.topic}" without metadata. Using default metadata.`);
-            // Create default metadata to prevent data loss
-            // If metadata is missing, create a dynamic fallback using the latest config
-            // This avoids race conditions where data arrives before the meta_update message
-            const currentConfig = configRef.current;
-            const channelCount = currentConfig?.channels?.length || 1;
-            const sampleRate = currentConfig?.sample_rate || 250;
-
-            meta = {
-              sensor_id: 1,
-              meta_rev: 0, // Indicates this is a fallback
-              source_type: "eeg_source",
-              v_ref: 4.5,
-              adc_bits: 24,
-              gain: 1,
-              sample_rate: sampleRate,
-              offset_code: 0,
-              is_twos_complement: true,
-              channel_names: Array.from({ length: channelCount }, (_, i) => `CH${i}`),
-            };
+          // 3. Look up metadata and validate its revision
+          const meta = metadataRef.current.get(header.topic);
+          if (!meta || meta.meta_rev !== header.meta_rev) {
+            if (!meta) {
+              console.warn(`[EegDataContext] Received data packet for topic "${header.topic}" without metadata. Dropping packet.`);
+            } else {
+              console.warn(`Dropping packet due to stale metadata. Frontend: ${meta?.meta_rev}, Packet: ${header.meta_rev}`);
+            }
+            return; // DROP THE PACKET
           }
 
           // 4. Create Float32Array view on the sample data (zero-copy)
@@ -515,12 +512,12 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // Mark this as intentional cleanup to prevent error handling
       isCleanupRef.current = true;
       // Remove event listeners to prevent them from being called on a stale socket instance.
-      if (socket) {
-        socket.onopen = null;
-        socket.onmessage = null;
-        socket.onerror = null;
-        socket.onclose = null;
-        socket.close();
+      if (ws.current) {
+        ws.current.onopen = null;
+        ws.current.onmessage = null;
+        ws.current.onerror = null;
+        ws.current.onclose = null;
+        ws.current.close();
       }
       // Reset the connection guard on window to allow for new connection attempts.
       // @ts-ignore - Adding custom property to window object
@@ -529,7 +526,15 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // Reset the cleanup flag
       isCleanupRef.current = false;
     };
-  }, [shouldConnect]); // Add shouldConnect as dependency to control when to connect
+  }, [shouldConnect]);
+
+  // This useEffect manages the WebSocket connection lifecycle. It runs when shouldConnect changes.
+  useEffect(() => {
+    if (shouldConnect) {
+      const cleanup = connect();
+      return cleanup;
+    }
+  }, [shouldConnect, connect]);
 
   // This useEffect manages sending subscribe/unsubscribe messages based on system readiness.
   useEffect(() => {
