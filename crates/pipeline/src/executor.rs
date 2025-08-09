@@ -4,6 +4,7 @@ use crate::data::RtPacket;
 use crate::graph::{PipelineGraph, StageId, StageMode};
 use crate::stage::{DefaultPolicy, ErrorAction, Stage, StagePolicy, StageState};
 use flume::{Receiver, Selector, Sender};
+use tokio::sync::broadcast;
 use std::collections::HashMap;
 use std::any::Any;
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
@@ -12,7 +13,17 @@ use tracing::{error, info, warn};
 use crate::control::ControlCommand;
 use crate::error::PipelineError;
 
-/// A handle to a running stage in the executor.
+#[derive(Clone)]
+enum Output {
+    Flume(Sender<Arc<RtPacket>>),
+    Broadcast(broadcast::Sender<Arc<RtPacket>>),
+}
+
+enum Input {
+    Flume(Receiver<Arc<RtPacket>>),
+    Broadcast(broadcast::Receiver<Arc<RtPacket>>),
+}
+
 /// A handle to a running stage in the executor.
 struct StageHandle {
     thread_handle: thread::JoinHandle<()>,
@@ -77,16 +88,38 @@ impl Executor {
             (core_ids.clone(), core_ids.clone(), core_ids.clone())
         };
 
-
         let topo = self.graph.topology_sort();
-        let mut rxs = HashMap::new();
-        let mut txs = HashMap::new();
+        let mut stage_inputs: HashMap<StageId, Input> = HashMap::new();
+        let mut stage_outputs: HashMap<StageId, Output> = HashMap::new();
 
-        // Create channels for all edges
+        // First, determine the fan-out count for each stage by seeing how many other stages
+        // list it as an input.
+        let mut fan_out_counts: HashMap<String, usize> = HashMap::new();
+        for stage_config in &self.graph.config.stages {
+            if let Some(input_name) = stage_config.inputs.first() {
+                // We only consider the stage name for fan-out calculation.
+                let base_input_name = input_name.split('.').next().unwrap_or(input_name);
+                *fan_out_counts.entry(base_input_name.to_string()).or_insert(0) += 1;
+            }
+        }
+
+        // Create channels for all potential outputs
         for stage_id in &topo {
-            let (tx, rx) = flume::bounded(4); // Default back-pressure
-            txs.insert(stage_id.clone(), tx);
-            rxs.insert(stage_id.clone(), rx);
+            let fan_out = fan_out_counts.get(stage_id).cloned().unwrap_or(1); // Default to 1 for sinks
+
+            if fan_out > 1 {
+                // This is a fan-out node, use a broadcast channel
+                let (tx, rx) = broadcast::channel(16); // Capacity for broadcast channel
+                stage_outputs.insert(stage_id.clone(), Output::Broadcast(tx));
+                // The initial receiver is created here, but each downstream stage will get its own
+                // by calling subscribe().
+                stage_inputs.insert(stage_id.clone(), Input::Broadcast(rx));
+            } else {
+                // Standard point-to-point channel
+                let (tx, rx) = flume::bounded(4);
+                stage_outputs.insert(stage_id.clone(), Output::Flume(tx));
+                stage_inputs.insert(stage_id.clone(), Input::Flume(rx));
+            }
         }
 
         for stage_id in &topo {
@@ -99,7 +132,6 @@ impl Executor {
             };
             let (stop_tx, stop_rx) = flume::bounded(1);
             self.stop_txs.lock().unwrap().push(stop_tx);
-            let _stage_config = self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap().clone();
             let node = self.graph.nodes.remove(stage_id).unwrap();
             let context = self.graph.context.clone();
             let mode = node.mode;
@@ -107,17 +139,8 @@ impl Executor {
             let fatal_error_tx = self.fatal_error_tx.clone();
 
             let input_rx = if mode == StageMode::Producer {
-                producer_rx.expect("Producer stage must have a receiver")
-            } else if self
-                .graph
-                .config
-                .stages
-                .iter()
-                .find(|s| &s.name == stage_id)
-                .unwrap()
-                .inputs
-                .is_empty()
-            {
+                Input::Flume(producer_rx.expect("Producer stage must have a receiver"))
+            } else if self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap().inputs.is_empty() {
                 // This is a source node, fed by the executor's main input channel.
                 let (tx, rx) = flume::bounded(4);
                 let source_rx_clone = source_rx.clone();
@@ -128,22 +151,36 @@ impl Executor {
                         }
                     }
                 });
-                rx
+                Input::Flume(rx)
             } else {
-                // This is a non-source node. It receives from its own channel.
-                rxs.remove(stage_id).unwrap()
+                // This is a non-source node. It receives from the appropriate channel created earlier.
+                let input_config = self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap();
+                let input_source_name = input_config.inputs.first().map(|s| s.split('.').next().unwrap_or(s).to_string());
+
+                if let Some(name) = input_source_name {
+                     let source_output = stage_outputs.get(&name).expect("Upstream channel should exist");
+                    match source_output {
+                        Output::Broadcast(tx) => Input::Broadcast(tx.subscribe()),
+                        Output::Flume(_) => stage_inputs.remove(stage_id).unwrap(),
+                    }
+                } else {
+                    // This case should ideally not be hit for non-producer, non-source stages,
+                    // but we provide a dummy channel to satisfy the type checker.
+                    let (_tx, rx) = flume::bounded(1);
+                    Input::Flume(rx)
+                }
             };
 
-            let output_txs: Vec<_> = self
+            let output_txs: Vec<Output> = self
                 .graph
                 .config
                 .stages
                 .iter()
                 .filter(|s| s.inputs.iter().any(|input| input.starts_with(stage_id)))
-                .filter_map(|s| txs.get(&s.name).cloned())
+                .filter_map(|s| stage_outputs.get(&s.name).cloned())
                 .collect();
 
-            info!("Wiring stage '{}' to outputs: {:?}", stage_id, output_txs.iter().map(|_| "downstream").collect::<Vec<_>>());
+            info!("Wiring stage '{}' to {} outputs", stage_id, output_txs.len());
 
             let node = Arc::new(Mutex::new(Node {
                 stage: node.stage,
@@ -175,9 +212,29 @@ impl Executor {
                                 "Starting producer loop for stage '{}'",
                                 node.lock().unwrap().name
                             );
+                            let (input_rx, should_halt_input, should_halt_stop, should_halt_control) =
+                                if let Input::Flume(rx) = input_rx {
+                                    let should_halt = Arc::new(AtomicBool::new(false));
+                                    (
+                                        rx,
+                                        should_halt.clone(),
+                                        should_halt.clone(),
+                                        should_halt,
+                                    )
+                                } else {
+                                    panic!("Producer stage must have a flume input channel");
+                                };
+
                             loop {
+                                let mut node_guard = node.lock().unwrap();
+                                if node_guard.state == StageState::Halted {
+                                    break;
+                                }
+                                drop(node_guard);
+
                                 let should_halt = Arc::new(AtomicBool::new(false));
-                                let should_halt_clone = should_halt.clone();
+                                let should_halt_input = should_halt.clone();
+                                let should_halt_stop = should_halt.clone();
                                 let node_clone = node.clone();
                                 let mut context_clone = context.lock().unwrap();
 
@@ -185,30 +242,39 @@ impl Executor {
                                     .recv(&input_rx, |msg| {
                                         if let Ok(packet) = msg {
                                             for tx in &output_txs {
-                                                if tx.send(packet.clone()).is_err() {
-                                                    // Downstream disconnected, this is fine.
+                                                match tx {
+                                                    Output::Flume(flume_tx) => {
+                                                        if flume_tx.send(packet.clone()).is_err() {
+                                                            // Downstream has disconnected, this is fine.
+                                                        }
+                                                    }
+                                                    Output::Broadcast(broadcast_tx) => {
+                                                        let _ = broadcast_tx.send(packet.clone());
+                                                    }
                                                 }
                                             }
                                         } else {
                                             // Channel is disconnected
-                                            should_halt_clone.store(true, Ordering::SeqCst);
+                                            should_halt_input.store(true, Ordering::SeqCst);
                                         }
                                     })
                                     .recv(&stop_rx, move |_| {
-                                        should_halt.store(true, Ordering::SeqCst);
+                                        should_halt_stop.store(true, Ordering::SeqCst);
                                     })
                                     .recv(&control_rx_clone, move |msg| {
                                         if let Ok(cmd) = msg {
                                             let mut node_guard = node_clone.lock().unwrap();
-                                            if let Err(e) = node_guard.stage.control(&cmd, &mut context_clone) {
+                                            if let Err(e) =
+                                                node_guard.stage.control(&cmd, &mut context_clone)
+                                            {
                                                 error!("Error handling control command: {}", e);
                                             }
                                         }
                                     })
                                     .wait();
 
-                                if should_halt_clone.load(Ordering::SeqCst) {
-                                    break;
+                                if should_halt.load(Ordering::SeqCst) {
+                                    node.lock().unwrap().state = StageState::Halted;
                                 }
                             }
                         }
@@ -223,104 +289,51 @@ impl Executor {
                                     break;
                                 }
 
-                                if node_guard.state == StageState::Draining && input_rx.is_empty()
-                                {
-                                    info!(
-                                        "Stage '{}' has drained its queue and is halting.",
-                                        node_guard.name
-                                    );
-                                    node_guard.state = StageState::Halted;
-                                    continue;
-                                }
+                                if node_guard.state == StageState::Draining {
+                                     let is_empty = match &input_rx {
+                                         Input::Flume(rx) => rx.is_empty(),
+                                         Input::Broadcast(rx) => rx.is_empty(),
+                                     };
+                                     if is_empty {
+                                         info!(
+                                             "Stage '{}' has drained its queue and is halting.",
+                                             node_guard.name
+                                         );
+                                         node_guard.state = StageState::Halted;
+                                         continue;
+                                     }
+                                 }
                                 drop(node_guard);
 
                                 let should_halt = Arc::new(AtomicBool::new(false));
-
                                 let should_halt_input = should_halt.clone();
                                 let should_halt_stop = should_halt.clone();
-
                                 let node_clone = node.clone();
                                 let mut context_clone = context.lock().unwrap();
 
-                                Selector::new()
-                                    .recv(&input_rx, |msg| {
-                                        let mut node_guard = node_clone.lock().unwrap();
-                                        if let Ok(packet) = msg {
-                                            if node_guard.state != StageState::Running {
-                                                return; // Don't process new packets if not running
-                                            }
-                                            let result = std::panic::catch_unwind(
-                                                std::panic::AssertUnwindSafe(|| {
-                                                    node_guard
-                                                        .stage
-                                                        .process(packet, &mut context_clone)
-                                                }),
-                                            );
-
-                                            match result {
-                                                Ok(Ok(Some(output_packet))) => {
-                                                    for tx in &output_txs {
-                                                        if tx.send(output_packet.clone()).is_err()
-                                                        {
-                                                            // Downstream has disconnected, this is fine.
-                                                        }
-                                                    }
-                                                }
-                                                Ok(Ok(None)) => { /* Packet was filtered */ }
-                                                Ok(Err(e)) => {
-                                                    // Stage returned an error
-                                                    error!(
-                                                        "Error in stage '{}': {}",
-                                                        node_guard.name, e
-                                                    );
-                                                    match node_guard.policy.on_error() {
-                                                        ErrorAction::Fatal => {
-                                                            error!(
-                                                            "Fatal error in stage '{}'. Shutting down.",
-                                                            node_guard.name
-                                                        );
-                                                            should_halt_input
-                                                                .store(true, Ordering::SeqCst);
-                                                        }
-                                                        ErrorAction::DrainThenStop => {
-                                                            warn!(
-                                                            "Stage '{}' is draining due to an error.",
-                                                            node_guard.name
-                                                        );
-                                                            node_guard.state =
-                                                                StageState::Draining;
-                                                        }
-                                                        ErrorAction::SkipPacket => {
-                                                            warn!(
-                                                            "Skipping packet in stage '{}' due to error.",
-                                                            node_guard.name
-                                                        );
-                                                        }
-                                                    }
-                                                }
-                                                Err(panic_payload) => {
-                                                    // Stage panicked
-                                                    error!(
-                                                        "PANIC in stage '{}'. Shutting down.",
-                                                        node_guard.name
-                                                    );
-                                                    should_halt_input
-                                                        .store(true, Ordering::SeqCst);
-                                                    // Send the panic payload to the main thread
-                                                    if fatal_error_tx.send(panic_payload).is_err() {
-                                                        error!("Fatal error channel disconnected. Cannot report panic.");
-                                                    }
-                                                }
-                                            }
-                                        } else {
-                                            // Channel is disconnected
-                                            should_halt_input.store(true, Ordering::SeqCst);
-                                        }
-                                    })
-                                    .recv(&stop_rx, move |_| {
-                                        should_halt_stop.store(true, Ordering::SeqCst);
-                                    })
-                                    .wait();
+                                match &input_rx {
+                                    Input::Flume(rx) => {
+                                        Selector::new()
+                                            .recv(rx, |msg| {
+                                                process_message(msg.map_err(|e| e.into()), &node_clone, &mut context_clone, &output_txs, &should_halt_input, &fatal_error_tx);
+                                            })
+                                            .recv(&stop_rx, |_| {
+                                                should_halt_stop.store(true, Ordering::SeqCst);
+                                            })
+                                            .wait();
+                                    }
+                                    Input::Broadcast(rx) => {
+                                        run_broadcast_receiver(
+                                            rx,
+                                            &stop_rx,
+                                            &should_halt,
+                                            &node_clone,
+                                            &mut context_clone,
+                                            &output_txs,
+                                            &fatal_error_tx,
+                                        );
+                                    }
+                                }
 
                                 if should_halt.load(Ordering::SeqCst) {
                                     node.lock().unwrap().state = StageState::Halted;
@@ -366,5 +379,157 @@ impl Executor {
     /// Handles a control command for the pipeline.
     pub fn handle_control_command(&mut self, cmd: &ControlCommand) -> Result<(), PipelineError> {
         self.graph.handle_control_command(cmd)
+    }
+}
+
+fn run_broadcast_receiver(
+    rx: &broadcast::Receiver<Arc<RtPacket>>,
+    stop_rx: &flume::Receiver<()>,
+    should_halt: &Arc<AtomicBool>,
+    node_clone: &Arc<Mutex<Node>>,
+    context_clone: &mut crate::stage::StageContext,
+    output_txs: &[Output],
+    fatal_error_tx: &Sender<Box<dyn Any + Send>>,
+) {
+    let mut rx = rx.resubscribe();
+    loop {
+        if stop_rx.try_recv().is_ok() || should_halt.load(Ordering::SeqCst) {
+            should_halt.store(true, Ordering::SeqCst);
+            break;
+        }
+        match rx.try_recv() {
+            Ok(packet) => {
+                process_message(
+                    Ok(packet),
+                    node_clone,
+                    context_clone,
+                    output_txs,
+                    should_halt,
+                    fatal_error_tx,
+                );
+            }
+            Err(broadcast::error::TryRecvError::Empty) => {
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Err(broadcast::error::TryRecvError::Lagged(n)) => {
+                warn!(
+                    "Stage '{}' lagged behind and missed {} messages.",
+                    node_clone.lock().unwrap().name,
+                    n
+                );
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                should_halt.store(true, Ordering::SeqCst);
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+enum RecvError {
+    Flume(flume::RecvError),
+    Broadcast(broadcast::error::RecvError),
+}
+
+impl From<flume::RecvError> for RecvError {
+    fn from(e: flume::RecvError) -> Self {
+        RecvError::Flume(e)
+    }
+}
+
+impl From<broadcast::error::RecvError> for RecvError {
+    fn from(e: broadcast::error::RecvError) -> Self {
+        RecvError::Broadcast(e)
+    }
+}
+
+fn process_message(
+    msg: Result<Arc<RtPacket>, RecvError>,
+    node_clone: &Arc<Mutex<Node>>,
+    context_clone: &mut crate::stage::StageContext,
+    output_txs: &[Output],
+    should_halt_input: &Arc<AtomicBool>,
+    fatal_error_tx: &Sender<Box<dyn Any + Send>>,
+) {
+    let mut node_guard = node_clone.lock().unwrap();
+    if let Ok(packet) = msg {
+        if node_guard.state != StageState::Running {
+            return; // Don't process new packets if not running
+        }
+        let result = std::panic::catch_unwind(
+            std::panic::AssertUnwindSafe(|| {
+                node_guard
+                    .stage
+                    .process(packet, context_clone)
+            }),
+        );
+
+        match result {
+            Ok(Ok(Some(output_packet))) => {
+                for tx in output_txs {
+                    match tx {
+                        Output::Flume(flume_tx) => {
+                            if flume_tx.send(output_packet.clone()).is_err()
+                            {
+                                // Downstream has disconnected, this is fine.
+                            }
+                        },
+                        Output::Broadcast(broadcast_tx) => {
+                            // Error means no subscribers, which is fine.
+                            let _ = broadcast_tx.send(output_packet.clone());
+                        }
+                    }
+                }
+            }
+            Ok(Ok(None)) => { /* Packet was filtered */ }
+            Ok(Err(e)) => {
+                // Stage returned an error
+                error!(
+                    "Error in stage '{}': {}",
+                    node_guard.name, e
+                );
+                match node_guard.policy.on_error() {
+                    ErrorAction::Fatal => {
+                        error!(
+                        "Fatal error in stage '{}'. Shutting down.",
+                        node_guard.name
+                    );
+                        should_halt_input
+                            .store(true, Ordering::SeqCst);
+                    }
+                    ErrorAction::DrainThenStop => {
+                        warn!(
+                        "Stage '{}' is draining due to an error.",
+                        node_guard.name
+                    );
+                        node_guard.state =
+                            StageState::Draining;
+                    }
+                    ErrorAction::SkipPacket => {
+                        warn!(
+                        "Skipping packet in stage '{}' due to error.",
+                        node_guard.name
+                    );
+                    }
+                }
+            }
+            Err(panic_payload) => {
+                // Stage panicked
+                error!(
+                    "PANIC in stage '{}'. Shutting down.",
+                    node_guard.name
+                );
+                should_halt_input
+                    .store(true, Ordering::SeqCst);
+                // Send the panic payload to the main thread
+                if fatal_error_tx.send(panic_payload).is_err() {
+                    error!("Fatal error channel disconnected. Cannot report panic.");
+                }
+            }
+        }
+    } else {
+        // Channel is disconnected
+        should_halt_input.store(true, Ordering::SeqCst);
     }
 }

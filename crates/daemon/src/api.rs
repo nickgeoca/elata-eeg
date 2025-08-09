@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use tokio::sync::broadcast;
-use eeg_types::{comms::BrokerMessage, data::SensorMeta};
+use eeg_types::{comms::pipeline::BrokerMessage, data::SensorMeta};
 use flume::Sender;
 use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};

@@ -94,6 +94,9 @@ pub struct PacketHeader {
     /// A unique identifier for the data source, typically the stage name.
     #[serde(default)]
     pub source_id: String,
+    /// A string identifier for the type of data in the packet (e.g., "RawI32", "Voltage").
+    #[serde(default)]
+    pub packet_type: String,
     /// A monotonically increasing sequence number for each packet from a source.
     #[serde(default)]
     pub frame_id: u64,

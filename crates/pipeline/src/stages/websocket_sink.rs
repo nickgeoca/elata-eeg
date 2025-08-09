@@ -1,13 +1,13 @@
 use std::sync::Arc;
-use bytemuck;
-use eeg_types::comms::{BrokerMessage, BrokerPayload};
-use eeg_types::data::PacketHeader;
-use crate::data::RtPacket;
-use crate::daemon_protocol::{DataPacketHeader, MetaUpdateMsg};
+
+use eeg_types::comms::pipeline::{BrokerMessage, BrokerPayload};
 use serde::Deserialize;
 use tokio::sync::broadcast;
+use tracing::info;
 
 use crate::{
+    data::RtPacket,
+    daemon_protocol::{DataPacketHeader, MetaUpdateMsg},
     error::StageError,
     registry::StageFactory,
     stage::{Stage, StageContext, StageInitCtx},
@@ -34,13 +34,22 @@ impl Stage for WebsocketSink {
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
     ) -> std::result::Result<Option<Arc<RtPacket>>, StageError> {
+        info!("WebsocketSink received a packet");
         let (header, samples_bytes, packet_type) = match &*packet {
-            RtPacket::Voltage(data) => (&data.header, bytemuck::cast_slice(&data.samples), "Voltage"),
-            RtPacket::RawI32(data) => (&data.header, bytemuck::cast_slice(&data.samples), "RawI32"),
-            // Note: RawAndVoltage is not handled in this protocol version for simplicity.
-            // It would require a more complex sample layout.
-            _ => return Ok(Some(packet)),
+            RtPacket::Voltage(data) => {
+                info!("Packet is Voltage");
+                (&data.header, bytemuck::cast_slice(&data.samples), "Voltage")
+            }
+            RtPacket::RawI32(data) => {
+                info!("Packet is RawI32");
+                (&data.header, bytemuck::cast_slice(&data.samples), "RawI32")
+            }
+            _ => {
+                info!("Packet is other, forwarding");
+                return Ok(Some(packet));
+            }
         };
+        info!("Processing packet with batch size {}", header.batch_size);
 
         // Send metadata if it's the first packet or if the metadata has changed.
         if self.last_meta_rev != Some(header.meta.meta_rev) {
@@ -85,9 +94,10 @@ impl Stage for WebsocketSink {
             topic: self.topic.clone(),
             payload: BrokerPayload::Data(binary_payload),
         });
-        let _ = self.sender.send(broker_msg); // Ignore error if no subscribers
+        let send_result = self.sender.send(broker_msg);
+        info!("Send result: {:?}", send_result);
 
-        Ok(Some(packet))
+        Ok(None)
     }
 }
 

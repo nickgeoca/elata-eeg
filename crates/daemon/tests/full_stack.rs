@@ -131,8 +131,11 @@ async fn setup_test_daemon() -> (
                             let mut samples = RecycledI32Vec::new(allocator.clone());
                             samples.extend(data.samples.iter().map(|s| *s as i32));
                             let packet = RtPacket::RawI32(pipeline::data::PacketData {
-                                header: data.header,
-                                samples,
+                                header: pipeline::data::PacketHeader {
+                                    frame_id: 0,
+                                    ..data.header
+                                },
+                                samples: samples.to_vec(),
                             });
                             if input_tx_clone.send(Arc::new(packet)).is_err() {
                                 break; // Pipeline receiver dropped.
@@ -181,4 +184,152 @@ async fn test_full_stack_command_and_shutdown() {
     pipeline_handle.join().unwrap();
 
     // Test passed if it reaches here without panicking
+}
+use adc_daemon::websocket_broker::WebSocketBroker;
+use eeg_types::comms::{
+    client::ServerMessage,
+    pipeline::{BrokerMessage, BrokerPayload},
+};
+use futures_util::{SinkExt, StreamExt};
+use tokio::net::TcpStream;
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+
+use axum::{
+    extract::{
+        ws::{WebSocket, WebSocketUpgrade},
+        State,
+    },
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
+use std::net::SocketAddr;
+
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(broker): State<Arc<WebSocketBroker>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        broker.add_client(socket).await;
+    })
+}
+
+#[tokio::test]
+async fn test_broker_closes_connection_on_invalid_payload() {
+    // 1. Setup
+    let (pipeline_tx, pipeline_rx) = broadcast::channel(16);
+    let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
+    broker.clone().start();
+
+    // 2. Setup an Axum server
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(broker.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{}/ws", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // 3. Connect a client and subscribe
+    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    let subscribe_msg = serde_json::to_string(&json!({
+        "type": "subscribe",
+        "topic": "eeg_raw"
+    }))
+    .unwrap();
+    ws_tx
+        .send(Message::Text(subscribe_msg))
+        .await
+        .unwrap();
+
+    // 4. Wait for subscription ACK
+    let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");
+    assert!(matches!(ack_msg, Message::Text(_)), "Expected Text message for ACK");
+    let ack: ServerMessage = serde_json::from_str(ack_msg.to_text().unwrap()).expect("Failed to parse ACK message");
+    assert_eq!(ack, ServerMessage::Subscribed("eeg_raw".to_string()));
+
+    // Give the server a moment to process the subscription before sending the next message
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 5. Send a malicious binary payload from the client
+    let binary_payload = vec![0, 1, 2, 3];
+    ws_tx
+        .send(Message::Binary(binary_payload))
+        .await
+        .unwrap();
+
+    // 7. Verify the connection is closed
+    // The broker should detect the protocol violation and close the connection.
+    loop {
+        match ws_rx.next().await {
+            Some(Ok(Message::Close(_))) => break, // Correctly closed
+            Some(Ok(Message::Ping(_))) => continue, // Ignore pings
+            other => panic!("Expected connection to be closed, but received: {:?}", other),
+        }
+    }
+}
+#[tokio::test]
+async fn test_broker_closes_connection_on_malformed_json() {
+    // 1. Setup
+    let (pipeline_tx, pipeline_rx) = broadcast::channel(16);
+    let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
+    broker.clone().start();
+
+    // 2. Setup an Axum server
+    let app = Router::new()
+        .route("/ws", get(ws_handler))
+        .with_state(broker.clone());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let url = format!("ws://{}/ws", addr);
+
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // 3. Connect a client and subscribe
+    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    let (mut ws_tx, mut ws_rx) = ws_stream.split();
+
+    let subscribe_msg = serde_json::to_string(&json!({
+        "type": "subscribe",
+        "topic": "eeg_raw"
+    }))
+    .unwrap();
+    ws_tx
+        .send(Message::Text(subscribe_msg))
+        .await
+        .unwrap();
+
+    // 4. Wait for subscription ACK
+    let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");
+    assert!(matches!(ack_msg, Message::Text(_)), "Expected Text message for ACK");
+    let ack: ServerMessage = serde_json::from_str(ack_msg.to_text().unwrap()).expect("Failed to parse ACK message");
+    assert_eq!(ack, ServerMessage::Subscribed("eeg_raw".to_string()));
+    
+    // Give the server a moment to process the subscription before sending the next message
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // 5. Send a malformed JSON payload from the client
+    let malformed_json = r#"{"type": "some_unsupported_action"}"#;
+    ws_tx
+        .send(Message::Text(malformed_json.to_string()))
+        .await
+        .unwrap();
+
+    // 7. Verify the connection is closed
+    loop {
+        match ws_rx.next().await {
+            Some(Ok(Message::Close(_))) => break, // Correctly closed
+            Some(Ok(Message::Ping(_))) => continue, // Ignore pings
+            other => panic!("Expected connection to be closed, but received: {:?}", other),
+        }
+    }
 }

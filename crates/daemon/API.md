@@ -51,7 +51,7 @@ sequenceDiagram
     Note over UI: Connect to WebSocket for data
     UI->>Daemon: WebSocket connect to /ws/data
     Note over Daemon: Client subscribes to a topic
-    UI->>Daemon: send `{"subscribe": "topic_name"}`
+    UI->>Daemon: send `{"type": "subscribe", "topic": "topic_name"}`
     Daemon-->>UI: Binary EEG data packets
     
     Note over UI: User changes a parameter
@@ -158,12 +158,13 @@ The subscription process is as follows:
 
 1.  **Establish Connection:** The client initiates a WebSocket connection to the `/ws/data` endpoint.
 
-2.  **Subscribe to a Topic:** Immediately after the connection is established, the client must send a JSON message to specify which topic it wants to receive data from. The message must be a JSON object with a single key, `"subscribe"`, whose value is the name of the topic.
+2.  **Subscribe to a Topic:** Immediately after the connection is established, the client must send a JSON message to specify which topic it wants to receive data from. The message must be a JSON object with a `type` field set to `"subscribe"` and a `topic` field with the desired topic name.
 
     *   **Example `subscribe` message:**
         ```json
         {
-          "subscribe": "eeg_voltage"
+          "type": "subscribe",
+          "topic": "eeg_voltage"
         }
         ```
 
@@ -174,7 +175,8 @@ The subscription process is as follows:
     *   **Example `unsubscribe` message:**
         ```json
         {
-          "unsubscribe": "eeg_voltage"
+          "type": "unsubscribe",
+          "topic": "eeg_voltage"
         }
         ```
 

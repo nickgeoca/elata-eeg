@@ -7,7 +7,7 @@ use std::{
 use adc_daemon::plugin_supervisor::PluginSupervisor;
 use adc_daemon::api::{AppState, PipelineHandle};
 use adc_daemon::websocket_broker::WebSocketBroker;
-use eeg_types::comms::BrokerMessage;
+use eeg_types::comms::pipeline::BrokerMessage;
 use clap::{Arg, Command};
 use pipeline::config::SystemConfig;
 use pipeline::control::PipelineEvent;

@@ -390,6 +390,19 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     socket.onopen = () => {
       console.log('[EegDataContext] WebSocket connection established');
       setWsStatus('Connected');
+
+      // Dynamically subscribe to the topic from the sourceReady event
+      if (sourceReadyMeta?.source_type) {
+        const topic = sourceReadyMeta.source_type === 'eeg_source' ? 'eeg_voltage' : 'fft';
+        const subscriptionMessage = {
+          type: 'subscribe',
+          topic: topic,
+        };
+        socket.send(JSON.stringify(subscriptionMessage));
+        console.log(`[EegDataContext] Subscribed to topic: ${subscriptionMessage.topic}`);
+      } else {
+        console.warn('[EegDataContext] Could not subscribe to data topic: sourceReadyMeta is not available.');
+      }
     };
 
     // Define the message handler inside the effect to create a stable closure
@@ -403,8 +416,6 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
             const metaUpdate = msg as MetaUpdateMsg;
             console.log(`[EegDataContext] Received metadata for topic: ${metaUpdate.topic}`, metaUpdate.meta);
             metadataRef.current.set(metaUpdate.topic, metaUpdate.meta);
-          } else if (msg.topic === 'fft') {
-            handleFftDataRef.current(msg);
           }
           return;
         }
@@ -441,8 +452,25 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           const jsonPadding = (4 - (jsonHeaderLen % 4)) % 4;
           const alignedOffset = samplesOffset + jsonPadding;
 
-          if (header.packet_type === 'Voltage') {
-            const samples = new Float32Array(buffer, alignedOffset);
+          if (header.packet_type === 'Voltage' || header.packet_type === 'RawI32') {
+            let samples: Float32Array;
+
+            if (header.packet_type === 'RawI32') {
+              // Convert RawI32 to Voltage
+              const rawSamples = new Int32Array(buffer, alignedOffset);
+              samples = new Float32Array(rawSamples.length);
+              
+              const adcBits = meta.adc_bits || 24;
+              const vRef = meta.v_ref || 4.5;
+              const gain = meta.gain || 1.0;
+              const scaleFactor = (vRef / (Math.pow(2, adcBits) - 1) / gain) * 1000000;
+
+              for (let i = 0; i < rawSamples.length; i++) {
+                samples[i] = rawSamples[i] * scaleFactor;
+              }
+            } else { // 'Voltage'
+              samples = new Float32Array(buffer, alignedOffset);
+            }
             
             if (meta) {
                 const newChunk: SampleChunk = {
@@ -492,18 +520,21 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         window[connectionGuardKey] = false;
         
         // Attempt to reconnect after a delay
-        setTimeout(() => {
-          if (!isCleanupRef.current) {
-            console.log('[EegDataContext] Attempting to reconnect WebSocket');
-            // Reset the connection attempt guard to allow reconnection
-            // @ts-ignore - Adding custom property to window object
-            window[connectionGuardKey] = false;
-            // Set shouldConnect to true to trigger reconnection attempts
-            setShouldConnect(true);
-            // Trigger reconnection by forcing a re-render
-            setDataReceived(false);
-          }
-        }, 1000);
+        if (!reconnectTimerRef.current) {
+          reconnectTimerRef.current = setTimeout(() => {
+            if (!isCleanupRef.current) {
+              console.log('[EegDataContext] Attempting to reconnect WebSocket');
+              // Reset the connection attempt guard to allow reconnection
+              // @ts-ignore - Adding custom property to window object
+              window[connectionGuardKey] = false;
+              // Set shouldConnect to true to trigger reconnection attempts
+              setShouldConnect(true);
+              // Trigger reconnection by forcing a re-render
+              setDataReceived(false);
+            }
+            reconnectTimerRef.current = null;
+          }, 1000);
+        }
       }
     };
     // The cleanup function is critical for preventing memory leaks and race conditions.
@@ -526,28 +557,16 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // Reset the cleanup flag
       isCleanupRef.current = false;
     };
-  }, [shouldConnect]);
+  }, [shouldConnect, sourceReadyMeta]); // Add sourceReadyMeta as a dependency
 
-  // This useEffect manages the WebSocket connection lifecycle. It runs when shouldConnect changes.
+  // This useEffect manages the WebSocket connection lifecycle.
+  // It runs ONLY when shouldConnect changes from false to true.
   useEffect(() => {
     if (shouldConnect) {
-      const cleanup = connect();
-      return cleanup;
+      connect();
     }
-  }, [shouldConnect, connect]);
+  }, [shouldConnect]); // REMOVED `connect` from dependency array
 
-  // This useEffect manages sending subscribe/unsubscribe messages based on system readiness.
-  useEffect(() => {
-    if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-      if (isReady) {
-        console.log('[EegDataContext] System is ready, subscribing to eeg_voltage topic.');
-        ws.current.send(JSON.stringify({ subscribe: 'eeg_voltage' }));
-      } else {
-        console.log('[EegDataContext] System not ready, unsubscribing from eeg_voltage topic.');
-        ws.current.send(JSON.stringify({ unsubscribe: 'eeg_voltage' }));
-      }
-    }
-  }, [isReady, wsStatus]); // Re-run when readiness or connection status changes.
 
   const stableValue = useMemo(() => ({
     subscribeRaw,

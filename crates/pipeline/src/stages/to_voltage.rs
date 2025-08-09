@@ -65,6 +65,7 @@ impl Stage for ToVoltage {
                     samples: voltage_samples,
                 };
                 output_packet.header.source_id = self.output_name.clone();
+                output_packet.header.packet_type = "Voltage".to_string();
 
                 Ok(Some(Arc::new(RtPacket::Voltage(output_packet))))
             }
