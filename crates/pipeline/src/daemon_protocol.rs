@@ -16,10 +16,10 @@ pub struct MetaUpdateMsg<'a> {
 pub struct DataPacketHeader<'a> {
     pub message_type: &'static str,
     pub topic: &'a str,
+    pub packet_type: &'a str,
     pub ts_ns: u64,
     pub batch_size: u32,
     pub num_channels: u32,
-    pub packet_type: &'a str,
     pub meta_rev: u32,
 }
 
@@ -29,10 +29,10 @@ impl<'a> DataPacketHeader<'a> {
         Self {
             message_type: "data_packet",
             topic,
+            packet_type,
             ts_ns: header.ts_ns,
             batch_size: header.batch_size,
             num_channels: header.num_channels,
-            packet_type,
             meta_rev: header.meta.meta_rev,
         }
     }

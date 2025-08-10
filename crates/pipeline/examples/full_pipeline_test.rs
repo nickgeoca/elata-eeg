@@ -208,6 +208,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let packet = RtPacket::RawI32(PacketData {
             header: PacketHeader {
                 source_id: "acquire".to_string(),
+                packet_type: "RawI32".to_string(),
                 frame_id: i as u64,
                 ts_ns: i as u64,
                 batch_size: samples_per_packet as u32,

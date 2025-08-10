@@ -132,16 +132,15 @@ impl WebSocketBroker {
                                                 break;
                                             }
 
-                                            // Add the subscription to the map *after* the ACK is sent
+                                            // Clone the receiver for the future, keeping the original in the map
+                                            let mut fut_rx = sub_rx.resubscribe();
                                             subs.insert(topic.clone(), sub_rx);
 
-                                            // Arm the future to listen for the first message
-                                            if let Some(mut sub_rx) = subs.remove(&topic) {
-                                                topic_futs.push(async move {
-                                                    let res = sub_rx.recv().await;
-                                                    (topic, res, sub_rx)
-                                                }.boxed());
-                                            }
+                                            // Arm the future to listen for messages
+                                            topic_futs.push(async move {
+                                                let res = fut_rx.recv().await;
+                                                (topic, res, fut_rx)
+                                            }.boxed());
                                         }
                                     },
                                     ClientMessage::Unsubscribe { topic } => {
@@ -185,25 +184,19 @@ impl WebSocketBroker {
                                 info!("[Client {}] Failed to forward message, client disconnected.", client_id);
                                 break;
                             }
-                            // Re-insert the receiver and re-arm the future
-                            subs.insert(topic.clone(), sub_rx);
-                            if let Some(mut sub_rx) = subs.remove(&topic) {
-                                 topic_futs.push(async move {
-                                    let res = sub_rx.recv().await;
-                                    (topic, res, sub_rx)
-                                }.boxed());
-                            }
+                            // Re-arm the future with the same receiver
+                            topic_futs.push(async move {
+                                let res = sub_rx.recv().await;
+                                (topic, res, sub_rx)
+                            }.boxed());
                         },
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                              warn!("[Client {}] Channel for topic '{}' lagged by {} messages.", client_id, &topic, n);
-                             // Re-insert and re-arm
-                             subs.insert(topic.clone(), sub_rx);
-                             if let Some(mut sub_rx) = subs.remove(&topic) {
-                                 topic_futs.push(async move {
-                                    let res = sub_rx.recv().await;
-                                    (topic, res, sub_rx)
-                                }.boxed());
-                            }
+                             // Re-arm the future
+                             topic_futs.push(async move {
+                                let res = sub_rx.recv().await;
+                                (topic, res, sub_rx)
+                            }.boxed());
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             debug!("[Client {}] Channel for topic '{}' closed. Subscription removed.", client_id, topic);

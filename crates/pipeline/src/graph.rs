@@ -7,7 +7,7 @@ use crate::data::{PacketOwned, RtPacket};
 use crate::error::{PipelineError, StageError};
 use crate::registry::StageRegistry;
 use crate::stage::{DefaultPolicy, Stage, StageContext, StagePolicy, StageState};
-use eeg_types::comms::pipeline::BrokerMessage;
+use eeg_types::comms::BrokerMessage;
 use flume::{Receiver, Sender};
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;

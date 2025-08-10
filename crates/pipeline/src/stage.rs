@@ -4,7 +4,7 @@ use crate::allocator::SharedPacketAllocator;
 use crate::control::{ControlCommand, PipelineEvent};
 use crate::data::RtPacket;
 use crate::error::StageError;
-use eeg_types::comms::pipeline::BrokerMessage;
+use eeg_types::comms::BrokerMessage;
 use flume::Sender;
 use sensors::types::AdcDriver;
 use std::sync::Arc;

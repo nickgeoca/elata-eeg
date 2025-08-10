@@ -70,7 +70,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const [dataVersion, setDataVersion] = useState(0);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
   const [fullFftPacket, setFullFftPacket] = useState<FftPacket | null>(null);
-  const metadataRef = useRef<Map<string, SensorMeta>>(new Map());
+  const [metadata, setMetadata] = useState<Record<string, SensorMeta>>({});
   const [dataReceived, setDataReceived] = useState(false);
   const [driverError, setDriverError] = useState<string | null>(null);
   const [isReconnecting, setIsReconnecting] = useState(false);
@@ -93,7 +93,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
         // 2. Set the new metadata as the source of truth
         setSourceReadyMeta(data.meta);
-        metadataRef.current.set('eeg_voltage', data.meta);
+        setMetadata(prev => ({ ...prev, ['eeg_voltage']: data.meta }));
 
         // 3. Force a re-render to propagate changes
         setDataVersion(v => v + 1);
@@ -346,7 +346,6 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
   const [wsStatus, setWsStatus] = useState('Disconnected');
   const ws = useRef<WebSocket | null>(null);
-  const isCleanupRef = useRef(false); // Track if we're in cleanup phase
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null); // For managing reconnection timer
   
   // Use window property to track connection attempts in React Strict Mode
@@ -408,154 +407,98 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     // Define the message handler inside the effect to create a stable closure
     // over the handleSamples and handleFftData callbacks.
     socket.onmessage = (event: MessageEvent) => {
-      try {
-        // Handle meta_update messages (JSON string)
-        if (typeof event.data === 'string') {
-          const msg = JSON.parse(event.data);
-          if (msg.message_type === 'meta_update') {
-            const metaUpdate = msg as MetaUpdateMsg;
-            console.log(`[EegDataContext] Received metadata for topic: ${metaUpdate.topic}`, metaUpdate.meta);
-            metadataRef.current.set(metaUpdate.topic, metaUpdate.meta);
-          }
+      // Handle MetaUpdateMsg (Text)
+      if (typeof event.data === 'string') {
+        const msg = JSON.parse(event.data);
+        if (msg.message_type === 'meta_update') {
+          const metaUpdate = msg as MetaUpdateMsg;
+          setMetadata(prev => ({ ...prev, [metaUpdate.topic]: metaUpdate.meta }));
+        }
+        return;
+      }
+
+      // Handle Data Packet (Binary)
+      if (event.data instanceof ArrayBuffer) {
+        const dataView = new DataView(event.data);
+        
+        // 1. Read JSON header length
+        const jsonLen = dataView.getUint32(0, false); // Big-endian is correct
+        
+        // 2. Decode JSON header
+        const jsonBytes = new Uint8Array(event.data, 4, jsonLen);
+        const jsonString = new TextDecoder().decode(jsonBytes);
+        const header = JSON.parse(jsonString) as DataPacketHeader;
+
+        // 3. Look up the full metadata using meta_rev
+        const topicMeta = metadata[header.topic];
+        if (!topicMeta || topicMeta.meta_rev !== header.meta_rev) {
+          console.error('Metadata mismatch or not found!', header);
           return;
         }
 
-        // Handle data_packet messages (binary)
-        if (event.data instanceof ArrayBuffer) {
-          const buffer = event.data;
-          const dataView = new DataView(buffer);
+        // 4. Calculate sample data offset (4 bytes for length prefix)
+        const samplesOffset = 4 + jsonLen;
 
-          // 1. Read header length
-          const jsonHeaderLen = dataView.getUint32(0, true);
-          const jsonHeaderOffset = 4;
-
-          // 2. Decode JSON header
-          const jsonHeaderBytes = buffer.slice(jsonHeaderOffset, jsonHeaderOffset + jsonHeaderLen);
-          const jsonHeaderStr = new TextDecoder().decode(jsonHeaderBytes);
-          const header = JSON.parse(jsonHeaderStr) as DataPacketHeader;
-
-          // 3. Look up metadata and validate its revision
-          const meta = metadataRef.current.get(header.topic);
-          if (!meta || meta.meta_rev !== header.meta_rev) {
-            if (!meta) {
-              console.warn(`[EegDataContext] Received data packet for topic "${header.topic}" without metadata. Dropping packet.`);
-            } else {
-              console.warn(`Dropping packet due to stale metadata. Frontend: ${meta?.meta_rev}, Packet: ${header.meta_rev}`);
-            }
-            return; // DROP THE PACKET
-          }
-
-          // 4. Create Float32Array view on the sample data (zero-copy)
-          const samplesOffset = jsonHeaderOffset + jsonHeaderLen;
-          
-          // Calculate padding added by backend to ensure 4-byte alignment
-          const jsonPadding = (4 - (jsonHeaderLen % 4)) % 4;
-          const alignedOffset = samplesOffset + jsonPadding;
-
-          if (header.packet_type === 'Voltage' || header.packet_type === 'RawI32') {
-            let samples: Float32Array;
-
-            if (header.packet_type === 'RawI32') {
-              // Convert RawI32 to Voltage
-              const rawSamples = new Int32Array(buffer, alignedOffset);
-              samples = new Float32Array(rawSamples.length);
-              
-              const adcBits = meta.adc_bits || 24;
-              const vRef = meta.v_ref || 4.5;
-              const gain = meta.gain || 1.0;
-              const scaleFactor = (vRef / (Math.pow(2, adcBits) - 1) / gain) * 1000000;
-
-              for (let i = 0; i < rawSamples.length; i++) {
-                samples[i] = rawSamples[i] * scaleFactor;
-              }
-            } else { // 'Voltage'
-              samples = new Float32Array(buffer, alignedOffset);
-            }
-            
-            if (meta) {
-                const newChunk: SampleChunk = {
-                    meta: meta,
-                    samples: samples,
-                    timestamp: header.ts_ns,
-                };
-                handleSamplesRef.current(newChunk);
-            }
-          } else {
-            console.warn(`[EegDataContext] Received unhandled packet type: ${header.packet_type}`);
-          }
-        }
-      } catch (error) {
-        console.error("Failed to parse or handle WebSocket message:", error);
+        // 5. Process the samples based on the explicit packet_type
+        const samplesBuffer = event.data.slice(samplesOffset);
+        const samples =
+          header.packet_type === 'RawI32'
+            ? new Int32Array(samplesBuffer)
+            : new Float32Array(samplesBuffer);
+        
+        // Now you have the full context: `header` and `topicMeta` to process the `samples`
+        const newChunk: SampleChunk = {
+            meta: topicMeta,
+            samples: samples,
+            timestamp: header.ts_ns,
+        };
+        handleSamplesRef.current(newChunk);
       }
     };
 
     socket.onerror = (err) => {
-      // Only handle errors if the socket is in a connecting or open state
-      // and we're not in a cleanup phase.
-      // This prevents logging errors when the connection is intentionally closed by the cleanup function.
-      if ((socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) && 
-          !isCleanupRef.current) {
+      if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
         console.error('[EegDataContext] WebSocket error:', err);
         setWsStatus('Error');
-        // Reset the WebSocket reference since the connection failed
         ws.current = null;
-        // Reset connection guard on window when connection fails
-        // @ts-ignore - Adding custom property to window object
+        // @ts-ignore
         window[connectionGuardKey] = false;
-        // Reset shouldConnect to allow reconnection attempts
         setShouldConnect(false);
       }
     };
 
     socket.onclose = (event) => {
       console.log('[EegDataContext] WebSocket connection closed', event);
-      // Only update state if this is the active socket that was closed
-      // and we're not in a cleanup phase.
-      if (ws.current === socket && !isCleanupRef.current) {
+      if (ws.current === socket) {
         setWsStatus('Disconnected');
-        // Reset the WebSocket reference
         ws.current = null;
-        // Reset connection guard on window when connection closes
-        // @ts-ignore - Adding custom property to window object
+        // @ts-ignore
         window[connectionGuardKey] = false;
         
-        // Attempt to reconnect after a delay
         if (!reconnectTimerRef.current) {
           reconnectTimerRef.current = setTimeout(() => {
-            if (!isCleanupRef.current) {
-              console.log('[EegDataContext] Attempting to reconnect WebSocket');
-              // Reset the connection attempt guard to allow reconnection
-              // @ts-ignore - Adding custom property to window object
-              window[connectionGuardKey] = false;
-              // Set shouldConnect to true to trigger reconnection attempts
-              setShouldConnect(true);
-              // Trigger reconnection by forcing a re-render
-              setDataReceived(false);
-            }
+            console.log('[EegDataContext] Attempting to reconnect WebSocket');
+            // @ts-ignore
+            window[connectionGuardKey] = false;
+            setShouldConnect(true);
+            setDataReceived(false);
             reconnectTimerRef.current = null;
           }, 1000);
         }
       }
     };
-    // The cleanup function is critical for preventing memory leaks and race conditions.
     return () => {
       console.log('[EegDataContext] Cleanup: Closing WebSocket');
-      // Mark this as intentional cleanup to prevent error handling
-      isCleanupRef.current = true;
-      // Remove event listeners to prevent them from being called on a stale socket instance.
       if (ws.current) {
         ws.current.onopen = null;
         ws.current.onmessage = null;
         ws.current.onerror = null;
         ws.current.onclose = null;
         ws.current.close();
+        ws.current = null;
       }
-      // Reset the connection guard on window to allow for new connection attempts.
-      // @ts-ignore - Adding custom property to window object
+      // @ts-ignore
       window[connectionGuardKey] = false;
-      ws.current = null;
-      // Reset the cleanup flag
-      isCleanupRef.current = false;
     };
   }, [shouldConnect, sourceReadyMeta]); // Add sourceReadyMeta as a dependency
 

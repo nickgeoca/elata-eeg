@@ -198,11 +198,18 @@ impl EegSource {
                         let mut packet_samples = Vec::with_capacity(samples.len());
                         packet_samples.extend_from_slice(&samples);
 
-                        let num_samples_in_batch = samples.len() / num_channels;
+                        // This is the total number of i32 values. The number of samples *per channel*
+                        // is this value divided by the number of channels.
+                        let num_samples_in_batch = if num_channels > 0 {
+                            samples.len() / num_channels
+                        } else {
+                            0
+                        };
 
                         let packet = Arc::new(RtPacket::RawI32(PacketData {
                             header: PacketHeader {
                                 source_id: output_name.clone(),
+                                packet_type: "RawI32".to_string(),
                                 frame_id: {
                                     let prev = frame_id_counter;
                                     frame_id_counter += 1;

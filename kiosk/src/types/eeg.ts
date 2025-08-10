@@ -19,16 +19,23 @@ export interface EegSample {
 }
 
 export interface SensorMeta {
+  // Stable identity
   sensor_id: number;
   meta_rev: number;
+
+  schema_ver: number;
   source_type: string;
   v_ref: number;
   adc_bits: number;
   gain: number;
   sample_rate: number;
+
+  // v2 additions
   offset_code: number;
   is_twos_complement: boolean;
   channel_names: string[];
+  batch_size: number;
+  data_type: 'f32' | 'i32';
 }
 
 export interface MetaUpdateMsg {
@@ -38,17 +45,16 @@ export interface MetaUpdateMsg {
 }
 
 export interface DataPacketHeader {
-  message_type: 'data_packet';
   topic: string;
+  packet_type: string;
   ts_ns: number;
   batch_size: number;
   num_channels: number;
-  packet_type: 'Voltage' | 'RawI32';
   meta_rev: number;
 }
 
 export interface SampleChunk {
   meta: SensorMeta;
-  samples: Float32Array; // Now a direct Float32Array for performance
+  samples: Float32Array | Int32Array; // Can be either f32 or i32
   timestamp: number; // The timestamp of the first sample in the chunk
 }

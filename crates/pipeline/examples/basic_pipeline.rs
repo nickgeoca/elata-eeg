@@ -67,6 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input_packet = Arc::new(RtPacket::RawI32(PacketData {
         header: PacketHeader {
             source_id: "test_source".to_string(),
+            packet_type: "RawI32".to_string(),
             frame_id: 0,
             ts_ns: 0,
             batch_size: 4,
