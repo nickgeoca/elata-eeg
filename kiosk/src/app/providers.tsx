@@ -1,7 +1,6 @@
 'use client';
 
 import React, { useEffect, ReactNode } from 'react';
-import { CommandProvider } from "@/context/CommandWebSocketContext";
 import { EventStreamProvider } from "@/context/EventStreamContext";
 import { PipelineProvider, usePipeline } from "@/context/PipelineContext";
 import { EegDataProvider } from "@/context/EegDataContext";
@@ -25,19 +24,17 @@ const PipelineInitializer = ({ children }: { children: ReactNode }) => {
 // All providers composed into a single, stable component.
 const ComposedProviders = ({ children }: { children: ReactNode }) => {
   return (
-    <CommandProvider>
-      <EventStreamProvider>
-        <PipelineProvider>
-          <EegDataProvider>
-            <EegConfigProvider>
-              <PipelineInitializer>
-                {children}
-              </PipelineInitializer>
-            </EegConfigProvider>
-          </EegDataProvider>
-        </PipelineProvider>
-      </EventStreamProvider>
-    </CommandProvider>
+    <EventStreamProvider>
+      <PipelineProvider>
+        <EegDataProvider>
+          <EegConfigProvider>
+            <PipelineInitializer>
+              {children}
+            </PipelineInitializer>
+          </EegConfigProvider>
+        </EegDataProvider>
+      </PipelineProvider>
+    </EventStreamProvider>
   );
 };
 

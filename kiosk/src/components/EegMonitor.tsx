@@ -3,9 +3,8 @@ import React from 'react'; // Added to resolve React.Fragment error
 
 import { useRef, useState, useEffect, useContext } from 'react';
 import EegRecordingControls from './EegRecordingControls';
-import { useCommand } from '../context/CommandWebSocketContext';
-import { sendControlCommand } from '../utils/api';
 import { useEegData, useEegStatus } from '../context/EegDataContext';
+import { usePipeline } from '@/context/PipelineContext';
 import { useEventStream, useEventStreamData } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
 
@@ -18,7 +17,7 @@ export default function EegMonitorWebGL() {
   
   // configWebSocket state is no longer needed as we use SSE for configuration updates
   const [configUpdateStatus, setConfigUpdateStatus] = useState<string | null>(null); // Kept for user feedback
-  const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(0.25); // Added for UI Voltage Scaling
+  const [uiVoltageScaleFactor, setUiVoltageScaleFactor] = useState<number>(1.0); // Added for UI Voltage Scaling
   const settingsScrollRef = useRef<HTMLDivElement>(null); // Ref for settings scroll container
   const [canScrollSettings, setCanScrollSettings] = useState(false); // True if settings panel has enough content to scroll
   const [isAtSettingsBottom, setIsAtSettingsBottom] = useState(false); // True if scrolled to the bottom of settings
@@ -31,6 +30,21 @@ export default function EegMonitorWebGL() {
   const { dataStatus } = useEegStatus();
   const { dataReceived, driverError, wsStatus } = dataStatus;
   const { fatalError } = useEventStreamData();
+  const { subscribe } = useEventStream();
+  const [isRecording, setIsRecording] = useState(false);
+
+  useEffect(() => {
+    const handleRecordingState = (data: any) => {
+      if (data.event === 'started') {
+        setIsRecording(true);
+      } else if (data.event === 'stopped') {
+        setIsRecording(false);
+      }
+    };
+
+    const unsubscribe = subscribe('recording_state', handleRecordingState);
+    return () => unsubscribe();
+  }, [subscribe]);
 
   // State for UI selections, initialized from config when available
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
@@ -51,15 +65,21 @@ export default function EegMonitorWebGL() {
     }
   }, [config]);
 
-  const { sendPowerlineFilterCommand, startRecording, stopRecording, recordingStatus, recordingFilePath } = useCommand();
-
+  const { sendCommand, sendPowerlineFilterCommand, startPipeline, stopPipeline, pipelineState } = usePipeline();
   const handleUpdateConfig = async () => {
-    if (recordingStatus.startsWith('Currently recording')) {
+    if (isRecording) {
       setConfigUpdateStatus('Cannot change configuration during recording.');
       return;
     }
 
-    const driverParams: any = {};
+    // Start with a complete driver configuration based on the current config
+    // This ensures all required fields are present for deserialization
+    const driverParams: any = {
+      sample_rate: config?.sample_rate || 250,
+      vref: config?.v_ref || 4.5,
+      gain: config?.gain || 1.0,
+    };
+    
     let changesMade = false;
 
     if (selectedChannelCount !== undefined) {
@@ -69,7 +89,12 @@ export default function EegMonitorWebGL() {
         const newChannelsArray = Array.from({ length: numChannels }, (_, i) => i);
         if (JSON.stringify(currentChannels) !== JSON.stringify(newChannelsArray)) {
           // The backend expects a structure like { chips: [{ channels: [0, 1, ...] }] }
-          driverParams.chips = [{ channels: newChannelsArray }];
+          // Include default values for spi_bus and cs_pin to ensure complete structure
+          driverParams.chips = [{
+            channels: newChannelsArray,
+            spi_bus: 0,
+            cs_pin: 0
+          }];
           changesMade = true;
         }
       } else {
@@ -128,16 +153,14 @@ export default function EegMonitorWebGL() {
     // Update the last config ref
     lastConfigRef.current = newConfig;
 
-    const command = {
-      SetParameter: {
-        target_stage: 'eeg_source',
-        parameters: newConfig,
-      },
+    const params = {
+      target_stage: 'eeg_source',
+      parameters: newConfig,
     };
 
     setConfigUpdateStatus('Sending configuration update...');
     try {
-      await sendControlCommand(command);
+      await sendCommand('SetParameter', params);
       setConfigUpdateStatus('Configuration update sent successfully.');
     } catch (error) {
       console.error('Failed to send configuration update:', error);
@@ -274,19 +297,6 @@ export default function EegMonitorWebGL() {
         </div>
       </div>
       
-      {recordingStatus.startsWith('Currently recording') && (
-        <div className="bg-red-900 text-white px-2 py-1 text-sm flex justify-between">
-          <div className="flex items-center">
-            <span className="inline-block w-2 h-2 rounded-full bg-red-500 animate-pulse mr-2"></span>
-            {recordingStatus}
-          </div>
-          {recordingFilePath && (
-            <div className="text-gray-300 truncate">
-              File: {recordingFilePath}
-            </div>
-          )}
-        </div>
-      )}
 
       {fatalError && (
         <div className="bg-red-800 text-white p-4 text-lg flex items-center justify-center">

@@ -2,7 +2,7 @@ use sensors::raw::mock_eeg::MockDriver;
 use sensors::AdcDriver;
 use pipeline::bridge::BridgeMsg;
 use pipeline::config::{StageConfig, SystemConfig};
-use pipeline::control::{PipelineEvent};
+use pipeline::control::{ControlCommand, PipelineEvent};
 use pipeline::error::StageError;
 use pipeline::graph::PipelineGraph;
 use pipeline::registry::{StageFactory, StageRegistry};
@@ -39,7 +39,7 @@ impl StageFactory for StatefulTestStageFactory {
 /// Sets up a complete, running daemon instance for testing.
 async fn setup_test_daemon() -> (
     Receiver<PipelineEvent>,
-    Sender<Arc<RtPacket>>,
+    Sender<pipeline::control::ControlCommand>,
     Arc<AtomicBool>,
     String, // WebSocket address
     thread::JoinHandle<()>,
@@ -61,7 +61,7 @@ async fn setup_test_daemon() -> (
     };
 
     // --- Pipeline Thread ---
-    let (executor, input_tx, _fatal_error_rx, _control_tx) = {
+    let (executor, _input_tx, _fatal_error_rx, control_tx) = {
         let mut registry = StageRegistry::new();
         registry.register(
             "stateful_test_stage",
@@ -112,7 +112,8 @@ async fn setup_test_daemon() -> (
     // --- Main Event Loop (simplified for this test) ---
     let main_loop_handle = {
         let stop_flag_clone = stop_flag.clone();
-        let input_tx_clone = input_tx.clone();
+        // The main loop is simplified and doesn't need to send data for this test.
+        // let input_tx_clone = input_tx.clone();
         let allocator = Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024));
         tokio::spawn(async move {
             loop {
@@ -126,21 +127,8 @@ async fn setup_test_daemon() -> (
                 };
 
                 match msg_result {
-                    Ok(BridgeMsg::Data(packet_data)) => {
-                        if let pipeline::data::PacketOwned::RawI32(data) = packet_data {
-                            let mut samples = RecycledI32Vec::new(allocator.clone());
-                            samples.extend(data.samples.iter().map(|s| *s as i32));
-                            let packet = RtPacket::RawI32(pipeline::data::PacketData {
-                                header: pipeline::data::PacketHeader {
-                                    frame_id: 0,
-                                    ..data.header
-                                },
-                                samples: samples.to_vec(),
-                            });
-                            if input_tx_clone.send(Arc::new(packet)).is_err() {
-                                break; // Pipeline receiver dropped.
-                            }
-                        }
+                    Ok(BridgeMsg::Data(_packet_data)) => {
+                        // Data sending is not needed for this test.
                     }
                     Ok(BridgeMsg::Error(_)) => { /* Ignore sensor errors */ }
                     Err(TryRecvError::Empty) => {
@@ -155,27 +143,27 @@ async fn setup_test_daemon() -> (
         })
     };
 
-    (event_rx, input_tx, stop_flag, addr, pipeline_handle)
+    (event_rx, control_tx, stop_flag, addr, pipeline_handle)
 }
 
 #[tokio::test]
 async fn test_full_stack_command_and_shutdown() {
     // The server part is commented out as it requires more info to fix.
     // This test will focus on the pipeline and control logic.
-    let (_event_rx, _runtime_tx, stop_flag, _addr, pipeline_handle) = setup_test_daemon().await;
+    let (event_rx, control_tx, stop_flag, _addr, pipeline_handle) = setup_test_daemon().await;
 
     // 2. Send command to change state
-    // let cmd = ControlCommand::SetTestState(42);
-    // runtime_tx.send(RuntimeMsg::Ctrl(cmd)).unwrap();
+    let cmd = ControlCommand::SetTestState(42);
+    control_tx.send(cmd).unwrap();
 
     // 3. Verify the pipeline emits the correct event
-    // let event = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-    // assert_eq!(event, PipelineEvent::TestStateChanged(42));
+    let event = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(event, PipelineEvent::TestStateChanged(42));
 
     // 4. Initiate graceful shutdown
-    // runtime_tx
-    //     .send(RuntimeMsg::Ctrl(ControlCommand::Shutdown))
-    //     .unwrap();
+    control_tx
+        .send(ControlCommand::Shutdown)
+        .unwrap();
 
     // 5. Signal all threads to stop
     stop_flag.store(true, Ordering::Relaxed);

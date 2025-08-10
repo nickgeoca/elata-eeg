@@ -323,7 +323,7 @@ pub fn create_router() -> Router<AppState> {
         .route("/api/pipelines/:id/start", post(start_pipeline_handler))
         .route("/api/pipelines/stop", post(stop_pipeline_handler))
         .route("/api/pipelines/:id", post(update_pipeline_handler))
-        .route("/api/control", post(control_handler))
+        .route("/api/pipelines/:id/control", post(control_handler)) // Added control route
         .route("/api/state", get(state_handler))
         .route("/api/events", get(sse_handler))
 }

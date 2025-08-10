@@ -78,24 +78,6 @@ export const stopPipeline = async () => {
  * @param command The command payload to send.
  * @returns A promise that resolves when the request is successful.
  */
-export const sendControlCommand = async (command: any) => {
-  try {
-    const response = await fetch('/api/control', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(command),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    return response;
-  } catch (error) {
-    console.error("Failed to send control command:", error);
-    throw error;
-  }
-};
 
 /**
  * Sends a command to a specific pipeline.
@@ -111,7 +93,7 @@ export const sendCommand = async (pipelineId: string, command: string, params: a
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ command, params }),
+      body: JSON.stringify({ [command]: params }),
     });
     if (!response.ok) {
       throw new Error(`HTTP error! status: ${response.status}`);

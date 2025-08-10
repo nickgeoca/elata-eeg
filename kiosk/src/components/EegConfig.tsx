@@ -202,29 +202,37 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const updateConfig = useCallback((newConfig: Partial<EegConfig>) => {
-    if (!configRef.current) {
-      console.warn("Cannot update config before it's initialized.");
-      return;
-    }
-
-    const updatedConfig = { ...configRef.current, ...newConfig };
-
-    const command = {
-      "eeg_source": {
-        "driver": {
-          "chips": [
-            {
-              "channels": updatedConfig.channels
-            }
-          ],
-          "sample_rate": updatedConfig.sample_rate
-        }
+      if (!configRef.current) {
+        console.warn("Cannot update config before it's initialized.");
+        return;
       }
-    };
-
-    console.log("Sending SetParameter command with full config:", command);
-    sendCommand('SetParameter', command);
-  }, [sendCommand]);
+  
+      // Explicitly build the command to ensure all fields are present.
+      const sampleRate = configRef.current.sample_rate || 250; // Use current or default
+      const channels = newConfig.channels || configRef.current.channels || [];
+      const vref = configRef.current.vref || 4.5; // Use current or default
+      const gain = configRef.current.gain || 1.0; // Use current or default
+  
+      const command = {
+        "eeg_source": {
+          "driver": {
+            "sample_rate": sampleRate,
+            "vref": vref,
+            "gain": gain,
+            "chips": [
+              {
+                "channels": channels,
+                "spi_bus": 0, // Default value
+                "cs_pin": 0   // Default value
+              }
+            ]
+          }
+        }
+      };
+  
+      console.log("Sending SetParameter command with payload:", JSON.stringify(command, null, 2));
+      sendCommand('SetParameter', command);
+    }, [sendCommand]);
 
   const contextValue = useMemo(() => ({
     config,

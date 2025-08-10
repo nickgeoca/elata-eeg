@@ -1,7 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, ReactNode, useEffect, useCallback, useMemo, useRef } from 'react';
-import { getPipelines, startPipeline as apiStartPipeline, getPipelineState, sendCommand as apiSendCommand } from '../utils/api';
+import { getPipelines, startPipeline as apiStartPipeline, stopPipeline as apiStopPipeline, getPipelineState, sendCommand as apiSendCommand } from '../utils/api';
 import { SystemConfig } from '@/types/eeg';
 import { useEventStream } from './EventStreamContext';
 
@@ -21,7 +21,14 @@ interface PipelineContextType {
   pipelineConfig: SystemConfig | null;
   pipelineStatus: 'initializing' | 'stopped' | 'starting' | 'started' | 'error';
   selectAndStartPipeline: (id: string) => Promise<void>;
+  startPipeline: (id: string) => Promise<void>;
+  stopPipeline: () => Promise<void>;
   sendCommand: (command: string, params: any) => Promise<void>;
+  sendPowerlineFilterCommand: (value: number | null) => Promise<void>;
+  pipelineState: {
+    status: string;
+    config: any;
+  };
 }
 
 const PipelineContext = createContext<PipelineContextType | undefined>(undefined);
@@ -74,6 +81,44 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     }
   }, [selectedPipeline]);
 
+  const startPipeline = useCallback(async (id: string) => {
+    try {
+      await apiStartPipeline(id);
+    } catch (error) {
+      console.error(`Failed to start pipeline ${id}:`, error);
+    }
+  }, []);
+
+  const stopPipeline = useCallback(async () => {
+    if (!selectedPipeline) {
+      console.error("No pipeline selected, cannot stop pipeline.");
+      return;
+    }
+    try {
+      await apiStopPipeline();
+    } catch (error) {
+      console.error(`Failed to stop pipeline:`, error);
+    }
+  }, [selectedPipeline]);
+
+  const sendPowerlineFilterCommand = useCallback(async (value: number | null) => {
+    if (!selectedPipeline) {
+      console.error("No pipeline selected, cannot send command.");
+      return;
+    }
+    const params = {
+      target_stage: 'notch_filter_stage',
+      parameter_id: 'frequency',
+      value: value,
+    };
+    try {
+      await apiSendCommand(selectedPipeline.id, 'SetParameter', params);
+      console.log(`Command SetParameter sent to pipeline ${selectedPipeline.id} with params:`, params);
+    } catch (error) {
+      console.error(`Failed to send command SetParameter to pipeline ${selectedPipeline.id}:`, error);
+    }
+  }, [selectedPipeline]);
+
   useEffect(() => {
     if (initializationStarted.current) return;
     initializationStarted.current = true;
@@ -104,8 +149,9 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
         if (currentState && currentState.stages.length > 0) {
           console.log('[PipelineProvider] A pipeline is already running. Syncing state.');
           setPipelineState({ status: 'started', config: currentState });
-          const runningPipeline = availablePipelines.find((p: Pipeline) => p.id === currentState.id) || null;
-          setSelectedPipeline(runningPipeline);
+          // When a pipeline is already running, select the 'default' pipeline
+          const defaultPipeline = availablePipelines.find((p: Pipeline) => p.id === 'default');
+          setSelectedPipeline(defaultPipeline || availablePipelines[0] || null);
         } else {
           console.log('[PipelineProvider] No pipeline running. Starting default pipeline.');
           const defaultPipeline = availablePipelines.find((p: Pipeline) => p.id === 'default');
@@ -172,8 +218,12 @@ export const PipelineProvider = ({ children }: PipelineProviderProps) => {
     pipelineConfig: pipelineState.config,
     pipelineStatus: pipelineState.status,
     selectAndStartPipeline,
+    startPipeline,
+    stopPipeline,
     sendCommand,
-  }), [pipelines, selectedPipeline, pipelineState.config, pipelineState.status, selectAndStartPipeline, sendCommand]);
+    sendPowerlineFilterCommand,
+    pipelineState,
+  }), [pipelines, selectedPipeline, pipelineState, selectAndStartPipeline, startPipeline, stopPipeline, sendCommand, sendPowerlineFilterCommand]);
 
   return (
     <PipelineContext.Provider value={value}>
