@@ -146,5 +146,6 @@ pub struct PacketData<T> {
 pub enum PacketOwned {
     RawI32(PacketData<Vec<i32>>),
     Voltage(PacketData<Vec<f32>>),
+    VoltageF32(PacketData<Vec<f32>>),
     RawAndVoltage(PacketData<Vec<(i32, f32)>>),
 }

@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 pub mod pipeline {
@@ -7,9 +8,9 @@ pub mod pipeline {
     #[derive(Debug, Clone, Serialize)]
     pub enum BrokerPayload {
         /// A JSON string containing a `MetaUpdateMsg`.
-        Meta(String),
+        Meta { json: String, meta_rev: u32 },
         /// A binary blob containing a `data_packet` (header + samples).
-        Data(Vec<u8>),
+        Data(Bytes),
     }
 
     /// Message sent from a pipeline stage to the daemon's broker.

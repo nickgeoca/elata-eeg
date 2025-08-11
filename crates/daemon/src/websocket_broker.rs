@@ -26,7 +26,7 @@ type SubMap = HashMap<String, TopicRx>;
 struct TopicState {
 	sender: broadcast::Sender<Arc<BrokerMessage>>,
 	last_meta: Option<Arc<BrokerMessage>>,
-	meta_rev: u64,
+	meta_rev: u32,
 }
 
 pub struct WebSocketBroker {
@@ -45,18 +45,27 @@ impl WebSocketBroker {
     }
 
     /// A long-running task that listens for incoming messages and broadcasts them to clients.
-    pub fn start(self: Arc<Self>) {
+    pub fn start(self: Arc<Self>, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) {
         tokio::spawn(async move {
             loop {
-                let msg = match self.pipeline_rx.lock().await.recv().await {
-                    Ok(msg) => msg,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        info!("[Broker] Main pipeline channel closed. Shutting down message broadcast task.");
+                let msg = tokio::select! {
+                    biased;
+                    _ = &mut shutdown_rx => {
+                        info!("[Broker] Shutdown signal received. Terminating broker loop.");
                         break;
-                    }
-                    Err(e) => {
-                        warn!("[Broker] Error receiving message from pipeline: {}. Ignoring.", e);
-                        continue;
+                    },
+                    res = async { self.pipeline_rx.lock().await.recv().await } => {
+                        match res {
+                            Ok(msg) => msg,
+                            Err(broadcast::error::RecvError::Closed) => {
+                                info!("[Broker] Main pipeline channel closed. Shutting down message broadcast task.");
+                                break;
+                            },
+                            Err(e) => {
+                                warn!("[Broker] Error receiving message from pipeline: {}. Ignoring.", e);
+                                continue;
+                            }
+                        }
                     }
                 };
 
@@ -65,9 +74,9 @@ impl WebSocketBroker {
                         if let Some(topic_state_entry) = self.topics.get(topic) {
                             let mut topic_state = topic_state_entry.lock().await;
                             match payload {
-                                BrokerPayload::Meta(_) => {
+                                BrokerPayload::Meta { meta_rev, .. } => {
                                     topic_state.last_meta = Some(msg.clone());
-                                    topic_state.meta_rev += 1;
+                                    topic_state.meta_rev = *meta_rev;
                                 }
                                 BrokerPayload::Data(_) => {
                                     // Forward data directly without caching
@@ -142,13 +151,13 @@ impl WebSocketBroker {
                                             Arc::new(Mutex::new(TopicState { sender, last_meta: None, meta_rev: 0 }))
                                            });
                                  
-                                           let mut topic_state = topic_state_entry.lock().await;
+                                           let topic_state = topic_state_entry.lock().await;
                                            let sub_rx = topic_state.sender.subscribe();
                                  
                                            // 1. Send ACK
                                                                          let ack = ServerMessage::Subscribed(SubscribedAck {
                                                                              topic: topic.clone(),
-                                                                             meta_rev: if topic_state.last_meta.is_some() { Some(topic_state.meta_rev) } else { None },
+                                                                             meta_rev: if topic_state.last_meta.is_some() { Some(topic_state.meta_rev as u64) } else { None },
                                                                          });
                                            let ack_msg = Message::Text(serde_json::to_string(&ack).unwrap());
                                            if ws_tx.send(ack_msg).await.is_err() {
@@ -160,7 +169,7 @@ impl WebSocketBroker {
                                            if let Some(meta_msg) = &topic_state.last_meta {
                                             if let BrokerMessage::Data { payload, .. } = &**meta_msg {
                                                 let frame = match payload {
-                                                    BrokerPayload::Meta(json) => Message::Text(json.clone()),
+                                                    BrokerPayload::Meta{ json, .. } => Message::Text(json.clone()),
                                                     _ => continue, // Should not happen
                                                 };
                                                 if ws_tx.send(frame).await.is_err() {
@@ -213,8 +222,8 @@ impl WebSocketBroker {
                         Ok(msg) => {
                             let frame = if let BrokerMessage::Data { payload, .. } = &*msg {
                                 match payload {
-                                    BrokerPayload::Meta(json) => Message::Text(json.clone()),
-                                    BrokerPayload::Data(data) => Message::Binary(data.clone()),
+                                    BrokerPayload::Meta{ json, .. } => Message::Text(json.clone()),
+                                    BrokerPayload::Data(data) => Message::Binary(data.to_vec()),
                                 }
                             } else {
                                 // Ignore non-data messages
@@ -224,19 +233,23 @@ impl WebSocketBroker {
                                 info!("[Client {}] Failed to forward message, client disconnected.", client_id);
                                 break;
                             }
-                            // Re-arm the future with the same receiver
-                            topic_futs.push(async move {
-                                let res = sub_rx.recv().await;
-                                (topic, res, sub_rx)
-                            }.boxed());
+                            // Re-arm the future only if the client is still subscribed.
+                            if subs.contains_key(&topic) {
+                                topic_futs.push(async move {
+                                    let res = sub_rx.recv().await;
+                                    (topic, res, sub_rx)
+                                }.boxed());
+                            }
                         },
                         Err(broadcast::error::RecvError::Lagged(n)) => {
                              warn!("[Client {}] Channel for topic '{}' lagged by {} messages.", client_id, &topic, n);
-                             // Re-arm the future
-                             topic_futs.push(async move {
-                                let res = sub_rx.recv().await;
-                                (topic, res, sub_rx)
-                            }.boxed());
+                             // Re-arm the future only if the client is still subscribed.
+                             if subs.contains_key(&topic) {
+                                 topic_futs.push(async move {
+                                    let res = sub_rx.recv().await;
+                                    (topic, res, sub_rx)
+                                }.boxed());
+                             }
                         }
                         Err(broadcast::error::RecvError::Closed) => {
                             debug!("[Client {}] Channel for topic '{}' closed. Subscription removed.", client_id, topic);

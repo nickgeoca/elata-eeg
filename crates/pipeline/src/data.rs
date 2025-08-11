@@ -9,6 +9,7 @@ pub use eeg_types::data::{PacketData, PacketHeader, PacketOwned};
 pub enum RtPacket {
     RawI32(PacketData<Vec<i32>>),
     Voltage(PacketData<RecycledF32Vec>),
+    VoltageF32(PacketData<Vec<f32>>),
     RawAndVoltage(PacketData<RecycledI32F32TupleVec>),
 }
 
@@ -23,6 +24,10 @@ impl RtPacket {
             RtPacket::Voltage(data) => RtPacket::Voltage(PacketData {
                 header: data.header.clone(),
                 samples: (data.samples.to_vec(), data.samples.allocator().clone()).into(),
+            }),
+            RtPacket::VoltageF32(data) => RtPacket::VoltageF32(PacketData {
+                header: data.header.clone(),
+                samples: data.samples.clone(),
             }),
             RtPacket::RawAndVoltage(data) => RtPacket::RawAndVoltage(PacketData {
                 header: data.header.clone(),
@@ -51,6 +56,10 @@ impl From<RtPacket> for PacketOwned {
                 header: data.header,
                 samples: data.samples.to_vec(),
             }),
+            RtPacket::VoltageF32(data) => PacketOwned::VoltageF32(PacketData {
+                header: data.header,
+                samples: data.samples,
+            }),
             RtPacket::RawAndVoltage(data) => PacketOwned::RawAndVoltage(PacketData {
                 header: data.header,
                 samples: data.samples.to_vec(),
@@ -69,6 +78,10 @@ impl From<PacketOwned> for RtPacket {
             PacketOwned::Voltage(data) => RtPacket::Voltage(PacketData {
                 header: data.header,
                 samples: (data.samples, Default::default()).into(),
+            }),
+            PacketOwned::VoltageF32(data) => RtPacket::VoltageF32(PacketData {
+                header: data.header,
+                samples: data.samples,
             }),
             PacketOwned::RawAndVoltage(data) => RtPacket::RawAndVoltage(PacketData {
                 header: data.header,
@@ -91,6 +104,10 @@ pub enum PacketView<'a> {
         header: &'a PacketHeader,
         data: &'a [f32],
     },
+    VoltageF32 {
+        header: &'a PacketHeader,
+        data: &'a [f32],
+    },
     RawAndVoltage {
         header: &'a PacketHeader,
         data: &'a [(i32, f32)],
@@ -105,6 +122,10 @@ impl<'a> From<&'a RtPacket> for PacketView<'a> {
                 data: &d.samples,
             },
             RtPacket::Voltage(d) => PacketView::Voltage {
+                header: &d.header,
+                data: &d.samples,
+            },
+            RtPacket::VoltageF32(d) => PacketView::VoltageF32 {
                 header: &d.header,
                 data: &d.samples,
             },

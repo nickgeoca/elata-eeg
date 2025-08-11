@@ -3,6 +3,8 @@ use std::{
     fs,
     sync::Arc,
 };
+use backtrace::Backtrace;
+use tokio::sync::Mutex;
 
 use adc_daemon::plugin_supervisor::PluginSupervisor;
 use adc_daemon::api::{AppState, PipelineHandle};
@@ -11,7 +13,7 @@ use eeg_types::comms::pipeline::BrokerMessage;
 use clap::{Arg, Command};
 use pipeline::config::SystemConfig;
 use pipeline::control::PipelineEvent;
-use pipeline::executor::{ControlBus, Executor};
+use pipeline::executor::Executor;
 use sensors::{
     mock_eeg::driver::MockDriver,
     types::{AdcConfig, AdcDriver, DriverError},
@@ -125,7 +127,13 @@ async fn main() -> Result<(), DriverError> {
         id: "default".to_string(),
         executor: Some(executor),
         control_bus,
-        input_tx: producer_txs.remove("eeg_source"),
+        input_tx: {
+            let tx = producer_txs.remove("eeg_source");
+            if tx.is_none() {
+                tracing::error!("Could not find 'eeg_source' producer in the pipeline configuration. The default pipeline will not be able to receive input.");
+            }
+            tx
+        },
     })));
 
     // Spawn a task to listen for fatal errors from the default pipeline
@@ -138,13 +146,14 @@ async fn main() -> Result<(), DriverError> {
                 fatal_error.stage_id
             );
 
+            let backtrace = Backtrace::new();
             let error_msg =
                 if let Some(s) = fatal_error.error.downcast_ref::<&'static str>() {
-                    s.to_string()
+                    format!("Panic: '{}'\n{:?}", s, backtrace)
                 } else if let Some(s) = fatal_error.error.downcast_ref::<String>() {
-                    s.clone()
+                    format!("Panic: '{}'\n{:?}", s, backtrace)
                 } else {
-                    "Unknown panic payload".to_string()
+                    format!("Unknown panic payload\n{:?}", backtrace)
                 };
 
             if let Some(mut handle) = pipeline_handle_clone.lock().await.take() {
@@ -192,8 +201,9 @@ async fn main() -> Result<(), DriverError> {
     });
 
     // --- WebSocket Broker ---
+    let (broker_shutdown_tx, broker_shutdown_rx) = tokio::sync::oneshot::channel();
     let broker = Arc::new(WebSocketBroker::new(ws_rx));
-    broker.clone().start();
+    broker.clone().start(broker_shutdown_rx);
 
     // --- App State ---
     let app_state = AppState {
@@ -202,6 +212,7 @@ async fn main() -> Result<(), DriverError> {
         pipeline_handle,
         source_meta_cache,
         broker,
+        broker_shutdown_tx: Arc::new(Mutex::new(Some(broker_shutdown_tx))),
         websocket_sender: ws_tx,
         driver: driver.clone(),
         event_tx: event_tx.clone(),
@@ -217,6 +228,13 @@ async fn main() -> Result<(), DriverError> {
     tokio::signal::ctrl_c().await.map_err(|e| DriverError::IoError(e.to_string()))?;
     tracing::info!("Shutdown signal received. Stopping services...");
 
+    // 1. Signal the WebSocket broker to shut down gracefully.
+    if let Some(broker_shutdown) = app_state.broker_shutdown_tx.lock().await.take() {
+        tracing::debug!("Sending shutdown signal to WebSocket broker.");
+        let _ = broker_shutdown.send(());
+    }
+
+    // 2. Stop the pipeline executor.
     if let Some(mut handle) = app_state.pipeline_handle.lock().await.take() {
         if let Some(executor) = handle.executor.take() {
             executor.stop();

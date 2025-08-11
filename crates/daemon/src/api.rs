@@ -34,6 +34,7 @@ pub struct AppState {
     pub pipeline_handle: Arc<Mutex<Option<PipelineHandle>>>,
     pub source_meta_cache: Arc<Mutex<Option<SensorMeta>>>,
     pub broker: Arc<WebSocketBroker>,
+    pub broker_shutdown_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     pub websocket_sender: broadcast::Sender<Arc<BrokerMessage>>,
     pub driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver + Send>>>>,
 }

@@ -6,7 +6,7 @@ use tokio::sync::broadcast;
 
 use crate::{
     data::RtPacket,
-    daemon_protocol::{DataPacketHeader, MetaUpdateMsg},
+    daemon_protocol::MetaUpdateMsg,
     error::StageError,
     registry::StageFactory,
     stage::{Stage, StageContext, StageInitCtx},
@@ -43,6 +43,11 @@ impl Stage for WebsocketSink {
                 bytemuck::cast_slice(&data.samples),
                 "Voltage",
             ),
+            RtPacket::VoltageF32(data) => (
+                &data.header,
+                bytemuck::cast_slice(&data.samples),
+                "VoltageF32",
+            ),
             other => {
                 // Panic if we receive any packet type other than Voltage.
                 panic!(
@@ -69,16 +74,12 @@ impl Stage for WebsocketSink {
             let json_payload = serde_json::to_string(&meta_msg)?;
             let data_broker_msg = Arc::new(BrokerMessage::Data {
                 topic: self.topic.clone(),
-                payload: BrokerPayload::Meta(json_payload),
+                payload: BrokerPayload::Meta {
+                    json: json_payload,
+                    meta_rev: header.meta.meta_rev,
+                },
             });
             let _ = self.sender.send(data_broker_msg);
-
-            // Also inform the broker of the new epoch for this topic
-            let register_msg = Arc::new(BrokerMessage::RegisterTopic {
-                topic: self.topic.clone(),
-                epoch: header.meta.meta_rev,
-            });
-            let _ = self.sender.send(register_msg);
 
             self.last_meta_rev = Some(header.meta.meta_rev);
         }
@@ -98,7 +99,7 @@ impl Stage for WebsocketSink {
         // 4. Send the data packet as a single binary message
         let broker_msg = Arc::new(BrokerMessage::Data {
             topic: self.topic.clone(),
-            payload: BrokerPayload::Data(binary_payload),
+            payload: BrokerPayload::Data(binary_payload.into()),
         });
         let _ = self.sender.send(broker_msg);
 

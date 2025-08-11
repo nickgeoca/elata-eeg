@@ -244,7 +244,7 @@ impl Stage for EegSource {
             0
         };
 
-        let output_name = self.outputs.get(0).cloned().unwrap_or("out".to_string());
+        let output_name = self.outputs.iter().find(|&s| s == "raw_data").cloned().unwrap_or_else(|| "out".to_string());
         let packet = Arc::new(RtPacket::RawI32(PacketData {
             header: PacketHeader {
                 source_id: format!("{}.{}", self.id, output_name),

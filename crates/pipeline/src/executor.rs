@@ -2,14 +2,12 @@
 
 use crate::control::ControlCommand;
 use crate::data::RtPacket;
-use crate::error::{FatalError, PipelineError};
+use crate::error::FatalError;
 use crate::graph::{PipelineGraph, StageId, StageMode};
 use crate::stage::{Stage, StageContext, StageState};
 use flume::{Receiver, Selector, Sender};
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -114,12 +112,16 @@ impl Executor {
 
         for stage_config in &graph.config.stages {
             let mut input_rxs = HashMap::new();
-            for input_port in &stage_config.inputs {
+            for input_port_spec in &stage_config.inputs {
                 let capacity = stage_config.channel_capacity.unwrap_or(1024);
                 let (tx, rx) = flume::bounded(capacity);
-                let port_name = input_port.splitn(2, '.').nth(1).unwrap_or("in").to_string();
-                stage_inputs.insert((stage_config.name.clone(), port_name.clone()), tx);
-                input_rxs.insert(port_name, rx);
+                let downstream_port_name = if let Some(parts) = input_port_spec.split_once("->") {
+                    parts.1.to_string()
+                } else {
+                    "in".to_string()
+                };
+                stage_inputs.insert((stage_config.name.clone(), downstream_port_name.clone()), tx);
+                input_rxs.insert(downstream_port_name, rx);
             }
             stage_rxs.insert(stage_config.name.clone(), input_rxs);
         }
@@ -439,9 +441,29 @@ impl Executor {
             }
 
 
-            // Check for inputs that are not connected. The wiring logic already warns about this,
-            // but a summary here could be useful. This is a bit more complex to check here
-            // without duplicating the wiring logic, so we'll rely on the existing warnings for now.
+            // Check for inputs that are not connected.
+            for input_port_spec in &stage_config.inputs {
+                let (_upstream_spec, downstream_port_name) =
+                    if let Some(parts) = input_port_spec.split_once("->") {
+                        (parts.0, parts.1.to_string())
+                    } else {
+                        (input_port_spec.as_str(), "in".to_string())
+                    };
+
+                let is_connected = graph.config.stages.iter().any(|upstream_config| {
+                    upstream_config.outputs.iter().any(|output_port| {
+                        let expected_input_spec = format!("{}.{}", upstream_config.name, output_port);
+                        input_port_spec.starts_with(&expected_input_spec)
+                    }) || (upstream_config.outputs.is_empty() && input_port_spec == &format!("{}.out", upstream_config.name))
+                });
+
+                if !is_connected {
+                    warn!(
+                        "Input Validation: Input '{}' on stage '{}' is not connected to any output.",
+                        downstream_port_name, stage_config.name
+                    );
+                }
+            }
         }
 
         info!("Post-wiring validation complete.");

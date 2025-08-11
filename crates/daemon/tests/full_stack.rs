@@ -129,7 +129,8 @@ impl TestHarness {
     async fn new() -> Self {
         let (pipeline_tx, pipeline_rx) = broadcast::channel(128);
         let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
-        broker.clone().start();
+        let (_, shutdown_rx) = tokio::sync::oneshot::channel();
+        broker.clone().start(shutdown_rx);
 
         let app = Router::new()
             .route("/ws", get(ws_handler))
