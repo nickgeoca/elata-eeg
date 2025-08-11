@@ -81,11 +81,24 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const { pipelineConfig, pipelineStatus } = usePipeline(); // Get the pipeline state object
   const { subscribe } = useEventStream();
   const [sourceReadyMeta, setSourceReadyMeta] = useState<any | null>(null);
+  const lastMetaRevRef = useRef<number | null>(null);
+  const sourceReadyDebounceTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  useEffect(() => {
-    const unsubscribe = subscribe('SourceReady', (data: any) => {
+  const handleSourceReady = useCallback((data: any) => {
+    if (sourceReadyDebounceTimerRef.current) {
+      clearTimeout(sourceReadyDebounceTimerRef.current);
+    }
+
+    sourceReadyDebounceTimerRef.current = setTimeout(() => {
       if (data.meta) {
-        console.log('[EegDataContext] HARD RESET: Received new SourceReady event.', data.meta);
+        // Only perform a HARD RESET if the configuration is actually new.
+        if (lastMetaRevRef.current !== null && data.meta.meta_rev <= lastMetaRevRef.current) {
+          console.log(`[EegDataContext] Ignoring stale/duplicate SourceReady event with meta_rev: ${data.meta.meta_rev}`);
+          return;
+        }
+
+        console.log(`[EegDataContext] HARD RESET: Received new SourceReady event. meta_rev: ${data.meta.meta_rev}`, data.meta);
+        lastMetaRevRef.current = data.meta.meta_rev;
 
         // 1. Clear ALL existing data buffers
         rawSamplesRef.current = [];
@@ -98,12 +111,18 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         // 3. Force a re-render to propagate changes
         setDataVersion(v => v + 1);
       }
-    });
+    }, 250); // Debounce for 250ms to handle rapid-fire events
+  }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribe('SourceReady', handleSourceReady);
     return () => {
       unsubscribe();
+      if (sourceReadyDebounceTimerRef.current) {
+        clearTimeout(sourceReadyDebounceTimerRef.current);
+      }
     };
-  }, [subscribe]);
+  }, [subscribe, handleSourceReady]);
 
   const config = useMemo(() => {
     if (sourceReadyMeta) {
@@ -391,16 +410,17 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       setWsStatus('Connected');
 
       // Dynamically subscribe to the topic from the sourceReady event
-      if (sourceReadyMeta?.source_type) {
+      if (sourceReadyMeta?.source_type && sourceReadyMeta?.meta_rev) {
         const topic = sourceReadyMeta.source_type === 'eeg_source' ? 'eeg_voltage' : 'fft';
         const subscriptionMessage = {
           type: 'subscribe',
           topic: topic,
+          epoch: sourceReadyMeta.meta_rev,
         };
         socket.send(JSON.stringify(subscriptionMessage));
-        console.log(`[EegDataContext] Subscribed to topic: ${subscriptionMessage.topic}`);
+        console.log(`[EegDataContext] Subscribed to topic: ${subscriptionMessage.topic} with epoch ${subscriptionMessage.epoch}`);
       } else {
-        console.warn('[EegDataContext] Could not subscribe to data topic: sourceReadyMeta is not available.');
+        console.warn('[EegDataContext] Could not subscribe to data topic: sourceReadyMeta or meta_rev is not available.');
       }
     };
 
@@ -432,7 +452,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         // 3. Look up the full metadata using meta_rev
         const topicMeta = metadata[header.topic];
         if (!topicMeta || topicMeta.meta_rev !== header.meta_rev) {
-          console.error('Metadata mismatch or not found!', header);
+          // Silently drop the packet if metadata is not found or mismatched.
+          // This handles race conditions during configuration changes.
           return;
         }
 
@@ -474,16 +495,20 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         ws.current = null;
         // @ts-ignore
         window[connectionGuardKey] = false;
+
+        // If the server closed the connection with a stale epoch code,
+        // do not immediately reconnect. Wait for a new SourceReady event.
+        if (event.code === 4009) {
+          console.warn('[EegDataContext] Connection closed due to stale epoch. Waiting for new configuration...');
+          setShouldConnect(false); // Prevent automatic reconnection
+          return;
+        }
         
         if (!reconnectTimerRef.current) {
           reconnectTimerRef.current = setTimeout(() => {
             console.log('[EegDataContext] Attempting to reconnect WebSocket');
-            // @ts-ignore
-            window[connectionGuardKey] = false;
-            setShouldConnect(true);
-            setDataReceived(false);
-            reconnectTimerRef.current = null;
-          }, 1000);
+            connect();
+          }, 2000); // Reconnect after 2 seconds
         }
       }
     };

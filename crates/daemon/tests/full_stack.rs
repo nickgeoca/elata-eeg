@@ -29,10 +29,30 @@ impl StageFactory for StatefulTestStageFactory {
         config: &StageConfig,
         _init_ctx: &StageInitCtx,
     ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
+        let (_tx, rx) = flume::unbounded();
         Ok((
             Box::new(StatefulTestStage::new(&config.name)),
-            None,
+            Some(rx),
         ))
+    }
+}
+
+struct TestSinkFactory;
+impl StageFactory for TestSinkFactory {
+    fn create(
+        &self,
+        _config: &StageConfig,
+        _init_ctx: &StageInitCtx,
+    ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
+        Ok((Box::new(TestSink), None))
+    }
+}
+
+struct TestSink;
+impl Stage for TestSink {
+    fn id(&self) -> &str { "test_sink" }
+    fn process(&mut self, _packet: Arc<RtPacket>, _ctx: &mut pipeline::stage::StageContext) -> Result<Option<Arc<RtPacket>>, StageError> {
+        Ok(None)
     }
 }
 
@@ -42,7 +62,7 @@ async fn setup_test_daemon() -> (
     Sender<pipeline::control::ControlCommand>,
     Arc<AtomicBool>,
     String, // WebSocket address
-    thread::JoinHandle<()>,
+    Executor,
 ) {
     let (event_tx, event_rx) = flume::unbounded::<PipelineEvent>();
     let (bridge_tx, bridge_rx) = flume::unbounded::<BridgeMsg>();
@@ -52,12 +72,20 @@ async fn setup_test_daemon() -> (
     let test_config = SystemConfig {
         version: "1.0".to_string(),
         metadata: Default::default(),
-        stages: vec![serde_json::from_value(json!({
-            "name": "test_stage_1",
-            "type": "stateful_test_stage",
-            "inputs": []
-        }))
-        .unwrap()],
+        stages: vec![
+            serde_json::from_value(json!({
+                "name": "test_stage_1",
+                "type": "stateful_test_stage",
+                "outputs": ["out"]
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "test_sink_1",
+                "type": "test_sink",
+                "inputs": ["test_stage_1.out"]
+            }))
+            .unwrap()
+        ],
     };
 
     // --- Pipeline Thread ---
@@ -66,6 +94,10 @@ async fn setup_test_daemon() -> (
         registry.register(
             "stateful_test_stage",
             Box::new(StatefulTestStageFactory),
+        );
+        registry.register(
+            "test_sink",
+            Box::new(TestSinkFactory),
         );
         let registry = Arc::new(registry);
         let graph = PipelineGraph::build(
@@ -79,7 +111,6 @@ async fn setup_test_daemon() -> (
         .unwrap();
         Executor::new(graph)
     };
-    let pipeline_handle = thread::spawn(move || executor.stop());
 
     // --- Sensor Thread ---
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -143,14 +174,14 @@ async fn setup_test_daemon() -> (
         })
     };
 
-    (event_rx, control_tx, stop_flag, addr, pipeline_handle)
+    (event_rx, control_tx, stop_flag, addr, executor)
 }
 
 #[tokio::test]
 async fn test_full_stack_command_and_shutdown() {
     // The server part is commented out as it requires more info to fix.
     // This test will focus on the pipeline and control logic.
-    let (event_rx, control_tx, stop_flag, _addr, pipeline_handle) = setup_test_daemon().await;
+    let (event_rx, control_tx, stop_flag, _addr, executor) = setup_test_daemon().await;
 
     // 2. Send command to change state
     let cmd = ControlCommand::SetTestState(42);
@@ -169,7 +200,7 @@ async fn test_full_stack_command_and_shutdown() {
     stop_flag.store(true, Ordering::Relaxed);
 
     // 6. Wait for the pipeline to shut down
-    pipeline_handle.join().unwrap();
+    executor.stop();
 
     // Test passed if it reaches here without panicking
 }
@@ -236,6 +267,9 @@ async fn test_broker_closes_connection_on_invalid_payload() {
         .await
         .unwrap();
 
+    // Give the broker a moment to register the client before checking for the ACK
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
     // 4. Wait for subscription ACK
     let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");
     assert!(matches!(ack_msg, Message::Text(_)), "Expected Text message for ACK");
@@ -295,6 +329,9 @@ async fn test_broker_closes_connection_on_malformed_json() {
         .send(Message::Text(subscribe_msg))
         .await
         .unwrap();
+
+    // Give the broker a moment to register the client before checking for the ACK
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4. Wait for subscription ACK
     let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");

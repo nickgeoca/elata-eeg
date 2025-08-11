@@ -61,6 +61,20 @@ struct EegSourceParams {
     outputs: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SourceRunState {
+    Running,
+    Quiescing,
+    Configuring,
+}
+
+struct SourceStateShared {
+    run_state: SourceRunState,
+    last_config: AdcConfig,
+    sensor_meta: Arc<SensorMeta>,
+    num_channels: usize,
+}
+
 enum InternalCommand {
     Reconfigure(AdcConfig),
 }
@@ -82,161 +96,137 @@ impl EegSource {
         allocator: crate::allocator::SharedPacketAllocator,
         event_tx: Sender<PipelineEvent>,
     ) -> Result<(Self, Receiver<Arc<RtPacket>>), StageError> {
-        let (packet_tx, packet_rx) = flume::bounded(1024); // Increased buffer size
+        let (packet_tx, packet_rx) = flume::bounded(1024);
         let (cmd_tx, mut cmd_rx) = mpsc::channel(16);
 
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_clone = stop_flag.clone();
         let driver_clone = driver.clone();
-        let output_name = format!(
-            "{}.{}",
-            id,
-            outputs.get(0).cloned().unwrap_or_else(|| "0".to_string())
-        );
-        let dropped_packets = Arc::new(AtomicUsize::new(0));
+        let output_name = format!("{}.{}", id, outputs.get(0).cloned().unwrap_or_else(|| "0".to_string()));
         let meta_rev_counter = Arc::new(AtomicUsize::new(1));
-        let frame_counter = Arc::new(AtomicUsize::new(0));
 
         let thread_id = id.clone();
         let handle = task::spawn(async move {
             let mut frame_id_counter = 0;
-            macro_rules! send_or_stop {
-                ($expr:expr, $desc:expr) => {
-                    if $expr.is_err() {
-                        log::warn!("{}: receiver gone, stopping EegSource", $desc);
-                        stop_clone.store(true, Ordering::Relaxed);
-                    }
-                };
-            }
 
-            let mut driver = driver_clone.lock().await;
-            if let Err(e) = driver.initialize() {
+            let mut driver_guard = driver_clone.lock().await;
+            if let Err(e) = driver_guard.initialize() {
                 log::error!("Failed to initialize driver: {}", e);
                 return;
             }
-            let mut last_config = driver.get_config().unwrap();
-            let mut num_channels: usize =
-                last_config.chips.iter().map(|chip| chip.channels.len()).sum();
-
-            if num_channels == 0 {
+            let initial_config = driver_guard.get_config().unwrap();
+            let initial_num_channels: usize = initial_config.chips.iter().map(|chip| chip.channels.len()).sum();
+            if initial_num_channels == 0 {
                 log::error!("No channels configured for driver");
                 return;
             }
-            log::info!("Driver configured with {} total channels", num_channels);
+            log::info!("Driver configured with {} total channels", initial_num_channels);
 
-            let mut sensor_meta = Arc::new(create_sensor_meta_from_config(&last_config, &meta_rev_counter));
-            if event_tx.send(PipelineEvent::SourceReady { meta: (*sensor_meta).clone() }).is_err() {
+            let initial_sensor_meta = Arc::new(create_sensor_meta_from_config(&initial_config, &meta_rev_counter));
+            if event_tx.send(PipelineEvent::SourceReady { meta: (*initial_sensor_meta).clone() }).is_err() {
                 log::error!("Failed to send initial source ready event, stopping.");
-                stop_clone.store(true, Ordering::Relaxed);
+                return;
             }
 
-            // Drop the initial lock before entering the loop
-            drop(driver);
+            let shared_state = Arc::new(tokio::sync::Mutex::new(SourceStateShared {
+                run_state: SourceRunState::Running,
+                last_config: initial_config,
+                sensor_meta: initial_sensor_meta,
+                num_channels: initial_num_channels,
+            }));
+
+            drop(driver_guard); // Release the lock before entering the main loop
 
             while !stop_clone.load(Ordering::Relaxed) {
-                tokio::select! {
-                    biased; // Prioritize command processing over data acquisition
+                let mut state_guard = shared_state.lock().await;
 
-                    cmd = cmd_rx.recv() => {
-                        if let Some(cmd) = cmd {
-                            match cmd {
-                                InternalCommand::Reconfigure(new_config) => {
-                                    log::info!("Reconfiguring driver with new settings: {:?}", new_config);
+                match state_guard.run_state {
+                    SourceRunState::Running => {
+                        tokio::select! {
+                            biased;
+
+                            cmd = cmd_rx.recv() => {
+                                if let Some(InternalCommand::Reconfigure(new_config)) = cmd {
+                                    log::info!("State -> Quiescing. Pausing data acquisition for reconfiguration...");
+                                    state_guard.run_state = SourceRunState::Quiescing;
+
+                                    // The acquisition loop will naturally stop. Now, we reconfigure.
+                                    log::info!("State -> Configuring. Reconfiguring driver...");
                                     let mut driver = driver_clone.lock().await;
                                     if let Err(e) = driver.reconfigure(&new_config) {
                                         log::error!("Failed to reconfigure driver: {}", e);
-                                        send_or_stop!(
-                                            event_tx.send(PipelineEvent::ErrorOccurred {
-                                                stage_id: thread_id.clone(),
-                                                error_message: format!("Reconfiguration failed: {}", e),
-                                            }),
-                                            "reconfig error"
-                                        );
                                     } else {
-                                        last_config = new_config;
                                         meta_rev_counter.fetch_add(1, Ordering::Relaxed);
-                                        sensor_meta = Arc::new(create_sensor_meta_from_config(&last_config, &meta_rev_counter));
-                                        num_channels = last_config.chips.iter().map(|chip| chip.channels.len()).sum();
-                                        send_or_stop!(
-                                            event_tx.send(PipelineEvent::SourceReady { meta: (*sensor_meta).clone() }),
-                                            "reconfig SourceReady"
-                                        );
+                                        let new_meta = Arc::new(create_sensor_meta_from_config(&new_config, &meta_rev_counter));
+                                        log::info!("Sending SourceReady event with new metadata (rev: {})", new_meta.meta_rev);
+                                        let _ = event_tx.send(PipelineEvent::SourceReady { meta: (*new_meta).clone() });
+
+                                        state_guard.last_config = new_config;
+                                        state_guard.sensor_meta = new_meta;
+                                        state_guard.num_channels = state_guard.last_config.chips.iter().map(|c| c.channels.len()).sum();
                                     }
+                                    state_guard.run_state = SourceRunState::Running;
+                                    log::info!("State -> Running. Reconfiguration complete.");
+                                } else {
+                                    stop_clone.store(true, Ordering::Relaxed);
+                                }
+                            },
+
+                            _ = async {} => {
+                                let num_channels = state_guard.num_channels;
+                                let sensor_meta = state_guard.sensor_meta.clone();
+                                drop(state_guard); // Release lock for acquisition
+
+                                let (samples, timestamp) = {
+                                    let mut driver = driver_clone.lock().await;
+                                    match driver.acquire_batched(batch_size, &stop_clone) {
+                                        Ok((s, t, _)) => (s, t),
+                                        Err(e) => {
+                                            log::error!("Driver error in acquire_batched: {}", e);
+                                            stop_clone.store(true, Ordering::Relaxed);
+                                            (Vec::new(), 0)
+                                        }
+                                    }
+                                };
+
+                                if stop_clone.load(Ordering::Relaxed) { continue; }
+                                if samples.is_empty() {
+                                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                                    continue;
+                                }
+
+                                let num_samples_in_batch = if num_channels > 0 { samples.len() / num_channels } else { 0 };
+                                let packet = Arc::new(RtPacket::RawI32(PacketData {
+                                    header: PacketHeader {
+                                        source_id: output_name.clone(),
+                                        packet_type: "RawI32".to_string(),
+                                        frame_id: { let prev = frame_id_counter; frame_id_counter += 1; prev },
+                                        ts_ns: timestamp,
+                                        batch_size: num_samples_in_batch as u32,
+                                        num_channels: num_channels as u32,
+                                        meta: sensor_meta,
+                                    },
+                                    samples,
+                                }));
+
+                                if packet_tx.try_send(packet).is_err() {
+                                    log::debug!("Downstream channel full or disconnected; dropping packet.");
                                 }
                             }
-                        } else {
-                            // Command channel closed, exit the task
-                            stop_clone.store(true, Ordering::Relaxed);
                         }
                     },
-
-                    // Default branch for data acquisition
-                    _ = async {
-                        let (samples, timestamp) = {
-                            let mut driver = driver_clone.lock().await;
-                            match driver.acquire_batched(batch_size, &stop_clone) {
-                                Ok((s, t, _)) => (s, t),
-                                Err(e) => {
-                                    log::error!("Driver error in acquire_batched: {}", e);
-                                    stop_clone.store(true, Ordering::Relaxed); // Stop on error
-                                    (Vec::new(), 0) // Return dummy data, loop will terminate
-                                }
-                            }
-                        };
-
-                        if stop_clone.load(Ordering::Relaxed) {
-                            return; // Exit async block if we were stopped during acquire
-                        }
-
-                        if samples.is_empty() {
-                            // Yield to the scheduler if no data was acquired
-                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                            return;
-                        }
-                        log::debug!("eeg_source acquired {} samples", samples.len());
-
-                        let mut packet_samples = Vec::with_capacity(samples.len());
-                        packet_samples.extend_from_slice(&samples);
-
-                        // This is the total number of i32 values. The number of samples *per channel*
-                        // is this value divided by the number of channels.
-                        let num_samples_in_batch = if num_channels > 0 {
-                            samples.len() / num_channels
-                        } else {
-                            0
-                        };
-
-                        let packet = Arc::new(RtPacket::RawI32(PacketData {
-                            header: PacketHeader {
-                                source_id: output_name.clone(),
-                                packet_type: "RawI32".to_string(),
-                                frame_id: {
-                                    let prev = frame_id_counter;
-                                    frame_id_counter += 1;
-                                    prev
-                                },
-                                ts_ns: timestamp,
-                                batch_size: num_samples_in_batch as u32,
-                                num_channels: num_channels as u32,
-                                meta: sensor_meta.clone(),
-                            },
-                            samples: packet_samples,
-                        }));
-
-                        if let Err(e) = packet_tx.try_send(packet) {
-                            // This error is expected if the channel is full (backpressure) or
-                            // disconnected (no subscribers). In either case, we just drop the
-                            // packet and log it. The stage should not stop.
-                            match e {
-                                flume::TrySendError::Full(_) => {
-                                    log::debug!("Downstream channel full; dropping packet.");
-                                }
-                                flume::TrySendError::Disconnected(_) => {
-                                    log::debug!("Downstream channel disconnected; dropping packet.");
+                    SourceRunState::Quiescing | SourceRunState::Configuring => {
+                        // In these states, we only listen for the stop signal.
+                        // The reconfiguration is handled synchronously within the Running state's select block.
+                        tokio::select! {
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+                            cmd = cmd_rx.recv() => {
+                                if cmd.is_none() {
+                                    stop_clone.store(true, Ordering::Relaxed);
                                 }
                             }
                         }
-                    } => {}
+                    }
                 }
             }
             log::info!("EegSource acquisition task finished.");

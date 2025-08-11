@@ -14,9 +14,15 @@ pub mod pipeline {
 
     /// Message sent from a pipeline stage to the daemon's broker.
     #[derive(Debug, Clone, Serialize)]
-    pub struct BrokerMessage {
-        pub topic: String,
-        pub payload: BrokerPayload,
+    pub enum BrokerMessage {
+        Data {
+            topic: String,
+            payload: BrokerPayload,
+        },
+        RegisterTopic {
+            topic: String,
+            epoch: u32,
+        },
     }
 }
 
@@ -34,7 +40,7 @@ pub mod client {
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     #[serde(tag = "type", rename_all = "camelCase")]
     pub enum ClientMessage {
-        Subscribe { topic: String },
+        Subscribe { topic: String, epoch: u32 },
         Unsubscribe { topic: String },
     }
 }

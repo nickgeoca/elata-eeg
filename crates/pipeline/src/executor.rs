@@ -89,36 +89,40 @@ impl Executor {
         };
 
         let topo = self.graph.topology_sort();
-        let mut stage_inputs: HashMap<StageId, Input> = HashMap::new();
-        let mut stage_outputs: HashMap<StageId, Output> = HashMap::new();
+        let mut stage_inputs: HashMap<(StageId, String), Input> = HashMap::new();
+        let mut stage_outputs: HashMap<(StageId, String), Output> = HashMap::new();
 
         // First, determine the fan-out count for each stage by seeing how many other stages
         // list it as an input.
-        let mut fan_out_counts: HashMap<String, usize> = HashMap::new();
+        let mut fan_out_counts: HashMap<(String, String), usize> = HashMap::new();
         for stage_config in &self.graph.config.stages {
-            if let Some(input_name) = stage_config.inputs.first() {
-                // We only consider the stage name for fan-out calculation.
-                let base_input_name = input_name.split('.').next().unwrap_or(input_name);
-                *fan_out_counts.entry(base_input_name.to_string()).or_insert(0) += 1;
+            for input_name in &stage_config.inputs {
+                let parts: Vec<&str> = input_name.splitn(2, '.').collect();
+                if parts.len() == 2 {
+                    let source_stage = parts[0].to_string();
+                    let source_port = parts[1].to_string();
+                    *fan_out_counts.entry((source_stage, source_port)).or_insert(0) += 1;
+                }
             }
         }
 
         // Create channels for all potential outputs
-        for stage_id in &topo {
-            let fan_out = fan_out_counts.get(stage_id).cloned().unwrap_or(1); // Default to 1 for sinks
+        for stage_config in &self.graph.config.stages {
+            for port_name in &stage_config.outputs {
+                let output_key = (stage_config.name.clone(), port_name.clone());
+                let fan_out = fan_out_counts.get(&output_key).cloned().unwrap_or(1);
 
-            if fan_out > 1 {
-                // This is a fan-out node, use a broadcast channel
-                let (tx, rx) = broadcast::channel(16); // Capacity for broadcast channel
-                stage_outputs.insert(stage_id.clone(), Output::Broadcast(tx));
-                // The initial receiver is created here, but each downstream stage will get its own
-                // by calling subscribe().
-                stage_inputs.insert(stage_id.clone(), Input::Broadcast(rx));
-            } else {
-                // Standard point-to-point channel
-                let (tx, rx) = flume::bounded(4);
-                stage_outputs.insert(stage_id.clone(), Output::Flume(tx));
-                stage_inputs.insert(stage_id.clone(), Input::Flume(rx));
+                if fan_out > 1 {
+                    // This is a fan-out port, use a broadcast channel
+                    let (tx, rx) = broadcast::channel(64);
+                    stage_outputs.insert(output_key.clone(), Output::Broadcast(tx));
+                    stage_inputs.insert(output_key, Input::Broadcast(rx));
+                } else {
+                    // Standard point-to-point channel
+                    let (tx, rx) = flume::bounded(64);
+                    stage_outputs.insert(output_key.clone(), Output::Flume(tx));
+                    stage_inputs.insert(output_key, Input::Flume(rx));
+                }
             }
         }
 
@@ -141,43 +145,50 @@ impl Executor {
             let input_rx = if mode == StageMode::Producer {
                 Input::Flume(producer_rx.expect("Producer stage must have a receiver"))
             } else if self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap().inputs.is_empty() {
-                // This is a source node, fed by the executor's main input channel.
-                let (tx, rx) = flume::bounded(4);
-                let source_rx_clone = source_rx.clone();
-                thread::spawn(move || {
-                    while let Ok(pkt) = source_rx_clone.recv() {
-                        if tx.send(pkt).is_err() {
-                            break;
-                        }
-                    }
-                });
-                Input::Flume(rx)
+                // Only allowed for explicit Producer stages
+                panic!(
+                    "CONFIG ERROR: Stage '{}' has no inputs but is not a Producer. \
+                    Non-producers must declare inputs. Refusing to auto-wire to executor source.",
+                    stage_id
+                );
             } else {
                 // This is a non-source node. It receives from the appropriate channel created earlier.
                 let input_config = self.graph.config.stages.iter().find(|s| &s.name == stage_id).unwrap();
-                let input_source_name = input_config.inputs.first().map(|s| s.split('.').next().unwrap_or(s).to_string());
+                let input_source_name = input_config.inputs.first().unwrap(); // We know it's not empty
+                let parts: Vec<&str> = input_source_name.splitn(2, '.').collect();
+                let (source_stage, source_port) = (parts[0].to_string(), parts[1].to_string());
+                let input_key = (source_stage.clone(), source_port);
 
-                if let Some(name) = input_source_name {
-                     let source_output = stage_outputs.get(&name).expect("Upstream channel should exist");
+                if let Some(source_output) = stage_outputs.get(&input_key) {
                     match source_output {
                         Output::Broadcast(tx) => Input::Broadcast(tx.subscribe()),
-                        Output::Flume(_) => stage_inputs.remove(stage_id).unwrap(),
+                        Output::Flume(_) => stage_inputs.remove(&input_key)
+                            .expect("Internal error: missing flume receiver for upstream output"),
                     }
                 } else {
-                    // This case should ideally not be hit for non-producer, non-source stages,
-                    // but we provide a dummy channel to satisfy the type checker.
-                    let (_tx, rx) = flume::bounded(1);
-                    Input::Flume(rx)
+                    panic!(
+                        "WIRING ERROR: Stage '{}' declares input '{}', but no upstream output '{}' exists. \
+                        Check 'stages[].outputs' on stage '{}' and 'stages[].inputs' on stage '{}'.",
+                        stage_id, input_source_name, input_source_name, source_stage, stage_id
+                    );
                 }
             };
 
-            let output_txs: Vec<Output> = self
+            let stage_config = self
                 .graph
                 .config
                 .stages
                 .iter()
-                .filter(|s| s.inputs.iter().any(|input| input.starts_with(stage_id)))
-                .filter_map(|s| stage_outputs.get(&s.name).cloned())
+                .find(|s| &s.name == stage_id)
+                .unwrap();
+
+            let output_txs: HashMap<String, Output> = stage_config
+                .outputs
+                .iter()
+                .filter_map(|port_name| {
+                    let key = (stage_id.clone(), port_name.clone());
+                    stage_outputs.get(&key).map(|output| (port_name.clone(), output.clone()))
+                })
                 .collect();
 
             info!("Wiring stage '{}' to {} outputs", stage_id, output_txs.len());
@@ -212,22 +223,17 @@ impl Executor {
                                 "Starting producer loop for stage '{}'",
                                 node.lock().unwrap().name
                             );
-                            let (input_rx, should_halt_input, should_halt_stop, should_halt_control) =
-                                if let Input::Flume(rx) = input_rx {
-                                    let should_halt = Arc::new(AtomicBool::new(false));
-                                    (
-                                        rx,
-                                        should_halt.clone(),
-                                        should_halt.clone(),
-                                        should_halt,
-                                    )
-                                } else {
-                                    panic!("Producer stage must have a flume input channel");
-                                };
+                            let input_rx = if let Input::Flume(rx) = input_rx {
+                                rx
+                            } else {
+                                panic!("Producer stage must have a flume input channel");
+                            };
 
                             loop {
-                                let mut node_guard = node.lock().unwrap();
+                                info!("Producer loop for '{}' started.", node.lock().unwrap().name);
+                                let node_guard = node.lock().unwrap();
                                 if node_guard.state == StageState::Halted {
+                                    info!("Producer loop for '{}' halting.", node.lock().unwrap().name);
                                     break;
                                 }
                                 drop(node_guard);
@@ -235,18 +241,18 @@ impl Executor {
                                 let should_halt = Arc::new(AtomicBool::new(false));
                                 let should_halt_input = should_halt.clone();
                                 let should_halt_stop = should_halt.clone();
+                                let should_halt_control = should_halt.clone();
                                 let node_clone = node.clone();
                                 let mut context_clone = context.lock().unwrap();
 
                                 Selector::new()
                                     .recv(&input_rx, |msg| {
                                         if let Ok(packet) = msg {
-                                            for tx in &output_txs {
+                                            // This producer logic is simplified and assumes one output port
+                                            if let Some(tx) = output_txs.values().next() {
                                                 match tx {
                                                     Output::Flume(flume_tx) => {
-                                                        if flume_tx.send(packet.clone()).is_err() {
-                                                            // Downstream has disconnected, this is fine.
-                                                        }
+                                                        let _ = flume_tx.send(packet.clone());
                                                     }
                                                     Output::Broadcast(broadcast_tx) => {
                                                         let _ = broadcast_tx.send(packet.clone());
@@ -269,12 +275,18 @@ impl Executor {
                                             {
                                                 error!("Error handling control command: {}", e);
                                             }
+                                        } else {
+                                            // Control channel disconnected, should halt.
+                                            should_halt_control.store(true, Ordering::SeqCst);
                                         }
                                     })
                                     .wait();
+                                info!("Producer loop for '{}' finished waiting.", node.lock().unwrap().name);
 
                                 if should_halt.load(Ordering::SeqCst) {
+                                    info!("Producer loop for '{}' should halt.", node.lock().unwrap().name);
                                     node.lock().unwrap().state = StageState::Halted;
+                                    break;
                                 }
                             }
                         }
@@ -388,7 +400,7 @@ fn run_broadcast_receiver(
     should_halt: &Arc<AtomicBool>,
     node_clone: &Arc<Mutex<Node>>,
     context_clone: &mut crate::stage::StageContext,
-    output_txs: &[Output],
+    output_txs: &HashMap<String, Output>,
     fatal_error_tx: &Sender<Box<dyn Any + Send>>,
 ) {
     let mut rx = rx.resubscribe();
@@ -448,7 +460,7 @@ fn process_message(
     msg: Result<Arc<RtPacket>, RecvError>,
     node_clone: &Arc<Mutex<Node>>,
     context_clone: &mut crate::stage::StageContext,
-    output_txs: &[Output],
+    output_txs: &HashMap<String, Output>,
     should_halt_input: &Arc<AtomicBool>,
     fatal_error_tx: &Sender<Box<dyn Any + Send>>,
 ) {
@@ -467,14 +479,15 @@ fn process_message(
 
         match result {
             Ok(Ok(Some(output_packet))) => {
-                for tx in output_txs {
+                // The stage's `process` method doesn't know about output ports,
+                // so we assume the packet goes to the first declared output port.
+                for tx in output_txs.values() {
                     match tx {
                         Output::Flume(flume_tx) => {
-                            if flume_tx.send(output_packet.clone()).is_err()
-                            {
+                            if flume_tx.send(output_packet.clone()).is_err() {
                                 // Downstream has disconnected, this is fine.
                             }
-                        },
+                        }
                         Output::Broadcast(broadcast_tx) => {
                             // Error means no subscribers, which is fine.
                             let _ = broadcast_tx.send(output_packet.clone());

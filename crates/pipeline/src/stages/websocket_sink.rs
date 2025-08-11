@@ -34,20 +34,31 @@ impl Stage for WebsocketSink {
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
     ) -> std::result::Result<Option<Arc<RtPacket>>, StageError> {
-        // 1. Determine the packet type and get header/samples
+        // 1. Determine the packet type and get header/samples.
+        // This also serves as our primary assertion. The `match` is exhaustive,
+        // but we only handle the `Voltage` case. Any other packet type will
+        // trigger the panic, immediately revealing a pipeline wiring issue.
         let (header, samples_bytes, packet_type) = match &*packet {
             RtPacket::Voltage(data) => (
                 &data.header,
                 bytemuck::cast_slice(&data.samples),
                 "Voltage",
             ),
-            RtPacket::RawI32(data) => (
-                &data.header,
-                bytemuck::cast_slice(&data.samples),
-                "RawI32",
-            ),
-            _ => return Ok(Some(packet)), // Forward other packet types
+            other => {
+                // Panic if we receive any packet type other than Voltage.
+                panic!(
+                    "websocket_sink received unexpected packet type: {:?}. This indicates a misconfigured pipeline.",
+                    other
+                );
+            }
         };
+
+        tracing::debug!(
+            topic = %self.topic,
+            packet_type = packet_type,
+            meta_rev = header.meta.meta_rev,
+            "sink_got_packet"
+        );
 
         // 2. Send metadata update if revision has changed
         if self.last_meta_rev != Some(header.meta.meta_rev) {
@@ -57,11 +68,19 @@ impl Stage for WebsocketSink {
                 meta: &header.meta,
             };
             let json_payload = serde_json::to_string(&meta_msg)?;
-            let broker_msg = Arc::new(BrokerMessage {
+            let data_broker_msg = Arc::new(BrokerMessage::Data {
                 topic: self.topic.clone(),
                 payload: BrokerPayload::Meta(json_payload),
             });
-            let _ = self.sender.send(broker_msg);
+            let _ = self.sender.send(data_broker_msg);
+
+            // Also inform the broker of the new epoch for this topic
+            let register_msg = Arc::new(BrokerMessage::RegisterTopic {
+                topic: self.topic.clone(),
+                epoch: header.meta.meta_rev,
+            });
+            let _ = self.sender.send(register_msg);
+
             self.last_meta_rev = Some(header.meta.meta_rev);
         }
 
@@ -78,7 +97,7 @@ impl Stage for WebsocketSink {
         binary_payload.extend_from_slice(samples_bytes);
 
         // 5. Send the data packet as a single binary message
-        let broker_msg = Arc::new(BrokerMessage {
+        let broker_msg = Arc::new(BrokerMessage::Data {
             topic: self.topic.clone(),
             payload: BrokerPayload::Data(binary_payload),
         });
