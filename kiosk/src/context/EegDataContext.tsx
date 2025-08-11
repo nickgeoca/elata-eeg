@@ -8,6 +8,8 @@ import { SampleChunk, SensorMeta, MetaUpdateMsg, DataPacketHeader } from '../typ
 // Constants for data management
 const MAX_SAMPLE_CHUNKS = 100;
 const RECONNECTION_DATA_RETENTION_MS = 5000; // Keep data for 5 seconds during reconnections
+const MAX_PROCESSING_TIME_MS = 8; // Max time to spend processing data per frame
+const RING_BUFFER_SIZE = 256; // Power of 2 for efficient modulo operations
 
 // Callback type for live data subscribers
 type RawDataCallback = (data: SampleChunk[]) => void;
@@ -32,6 +34,7 @@ interface EegDataStableContextType {
   subscribeRaw: (callback: RawDataCallback) => () => void;
   getRawSamples: () => SampleChunk[];
   clearOldData: () => void;
+  drainIncoming: (maxMs?: number) => void; // Allow renderer to pull data
   config: any; // Config is considered stable; changes should be infrequent
 }
 
@@ -184,53 +187,48 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, []);
 
+  // Simple queue for incoming data - keeping it simple to avoid bugs
   const incomingDataQueueRef = useRef<SampleChunk[]>([]);
 
-  const processDataQueue = useCallback(() => {
-    if (incomingDataQueueRef.current.length === 0) {
-      animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
-      return;
-    }
+  const drainIncoming = useCallback((maxMs = 4) => {
+    const start = performance.now();
+    const pushed: SampleChunk[] = [];
+    
+    while (incomingDataQueueRef.current.length > 0 && (performance.now() - start) < maxMs) {
+      // Use shift() to maintain FIFO order - this is the correct order for time series data
+      const chunk = incomingDataQueueRef.current.shift()!;
+      pushed.push(chunk);
 
-    const newChunks = incomingDataQueueRef.current;
-    incomingDataQueueRef.current = [];
+      // Add to the main buffer, but without spreading (more efficient)
+      rawSamplesRef.current.push(chunk);
+      sampleTimestamps.current.push(Date.now());
 
-    const now = Date.now();
-    const newSamples = [...rawSamplesRef.current, ...newChunks];
-    newChunks.forEach(() => sampleTimestamps.current.push(now));
-
-    if (newSamples.length > MAX_SAMPLE_CHUNKS) {
-      const excess = newSamples.length - MAX_SAMPLE_CHUNKS;
-      sampleTimestamps.current.splice(0, excess);
-      rawSamplesRef.current = newSamples.slice(excess);
-    } else {
-      rawSamplesRef.current = newSamples;
-    }
-
-    setDataVersion(v => v + 1);
-    handleDataUpdateRef.current(true);
-
-    Object.values(rawDataSubscribersRef.current.raw).forEach(callback => callback(newChunks));
-
-    if (now - lastCleanupTime.current > 10000) {
-      cleanupOldData();
-      lastCleanupTime.current = now;
-    }
-
-    animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
-  }, [cleanupOldData]);
-
-  useEffect(() => {
-    animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
-    return () => {
-      if (animationFrameIdRef.current) {
-        cancelAnimationFrame(animationFrameIdRef.current);
+      // Enforce MAX_SAMPLE_CHUNKS limit
+      if (rawSamplesRef.current.length > MAX_SAMPLE_CHUNKS) {
+        const excess = rawSamplesRef.current.length - MAX_SAMPLE_CHUNKS;
+        rawSamplesRef.current.splice(0, excess);
+        sampleTimestamps.current.splice(0, excess);
       }
-    };
-  }, [processDataQueue]);
+    }
+
+    if (pushed.length) {
+      setDataVersion(v => v + 1);
+      // Notify subscribers with the newly pushed data in correct order
+      Object.values(rawDataSubscribersRef.current.raw).forEach(cb => cb(pushed));
+    }
+  }, []);
 
   const handleSamples = useCallback((newChunk: SampleChunk) => {
+    // Add to simple queue - maintain FIFO order for time series data
     incomingDataQueueRef.current.push(newChunk);
+    
+    // Prevent memory leaks by limiting queue size
+    if (incomingDataQueueRef.current.length > RING_BUFFER_SIZE) {
+      console.warn('[EegDataContext] Queue overflow, dropping oldest data');
+      incomingDataQueueRef.current.shift(); // Remove oldest
+    }
+    
+    handleDataUpdateRef.current(true);
   }, []);
 
   const handleFftData = useCallback((data: FftPacket) => {
@@ -384,32 +382,19 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
   const [wsStatus, setWsStatus] = useState('Disconnected');
   const ws = useRef<WebSocket | null>(null);
-  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null); // For managing reconnection timer
-  
-  // Use window property to track connection attempts in React Strict Mode
-  // This persists across double executions unlike refs which are reset per component instance
-  const connectionGuardKey = '__eeg_websocket_connection_guard__';
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const sourceReadyMetaRef = useRef(sourceReadyMeta);
+  useEffect(() => {
+    sourceReadyMetaRef.current = sourceReadyMeta;
+  }, [sourceReadyMeta]);
 
   const connect = useCallback(() => {
-    // Check if we should connect to WebSocket
-    if (!shouldConnect) {
-      return;
-    }
-    
-    // Check if we're in React Strict Mode development double-run scenario
-    // In Strict Mode, the first run sets the window guard, and the second run should be ignored
-    // @ts-ignore - Accessing custom property on window object
-    if (window[connectionGuardKey]) {
-      console.log('[EegDataContext] Connection attempt already made, skipping duplicate connection attempt.');
+    if (ws.current) {
+      console.log('[EegDataContext] Connection attempt skipped - already connected');
       return;
     }
 
-    // Ensure we don't create duplicate connections
-    if (ws.current) {
-      console.log('[EegDataContext] Duplicate connection.');
-      return;
-    }
-    
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname;
     const url = `${protocol}//${host}:9000/ws/data`;
@@ -418,28 +403,24 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     setWsStatus('Connecting...');
     const socket = new WebSocket(url);
     socket.binaryType = 'arraybuffer';
-    
-    // Set the connection guard on window to prevent duplicate connections
-    // @ts-ignore - Adding custom property to window object
-    window[connectionGuardKey] = true;
     ws.current = socket;
 
     socket.onopen = () => {
       console.log('[EegDataContext] WebSocket connection established');
       setWsStatus('Connected');
 
-      // Dynamically subscribe to the topic from the sourceReady event
-      if (sourceReadyMeta?.source_type && sourceReadyMeta?.meta_rev) {
-        const topic = sourceReadyMeta.source_type === 'eeg_source' ? 'eeg_voltage' : 'fft';
+      const meta = sourceReadyMetaRef.current;
+      if (meta?.source_type && meta?.meta_rev) {
+        const topic = meta.source_type === 'eeg_source' ? 'eeg_voltage' : 'fft';
         const subscriptionMessage = {
           type: 'subscribe',
           topic: topic,
-          epoch: sourceReadyMeta.meta_rev,
+          epoch: meta.meta_rev,
         };
         socket.send(JSON.stringify(subscriptionMessage));
         console.log(`[EegDataContext] Subscribed to topic: ${subscriptionMessage.topic} with epoch ${subscriptionMessage.epoch}`);
       } else {
-        console.warn('[EegDataContext] Could not subscribe to data topic: sourceReadyMeta or meta_rev is not available.');
+        console.warn('[EegDataContext] Could not subscribe to data topic: sourceReadyMeta is not available.');
       }
     };
 
@@ -476,15 +457,15 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
           return;
         }
 
-        // 4. Calculate sample data offset (4 bytes for length prefix)
-        const samplesOffset = 4 + jsonLen;
+        // 4. Calculate the correct, aligned offset for the sample data
+        const headerEnd = 4 + jsonLen;
+        const padding = (4 - (headerEnd % 4)) % 4;
+        const byteOffset = headerEnd + padding;
 
-        // 5. Process the samples based on the explicit packet_type
-        const samplesBuffer = event.data.slice(samplesOffset);
-        const samples =
-          header.packet_type === 'RawI32'
-            ? new Int32Array(samplesBuffer)
-            : new Float32Array(samplesBuffer);
+        // 5. Process the samples using the aligned offset and a calculated length
+        const remainingBytes = event.data.byteLength - byteOffset;
+        const numFloats = Math.floor(remainingBytes / 4);
+        const samples = new Float32Array(event.data, byteOffset, numFloats); // view, no copy
         
         // Now you have the full context: `header` and `topicMeta` to process the `samples`
         const newChunk: SampleChunk = {
@@ -501,8 +482,6 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
         console.error('[EegDataContext] WebSocket error:', err);
         setWsStatus('Error');
         ws.current = null;
-        // @ts-ignore
-        window[connectionGuardKey] = false;
         setShouldConnect(false);
       }
     };
@@ -512,8 +491,6 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       if (ws.current === socket) {
         setWsStatus('Disconnected');
         ws.current = null;
-        // @ts-ignore
-        window[connectionGuardKey] = false;
 
         // If the server closed the connection with a stale epoch code,
         // do not immediately reconnect. Wait for a new SourceReady event.
@@ -544,23 +521,24 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
       // @ts-ignore
       window[connectionGuardKey] = false;
     };
-  }, [shouldConnect, sourceReadyMeta]); // Add sourceReadyMeta as a dependency
+  }, []);
 
   // This useEffect manages the WebSocket connection lifecycle.
   // It runs ONLY when shouldConnect changes from false to true.
   useEffect(() => {
-    if (shouldConnect) {
+    if (shouldConnect && !ws.current) {
       connect();
     }
-  }, [shouldConnect]); // REMOVED `connect` from dependency array
+  }, [shouldConnect]); // Remove connect from dependencies to prevent re-runs
 
 
   const stableValue = useMemo(() => ({
     subscribeRaw,
     getRawSamples,
     clearOldData,
+    drainIncoming,
     config,
-  }), [subscribeRaw, getRawSamples, clearOldData, config]);
+  }), [subscribeRaw, getRawSamples, clearOldData, drainIncoming, config]);
 
   const dynamicValue = useMemo(() => ({
     dataVersion,

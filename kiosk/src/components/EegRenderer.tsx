@@ -1,9 +1,9 @@
 'use client';
 
 import React, {useRef, useEffect} from 'react';
-import {getChannelColor} from '../utils/colorUtils';
-import {useDataBuffer} from '../hooks/useDataBuffer';
-import {SampleChunk} from '../types/eeg';
+import { getChannelColor } from '../utils/colorUtils';
+import { useEegData } from '../context/EegDataContext';
+import { SampleChunk } from '../types/eeg';
 
 const VS = `
 attribute vec2 a_xy;                // (sampleIndex, value)
@@ -28,7 +28,6 @@ void main() { gl_FragColor = u_color; }
 interface Props {
   isActive: boolean;
   config: {channels: number[]; samplesPerLine?: number; ampScale?: number};
-  dataBuffer: ReturnType<typeof useDataBuffer<SampleChunk>>;
   width: number;
   height: number;
   uiVoltageScaleFactor: number;
@@ -37,15 +36,13 @@ interface Props {
 export const EegRenderer = React.memo(function EegRenderer({
   isActive,
   config,
-  dataBuffer,
   width,
   height,
   uiVoltageScaleFactor,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const { drainIncoming, getRawSamples, subscribeRaw } = useEegData();
 
-  // Render a blank canvas if the component is not active or if configuration is missing,
-  // preventing crashes from accessing properties on undefined objects.
   if (!isActive || !config?.channels?.length) {
     return <canvas ref={canvasRef} className="w-full h-full" />;
   }
@@ -56,11 +53,12 @@ export const EegRenderer = React.memo(function EegRenderer({
     pos: number; res: WebGLUniformLocation | null;
     sso: WebGLUniformLocation | null; col: WebGLUniformLocation | null;
   }>({pos:-1,res:null,sso:null,col:null});
-  const vbos      = useRef<WebGLBuffer[]>([]);
-  const cpuY      = useRef<Float32Array[]>([]);
-  const rafId     = useRef<number>(0);
-  const workerRef = useRef<Worker | null>(null);
-  const ringBufferRef = useRef<SharedArrayBuffer | null>(null);
+  const vbos = useRef<WebGLBuffer[]>([]);
+  const cpuY = useRef<Float32Array[]>([]);
+  const rafId = useRef<number>(0);
+  const lastProcessedTimestamp = useRef<number>(0);
+  const scratch = useRef<Float32Array[]>([]);
+  const lastRenderTime = useRef<number>(0);
 
   const NCH   = config.channels.length;
   const NPTS  = config.samplesPerLine ?? 1024;
@@ -95,6 +93,9 @@ export const EegRenderer = React.memo(function EegRenderer({
     location.current.sso = gl.getUniformLocation(prog, 'u_scrollScaleOffset');
     location.current.col = gl.getUniformLocation(prog, 'u_color');
 
+    gl.disable(gl.DEPTH_TEST);
+    gl.clearColor(0, 0, 0, 0); // Set clear color once
+
     /* VBO per channel, interleaved (x,y) */
     for (let ch = 0; ch < NCH; ch++) {
       const buf = gl.createBuffer()!;
@@ -104,23 +105,10 @@ export const EegRenderer = React.memo(function EegRenderer({
       gl.bufferData(gl.ARRAY_BUFFER, arr, gl.DYNAMIC_DRAW);
       vbos.current.push(buf);
       cpuY.current.push(arr); // keep same reference, we’ll mutate y’s
-    }
-
-    // Initialize worker
-    if (typeof SharedArrayBuffer !== 'undefined' && typeof Worker !== 'undefined') {
-        const worker = new Worker(new URL('../workers/eegProcessor.worker.ts', import.meta.url));
-        workerRef.current = worker;
-        const buffer = new SharedArrayBuffer(NPTS * Float32Array.BYTES_PER_ELEMENT);
-        ringBufferRef.current = buffer;
-        worker.postMessage({ type: 'init', payload: { buffer } });
-    } else {
-        console.warn("SharedArrayBuffer or Worker is not available. Using a less performant fallback.");
+      scratch.current[ch] = new Float32Array(NPTS); // Pre-allocate scratch buffer
     }
 
     return () => {
-      if (workerRef.current) {
-        workerRef.current.terminate();
-      }
       cancelAnimationFrame(rafId.current);
       const gl = glRef.current;
       const prog = program.current;
@@ -146,8 +134,10 @@ export const EegRenderer = React.memo(function EegRenderer({
     if (cvs.width !== w || cvs.height !== h) {
       cvs.width = w; cvs.height = h; gl.viewport(0,0,w,h);
     }
-    if (location.current.res) gl.useProgram(program.current!),
+    gl.useProgram(program.current!);
+    if (location.current.res) {
       gl.uniform2f(location.current.res, w, h);
+    }
   }, [width, height]);
 
   /* ---------- render loop ---------- */
@@ -155,101 +145,87 @@ export const EegRenderer = React.memo(function EegRenderer({
     if (!isActive || !glRef.current || !program.current) return;
     const gl = glRef.current;
 
-    const draw = () => {
-      // 1. ingest new EEG samples and shift data
-      const chunks = dataBuffer.getAndClearData();
-      if (chunks.length > 0 && workerRef.current && ringBufferRef.current) {
-        chunks.forEach(chunk => {
-          workerRef.current?.postMessage({ type: 'data', payload: chunk });
-        });
-      }
+    const targetHz = 30; // Less aggressive throttling
+    const frameMs = 1000 / targetHz;
 
-      if (ringBufferRef.current) {
-        const ringBuffer = new Float32Array(ringBufferRef.current);
-        for (let ch = 0; ch < NCH; ch++) {
-          const ary = cpuY.current[ch];
-          const data = ringBuffer.slice(); // In a real scenario, you'd read only new data
-          for (let i = 0; i < NPTS; i++) {
-            ary[i * 2 + 1] = data[i];
-          }
-          gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
-          gl.bufferSubData(gl.ARRAY_BUFFER, 0, ary);
-        }
-      } else {
-        // Fallback rendering when SharedArrayBuffer is not available
-        if (chunks.length > 0) {
-          const batches: number[][] = Array.from({ length: NCH }, () => []);
-          chunks.forEach(chk => {
-            const samples = chk.samples;
-            const numMetaChannels = chk.meta.channel_names.length;
-            if (numMetaChannels === 0) return;
+    const draw = (currentTime: number) => {
+      // Throttle to 30Hz with accumulator pattern
+      if (currentTime - lastRenderTime.current >= frameMs) {
+        // Drain incoming data with a small time budget
+        drainIncoming(2); // Smaller budget to prevent blocking
 
-            if (NCH === 1) {
-                const batch = batches[0];
-                if (batch) {
-                    for (let i = 0; i < samples.length; i++) {
-                        batch.push(samples[i]);
-                    }
-                }
-            } else {
-                for (let i = 0; i < samples.length; i++) {
-                    const channelIndex = i % numMetaChannels;
-                    if (channelIndex < NCH) {
-                        batches[channelIndex].push(samples[i]);
-                    }
-                }
-            }
-        });
+        const allChunks = getRawSamples();
+        const newChunks = allChunks.filter(c => c.timestamp > lastProcessedTimestamp.current);
 
-        for (let ch = 0; ch < NCH; ch++) {
-            if (!batches[ch] || !batches[ch].length) continue;
+        if (newChunks.length > 0) {
+          lastProcessedTimestamp.current = newChunks[newChunks.length - 1].timestamp;
 
+          for (let ch = 0; ch < NCH; ch++) {
             const ary = cpuY.current[ch];
-            const newVals = batches[ch];
-            const numNew = newVals.length;
+            const scratchY = scratch.current[ch];
+            let offset = 0;
+
+            newChunks.forEach(chunk => {
+              const samples = chunk.samples;
+              const numMetaChannels = chunk.meta.channel_names.length;
+              if (numMetaChannels === 0 || offset >= scratchY.length) return;
+
+              if (NCH === 1) {
+                const remainingSpace = scratchY.length - offset;
+                const numToCopy = Math.min(samples.length, remainingSpace);
+                scratchY.set(samples.subarray(0, numToCopy), offset);
+                offset += numToCopy;
+              } else {
+                for (let i = ch; i < samples.length && offset < scratchY.length; i += numMetaChannels) {
+                  scratchY[offset++] = samples[i];
+                }
+              }
+            });
+
+            const numNew = offset;
+            if (numNew === 0) continue;
 
             if (numNew >= NPTS) {
-                const latestVals = newVals.slice(-NPTS);
-                for (let i = 0; i < NPTS; i++) {
-                    ary[i * 2 + 1] = latestVals[i];
-                }
+              const latestVals = scratchY.subarray(numNew - NPTS, numNew);
+              for (let i = 0; i < NPTS; i++) {
+                ary[i * 2 + 1] = latestVals[i];
+              }
             } else {
-                const numExisting = NPTS - numNew;
-                for (let i = 0; i < numExisting; i++) {
-                    ary[i * 2 + 1] = ary[(i + numNew) * 2 + 1];
-                }
-                for (let i = 0; i < numNew; i++) {
-                    ary[(numExisting + i) * 2 + 1] = newVals[i];
-                }
+              // Shift existing data left
+              ary.copyWithin(1, (numNew * 2) + 1);
+              // Set new data at the end
+              for (let i = 0; i < numNew; i++) {
+                ary[(NPTS - numNew + i) * 2 + 1] = scratchY[i];
+              }
             }
-
             gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
             gl.bufferSubData(gl.ARRAY_BUFFER, 0, ary);
+          }
         }
-      }
-    }
 
-      // 2. draw
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.useProgram(program.current!);
-      gl.enableVertexAttribArray(location.current.pos);
-      gl.vertexAttribPointer(location.current.pos, 2, gl.FLOAT, false, 0, 0);
+        // 2. draw
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.enableVertexAttribArray(location.current.pos);
+        gl.vertexAttribPointer(location.current.pos, 2, gl.FLOAT, false, 0, 0);
 
-      const rowH = gl.canvas.height / NCH;
-      for (let ch = 0; ch < NCH; ch++) {
-        gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
-        const yOff = rowH * (ch + 0.5);
-        gl.uniform3f(location.current.sso!, gl.canvas.width / NPTS, YSCL, yOff);
-        const [r,g,b] = getChannelColor(ch);
-        gl.uniform4f(location.current.col!, r,g,b,1);
-        gl.drawArrays(gl.LINE_STRIP, 0, NPTS);
+        const rowH = gl.canvas.height / NCH;
+        for (let ch = 0; ch < NCH; ch++) {
+          gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
+          const yOff = rowH * (ch + 0.5);
+          gl.uniform3f(location.current.sso!, gl.canvas.width / NPTS, YSCL, yOff);
+          const [r,g,b] = getChannelColor(ch);
+          gl.uniform4f(location.current.col!, r,g,b,1);
+          gl.drawArrays(gl.LINE_STRIP, 0, NPTS);
+        }
+
+        lastRenderTime.current = currentTime;
       }
 
       rafId.current = requestAnimationFrame(draw);
     };
-    draw();
+    rafId.current = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(rafId.current);
-  }, [isActive, dataBuffer, NCH, NPTS, YSCL]);
+  }, [isActive, NCH, NPTS, YSCL, drainIncoming, getRawSamples, subscribeRaw]);
 
   return <canvas ref={canvasRef} className="w-full h-full" />;
 });
