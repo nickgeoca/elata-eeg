@@ -119,7 +119,7 @@ impl Stage for CsvRecorderPlugin {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         match &*packet {
             RtPacket::Voltage(data) => {
                 let mut state = self.state.lock().unwrap();
@@ -144,6 +144,6 @@ impl Stage for CsvRecorderPlugin {
             _ => {}
         }
         // Pass the packet through to the next stage
-        Ok(Some(packet))
+        Ok(vec![("out".to_string(), packet)])
     }
 }

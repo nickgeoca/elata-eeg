@@ -1,17 +1,17 @@
 use axum::extract::ws::{Message, WebSocket};
 use dashmap::DashMap;
 use eeg_types::comms::{
-    client::{ClientMessage, ServerMessage},
-    pipeline::{BrokerMessage, BrokerPayload},
+	client::{ClientMessage, ServerMessage, SubscribedAck},
+	pipeline::{BrokerMessage, BrokerPayload},
 };
 use futures::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::{
-    select,
-    sync::{broadcast, Mutex},
-    time::interval,
+	select,
+	sync::{broadcast, Mutex},
+	time::interval,
 };
 use tracing::{debug, info, warn};
 
@@ -24,8 +24,9 @@ type TopicRx = broadcast::Receiver<Arc<BrokerMessage>>;
 type SubMap = HashMap<String, TopicRx>;
 
 struct TopicState {
-    sender: broadcast::Sender<Arc<BrokerMessage>>,
-    epoch: u32,
+	sender: broadcast::Sender<Arc<BrokerMessage>>,
+	last_meta: Option<Arc<BrokerMessage>>,
+	meta_rev: u64,
 }
 
 pub struct WebSocketBroker {
@@ -60,25 +61,28 @@ impl WebSocketBroker {
                 };
 
                 match &*msg {
-                    BrokerMessage::Data { topic, .. } => {
-                        if let Some(topic_state) = self.topics.get(topic) {
-                            let topic_state_guard = topic_state.lock().await;
-                            if topic_state_guard.sender.send(msg.clone()).is_err() {
-                                debug!(
-                                    "[Broker] No subscribers for topic '{}'.",
-                                    topic
-                                );
+                    BrokerMessage::Data { topic, payload } => {
+                        if let Some(topic_state_entry) = self.topics.get(topic) {
+                            let mut topic_state = topic_state_entry.lock().await;
+                            match payload {
+                                BrokerPayload::Meta(_) => {
+                                    topic_state.last_meta = Some(msg.clone());
+                                    topic_state.meta_rev += 1;
+                                }
+                                BrokerPayload::Data(_) => {
+                                    // Forward data directly without caching
+                                }
+                            }
+                            if topic_state.sender.send(msg.clone()).is_err() {
+                            	debug!("[Broker] No subscribers for topic '{}', message not sent.", topic);
                             }
                         }
+                        // If the topic doesn't exist, we simply drop the message.
+                        // It will be created on the first subscription.
                     }
-                    BrokerMessage::RegisterTopic { topic, epoch } => {
-                        info!("[Broker] Registering topic '{}' with epoch {}", topic, epoch);
-                        let topic_entry = self.topics.entry(topic.clone()).or_insert_with(|| {
-                            let (sender, _) = broadcast::channel(WEBSOCKET_BUFFER_SIZE);
-                            Arc::new(Mutex::new(TopicState { sender, epoch: 0 }))
-                        });
-                        let mut topic_state = topic_entry.lock().await;
-                        topic_state.epoch = *epoch;
+                    BrokerMessage::RegisterTopic { .. } => {
+                        // This is now deprecated and will be ignored.
+                        // Topics are created on-demand by subscribers.
                     }
                 }
             }
@@ -86,10 +90,12 @@ impl WebSocketBroker {
     }
 
     /// Adds a new client to the broker, creating a dedicated task to manage its lifecycle.
-    pub async fn add_client(self: Arc<Self>, ws: WebSocket) {
+    pub fn add_client(self: Arc<Self>, ws: WebSocket) {
         let client_id = uuid::Uuid::new_v4().to_string();
         info!("[Client {}] New WebSocket connection established.", client_id);
-        self.handle_client(ws, client_id).await;
+        tokio::spawn(async move {
+            self.handle_client(ws, client_id).await;
+        });
     }
 
     /// Manages the entire lifecycle of a single client connection.
@@ -122,47 +128,55 @@ impl WebSocketBroker {
                             debug!("[Client {}] Received message: {}", client_id, txt);
                             if let Ok(msg) = serde_json::from_str::<ClientMessage>(&txt) {
                                 match msg {
-                                    ClientMessage::Subscribe { topic, epoch } => {
-                                        if !subs.contains_key(&topic) {
-                                            if let Some(topic_state) = self.topics.get(&topic) {
-                                                let topic_state_guard = topic_state.lock().await;
-                                                if topic_state_guard.epoch != epoch {
-                                                    warn!("[Client {}] Subscription to topic '{}' rejected due to stale epoch (client: {}, server: {}).", client_id, topic, epoch, topic_state_guard.epoch);
-                                                    let err_msg = ServerMessage::Error("Stale epoch".to_string());
-                                                    let close_msg = Message::Close(Some(axum::extract::ws::CloseFrame {
-                                                        code: 4009,
-                                                        reason: "Stale epoch".into(),
-                                                    }));
-                                                    ws_tx.send(close_msg).await.ok();
+                                    ClientMessage::Subscribe { topic, .. } => { // epoch is now ignored
+                                        if subs.contains_key(&topic) {
+                                            warn!("[Client {}] Already subscribed to topic '{}'. Ignoring.", client_id, topic);
+                                            continue;
+                                        }
+
+                                        info!("[Client {}] Subscribing to topic: {}", client_id, topic);
+
+                                        // Create topic on-demand if it doesn't exist
+                                        let topic_state_entry = self.topics.entry(topic.clone()).or_insert_with(|| {
+                                            let (sender, _) = broadcast::channel(WEBSOCKET_BUFFER_SIZE);
+                                            Arc::new(Mutex::new(TopicState { sender, last_meta: None, meta_rev: 0 }))
+                                           });
+                                 
+                                           let mut topic_state = topic_state_entry.lock().await;
+                                           let sub_rx = topic_state.sender.subscribe();
+                                 
+                                           // 1. Send ACK
+                                                                         let ack = ServerMessage::Subscribed(SubscribedAck {
+                                                                             topic: topic.clone(),
+                                                                             meta_rev: if topic_state.last_meta.is_some() { Some(topic_state.meta_rev) } else { None },
+                                                                         });
+                                           let ack_msg = Message::Text(serde_json::to_string(&ack).unwrap());
+                                           if ws_tx.send(ack_msg).await.is_err() {
+                                            info!("[Client {}] Failed to send subscription ACK, client disconnected.", client_id);
+                                            break;
+                                           }
+                                 
+                                           // 2. Replay last known meta message, if any
+                                           if let Some(meta_msg) = &topic_state.last_meta {
+                                            if let BrokerMessage::Data { payload, .. } = &**meta_msg {
+                                                let frame = match payload {
+                                                    BrokerPayload::Meta(json) => Message::Text(json.clone()),
+                                                    _ => continue, // Should not happen
+                                                };
+                                                if ws_tx.send(frame).await.is_err() {
+                                                    info!("[Client {}] Failed to replay meta, client disconnected.", client_id);
                                                     break;
                                                 }
-
-                                                info!("[Client {}] Subscribing to topic: {} with epoch {}", client_id, topic, epoch);
-                                                let sub_rx = topic_state_guard.sender.subscribe();
-
-                                                // Send ACK *before* waiting for the first message
-                                                let ack = ServerMessage::Subscribed(topic.clone());
-                                                let ack_msg = Message::Text(serde_json::to_string(&ack).unwrap());
-                                                if ws_tx.send(ack_msg).await.is_err() {
-                                                    info!("[Client {}] Failed to send subscription ACK, client disconnected.", client_id);
-                                                    break;
-                                                }
-
-                                                // Clone the receiver for the future, keeping the original in the map
-                                                let mut fut_rx = sub_rx.resubscribe();
-                                                subs.insert(topic.clone(), sub_rx);
-
-                                                // Arm the future to listen for messages
-                                                topic_futs.push(async move {
-                                                    let res = fut_rx.recv().await;
-                                                    (topic, res, fut_rx)
-                                                }.boxed());
-                                            } else {
-                                                warn!("[Client {}] Subscription to unknown topic '{}'. Closing connection.", client_id, topic);
-                                                ws_tx.send(Message::Close(None)).await.ok();
-                                                break;
                                             }
                                         }
+
+                                        // 3. Arm the future to listen for new messages
+                                        let mut fut_rx = sub_rx.resubscribe();
+                                        subs.insert(topic.clone(), sub_rx);
+                                        topic_futs.push(async move {
+                                            let res = fut_rx.recv().await;
+                                            (topic, res, fut_rx)
+                                        }.boxed());
                                     },
                                     ClientMessage::Unsubscribe { topic } => {
                                         info!("[Client {}] Unsubscribed from topic: {}", client_id, topic);
@@ -185,7 +199,7 @@ impl WebSocketBroker {
                             break;
                         },
                         Some(Ok(Message::Binary(_))) => {
-                            warn!("[Client {}] Received unexpected binary message. Closing connection.", client_id);
+                            warn!("[Client {}] Received unexpected binary message from client. Closing connection.", client_id);
                             ws_tx.send(Message::Close(None)).await.ok();
                             break;
                         }

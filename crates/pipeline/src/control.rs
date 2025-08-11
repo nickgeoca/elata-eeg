@@ -40,6 +40,8 @@ pub enum ControlCommand {
     Resume,
     /// Initiate a graceful shutdown of the pipeline.
     Shutdown,
+    /// Signal to all stages that they should finish processing remaining data and then halt.
+    Drain,
     /// Tell a sink stage to start recording.
     StartRecording,
     /// Tell a sink stage to stop recording.
@@ -65,6 +67,7 @@ impl Debug for ControlCommand {
             ControlCommand::Pause => write!(f, "Pause"),
             ControlCommand::Resume => write!(f, "Resume"),
             ControlCommand::Shutdown => write!(f, "Shutdown"),
+            ControlCommand::Drain => write!(f, "Drain"),
             ControlCommand::StartRecording => write!(f, "StartRecording"),
             ControlCommand::StopRecording => write!(f, "StopRecording"),
             ControlCommand::Reconfigure(config) => f.debug_tuple("Reconfigure").field(config).finish(),

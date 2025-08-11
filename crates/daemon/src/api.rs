@@ -14,7 +14,11 @@ use std::convert::Infallible;
 use tokio::sync::broadcast;
 use eeg_types::{comms::pipeline::BrokerMessage, data::SensorMeta};
 use flume::Sender;
-use pipeline::{control::ControlCommand, data::RtPacket, executor::Executor};
+use pipeline::{
+    control::ControlCommand,
+    data::RtPacket,
+    executor::{ControlBus, Executor},
+};
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 // Shared application state
@@ -31,7 +35,7 @@ pub struct AppState {
     pub source_meta_cache: Arc<Mutex<Option<SensorMeta>>>,
     pub broker: Arc<WebSocketBroker>,
     pub websocket_sender: broadcast::Sender<Arc<BrokerMessage>>,
-    pub driver: Option<Arc<tokio::sync::Mutex<Box<dyn AdcDriver + Send>>>>,
+    pub driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver + Send>>>>,
 }
 
 impl FromRef<AppState> for Arc<WebSocketBroker> {
@@ -44,8 +48,8 @@ impl FromRef<AppState> for Arc<WebSocketBroker> {
 pub struct PipelineHandle {
     pub id: String,
     pub executor: Option<Executor>,
-    pub input_tx: Sender<Arc<RtPacket>>,
-    pub control_tx: Sender<ControlCommand>,
+    pub input_tx: Option<Sender<Arc<RtPacket>>>,
+    pub control_bus: ControlBus,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,15 +164,15 @@ pub async fn start_pipeline_handler(
         }
     };
 
-    let (executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
+    let (executor, _fatal_error_rx, control_bus, mut producer_txs) = Executor::new(graph);
 
 
     // Store the handle to the new pipeline
     *handle_guard = Some(PipelineHandle {
         id: pipeline_id.clone(),
         executor: Some(executor),
-        input_tx,
-        control_tx,
+        input_tx: producer_txs.remove("eeg_source"),
+        control_bus,
     });
 
     (StatusCode::OK, "Pipeline started successfully").into_response()
@@ -236,10 +240,7 @@ pub async fn control_handler(
     tracing::info!("Received control command: {:?}", payload);
 
     if let Some(ref mut handle) = *state.pipeline_handle.lock().await {
-        if handle.control_tx.send(payload).is_err() {
-            tracing::error!("Failed to send control command to pipeline");
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Command failed").into_response();
-        }
+        handle.control_bus.send_all(payload);
         (StatusCode::ACCEPTED, "Command received").into_response()
     } else {
         (StatusCode::NOT_FOUND, "No pipeline running").into_response()

@@ -40,7 +40,7 @@ impl Stage for Filter {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
-        Ok(Some(packet))
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
+        Ok(vec![("out".to_string(), packet)])
     }
 }

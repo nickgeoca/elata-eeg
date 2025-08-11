@@ -3,6 +3,15 @@
 use sensors::DriverError;
 use thiserror::Error;
 
+use crate::graph::StageId;
+use std::any::Any;
+
+/// A struct to wrap fatal errors (panics) with more context.
+#[derive(Debug)]
+pub struct FatalError {
+    pub stage_id: StageId,
+    pub error: Box<dyn Any + Send>,
+}
 /// Pipeline-specific error types
 #[derive(Error, Debug)]
 pub enum PipelineError {
@@ -103,6 +112,8 @@ pub enum StageError {
     StreamClosed,
     #[error("driver error: {0}")]
     Driver(#[from] DriverError),
+    #[error("driver error: {0}")]
+    DriverError(String),
 }
 
 impl From<serde_json::Error> for StageError {

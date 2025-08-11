@@ -11,7 +11,7 @@ use eeg_types::comms::pipeline::BrokerMessage;
 use clap::{Arg, Command};
 use pipeline::config::SystemConfig;
 use pipeline::control::PipelineEvent;
-use pipeline::executor::Executor;
+use pipeline::executor::{ControlBus, Executor};
 use sensors::{
     mock_eeg::driver::MockDriver,
     types::{AdcConfig, AdcDriver, DriverError},
@@ -80,12 +80,12 @@ async fn main() -> Result<(), DriverError> {
         .and_then(|t| t.as_str())
         .unwrap_or("Mock");
 
-    let driver: Option<Arc<tokio::sync::Mutex<Box<dyn AdcDriver + Send>>>> = if use_mock || driver_type == "Mock" {
+    let driver: Option<Arc<std::sync::Mutex<Box<dyn AdcDriver + Send>>>> = if use_mock || driver_type == "Mock" {
         tracing::info!("Using mock EEG driver");
         // Parse the driver configuration from the pipeline
         let adc_config: AdcConfig = serde_json::from_value(driver_config_value.clone())
             .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
-        Some(Arc::new(tokio::sync::Mutex::new(Box::new(MockDriver::new(
+        Some(Arc::new(std::sync::Mutex::new(Box::new(MockDriver::new(
             adc_config,
         )?))))
     } else {
@@ -95,7 +95,7 @@ async fn main() -> Result<(), DriverError> {
             .map_err(|e| DriverError::ConfigurationError(e.to_string()))?;
         let mut driver_instance = ElataV2Driver::new(adc_config)?;
         driver_instance.initialize()?;
-        Some(Arc::new(tokio::sync::Mutex::new(Box::new(driver_instance))))
+        Some(Arc::new(std::sync::Mutex::new(Box::new(driver_instance))))
     };
 
 
@@ -117,31 +117,35 @@ async fn main() -> Result<(), DriverError> {
     };
     tracing::info!("Pipeline graph built.");
 
-    let (executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
+    let (executor, fatal_error_rx, control_bus, mut producer_txs) = Executor::new(graph);
     tracing::info!("Default pipeline executor started.");
 
 
     let pipeline_handle = Arc::new(tokio::sync::Mutex::new(Some(PipelineHandle {
         id: "default".to_string(),
         executor: Some(executor),
-        input_tx,
-        control_tx,
+        control_bus,
+        input_tx: producer_txs.remove("eeg_source"),
     })));
 
     // Spawn a task to listen for fatal errors from the default pipeline
     let pipeline_handle_clone = pipeline_handle.clone();
     let fatal_error_sse_tx = sse_tx.clone();
     let fatal_error_handle = tokio::spawn(async move {
-        if let Ok(panic_payload) = fatal_error_rx.recv_async().await {
-            tracing::error!("Fatal pipeline error detected in default pipeline. Shutting down.");
+        if let Ok(fatal_error) = fatal_error_rx.recv_async().await {
+            tracing::error!(
+                "Fatal pipeline error in stage '{}'. Shutting down.",
+                fatal_error.stage_id
+            );
 
-            let error_msg = if let Some(s) = panic_payload.downcast_ref::<&'static str>() {
-                s.to_string()
-            } else if let Some(s) = panic_payload.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "Unknown panic payload".to_string()
-            };
+            let error_msg =
+                if let Some(s) = fatal_error.error.downcast_ref::<&'static str>() {
+                    s.to_string()
+                } else if let Some(s) = fatal_error.error.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "Unknown panic payload".to_string()
+                };
 
             if let Some(mut handle) = pipeline_handle_clone.lock().await.take() {
                 if let Some(executor) = handle.executor.take() {

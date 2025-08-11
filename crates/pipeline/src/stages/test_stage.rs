@@ -36,9 +36,9 @@ impl Stage for StatefulTestStage {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         // Pass data through unmodified
-        Ok(Some(packet))
+        Ok(vec![("out".to_string(), packet)])
     }
 
     fn control(

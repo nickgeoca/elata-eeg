@@ -13,7 +13,7 @@ use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use tokio::sync::broadcast;
 
 use sensors::types::AdcDriver;
@@ -32,15 +32,30 @@ pub enum StageMode {
 /// Represents a node in the pipeline graph.
 pub struct PipelineNode {
     pub name: StageId,
-    pub stage: Box<dyn Stage>,
+    pub stage: Arc<Mutex<Box<dyn Stage>>>,
     pub input_source: Option<StageId>,
     pub state: StageState,
-    pub policy: Box<dyn StagePolicy>,
+    pub policy: Arc<Box<dyn StagePolicy>>,
     pub mode: StageMode,
     pub producer_rx: Option<Receiver<Arc<RtPacket>>>,
 }
 
+impl Clone for PipelineNode {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            stage: self.stage.clone(),
+            input_source: self.input_source.clone(),
+            state: self.state,
+            policy: self.policy.clone(),
+            mode: self.mode,
+            producer_rx: self.producer_rx.clone(),
+        }
+    }
+}
+
 /// Represents the entire pipeline as a graph of connected stages.
+#[derive(Clone)]
 pub struct PipelineGraph {
     pub nodes: HashMap<StageId, PipelineNode>,
     pub context: StageContext,
@@ -90,6 +105,7 @@ impl PipelineGraph {
             };
 
             let (stage, producer_rx) = registry.create_stage(stage_config, &init_ctx)?;
+            let stage = Arc::new(Mutex::new(stage));
             let mode = if producer_rx.is_some() {
                 StageMode::Producer
             } else {
@@ -97,10 +113,8 @@ impl PipelineGraph {
             };
 
             if stage_config.inputs.len() > 1 {
-                return Err(StageError::BadConfig(format!(
-                    "Stage '{}' has more than one input, which is not currently supported.",
-                    stage_config.name
-                )));
+                // This is a temporary check. The new executor will support multiple inputs.
+                // log::warn!("Stage '{}' has more than one input. This is not fully supported yet.", stage_config.name);
             }
             let input_source = stage_config
                 .inputs
@@ -112,7 +126,7 @@ impl PipelineGraph {
                 stage,
                 input_source,
                 state: StageState::Running,
-                policy: Box::new(DefaultPolicy),
+                policy: Arc::new(Box::new(DefaultPolicy)),
                 mode,
                 producer_rx,
             };
@@ -128,9 +142,9 @@ impl PipelineGraph {
                     stage_config.name.clone(),
                 );
             }
-            // For stages without explicit outputs, assume a default output stream.
+            // For stages without explicit outputs, assume a default output stream named "out".
             if stage_config.outputs.is_empty() {
-                available_outputs.insert(stage_config.name.clone(), stage_config.name.clone());
+                available_outputs.insert(format!("{}.out", stage_config.name), stage_config.name.clone());
             }
         }
 
@@ -157,179 +171,6 @@ impl PipelineGraph {
         })
     }
 
-    pub fn get_input_for_stage(&self, stage_id: &StageId) -> Option<StageId> {
-        self.config
-            .stages
-            .iter()
-            .find(|s| &s.name == stage_id)
-            .and_then(|s| s.inputs.first().cloned())
-    }
-
-    /// Computes a topological sort of the stage graph for execution order.
-    /// NOTE: This requires the `petgraph` crate.
-    pub fn topology_sort(&self) -> Vec<StageId> {
-        let mut graph = DiGraph::<&StageConfig, ()>::new();
-        let mut node_map = HashMap::new();
-
-        for stage_config in &self.config.stages {
-            let idx = graph.add_node(stage_config);
-            node_map.insert(&stage_config.name, idx);
-        }
-
-        for stage_config in &self.config.stages {
-            if let Some(input_name) = stage_config.inputs.first() {
-                if let (Some(&from_idx), Some(&to_idx)) =
-                    (node_map.get(input_name), node_map.get(&stage_config.name))
-                {
-                    graph.add_edge(from_idx, to_idx, ());
-                }
-            }
-        }
-
-        match toposort(&graph, None) {
-            Ok(nodes) => nodes
-                .into_iter()
-                .map(|idx| graph[idx].name.clone())
-                .collect(),
-            Err(cycle) => {
-                let cycle_node_name = &graph[cycle.node_id()].name;
-                panic!("Pipeline has a cycle involving stage: {}", cycle_node_name);
-            }
-        }
-    }
-
-    /// Pushes a data packet through the pipeline using the pre-computed topological order.
-    pub fn push(&mut self, pkt: PacketOwned, topo: &[StageId]) -> Result<(), PipelineError> {
-        let mut outputs: HashMap<StageId, Option<Arc<RtPacket>>> = HashMap::new();
-        static mut PACKET_COUNT: u64 = 0;
-
-        // Find the source stage (the one with no inputs) and insert the initial packet.
-        let source_stage_name = self
-            .config
-            .stages
-            .iter()
-            .find(|s| s.inputs.is_empty())
-            .map(|s| s.name.clone())
-            .or_else(|| topo.first().cloned())
-            .ok_or(PipelineError::InvalidConfiguration {
-                message: "No source stage found in the pipeline".to_string(),
-            })?;
-
-        let runtime_packet = match pkt {
-            PacketOwned::RawI32(data) => {
-                let packet_data = crate::data::PacketData {
-                    header: data.header,
-                    samples: data.samples,
-                };
-                RtPacket::RawI32(packet_data)
-            }
-            PacketOwned::Voltage(data) => {
-                // This is a fallback for now.
-                let mut initial_packet = crate::allocator::RecycledF32Vec::new(self.allocator.clone());
-                initial_packet.extend(data.samples.iter());
-                let packet_data = crate::data::PacketData {
-                    header: data.header,
-                    samples: initial_packet,
-                };
-                RtPacket::Voltage(packet_data)
-            }
-            PacketOwned::RawAndVoltage(data) => {
-                // This is a fallback for now.
-                let mut initial_packet =
-                    crate::allocator::RecycledI32F32TupleVec::new(self.allocator.clone());
-                initial_packet.extend(data.samples.iter());
-                let packet_data = crate::data::PacketData {
-                    header: data.header,
-                    samples: initial_packet,
-                };
-                RtPacket::RawAndVoltage(packet_data)
-            }
-        };
-
-        outputs.insert(source_stage_name, Some(Arc::new(runtime_packet)));
-
-        for stage_id in topo {
-            let input_name = self.get_input_for_stage(stage_id);
-            if let Some(node) = self.nodes.get_mut(stage_id) {
-                // Determine the input for the current stage.
-                let input_packet = if let Some(input_name) = input_name {
-                    // This stage takes input from a predecessor.
-                    // We clone the Arc, which is a cheap reference count bump.
-                    outputs.get(&input_name).and_then(|p| p.clone())
-                } else {
-                    // This is a source stage, its input comes from the initial push.
-                    outputs.get(stage_id).and_then(|p| p.clone())
-                };
-
-                // If there's a packet to process, run the stage.
-                if let Some(packet) = input_packet {
-                    if node.state == StageState::Halted {
-                        continue; // Skip halted stages
-                    }
-
-                    let result = node.stage.process(packet, &mut self.context);
-                    match result {
-                        Ok(output) => {
-                            if let Some(ref packet) = output {
-                                let source_id = match &**packet {
-                                    RtPacket::RawI32(d) => &d.header.source_id,
-                                    RtPacket::Voltage(d) => &d.header.source_id,
-                                    RtPacket::RawAndVoltage(d) => &d.header.source_id,
-                                };
-                                outputs.insert(source_id.clone(), Some(packet.clone()));
-                            }
-                            outputs.insert(stage_id.clone(), output);
-                        }
-                        Err(e) => {
-                            let action = node.policy.on_error();
-                            // Emit an ErrorOccurred event
-                            if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::ErrorOccurred {
-                                stage_id: node.name.clone(),
-                                error_message: e.to_string(),
-                            }) {
-                                tracing::error!("Failed to send ErrorOccurred event: {}", e);
-                            }
-                            
-                            match action {
-                                crate::stage::ErrorAction::Fatal => return Err(e.into()),
-                                crate::stage::ErrorAction::SkipPacket => {
-                                    // TODO: Add logging
-                                    continue;
-                                }
-                                crate::stage::ErrorAction::DrainThenStop => {
-                                    node.state = StageState::Draining;
-                                    // In a single-threaded model, we can just halt immediately
-                                    // after the current push finishes.
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // After processing, transition Draining stages to Halted.
-        // In a multi-threaded executor, this logic would be more complex.
-        for node in self.nodes.values_mut() {
-            if node.state == StageState::Draining {
-                node.state = StageState::Halted;
-            }
-        }
-
-        // Increment packet count and emit DataFlowing event every 1000 packets
-        unsafe {
-            PACKET_COUNT += 1;
-            if PACKET_COUNT % 1000 == 0 {
-                if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::DataFlowing {
-                    packet_count: PACKET_COUNT,
-                }) {
-                    tracing::error!("Failed to send DataFlowing event: {}", e);
-                }
-            }
-        }
-        
-        Ok(())
-    }
 
     /// Forwards a control command to all stages in the graph.
     pub fn handle_control_command(&mut self, cmd: &ControlCommand) -> Result<(), PipelineError> {
@@ -343,6 +184,8 @@ impl PipelineGraph {
                         // This is a simplified diff. A real implementation would be more robust.
                         let params_value = serde_json::to_value(&stage_config.params)?;
                         node.stage
+                            .lock()
+                            .unwrap()
                             .reconfigure(&params_value, &mut self.context)?;
                     }
                 }
@@ -357,7 +200,7 @@ impl PipelineGraph {
             ControlCommand::SetParameter { target_stage, parameters } => {
                 // Forward the command to the target stage
                 if let Some(node) = self.nodes.get_mut(target_stage) {
-                    node.stage.control(cmd, &mut self.context)?;
+                    node.stage.lock().unwrap().control(cmd, &mut self.context)?;
                     
                     // Emit a ParameterChanged event
                     for (param_id, value) in parameters.as_object().unwrap_or(&serde_json::Map::new()) {
@@ -373,7 +216,7 @@ impl PipelineGraph {
             }
             ControlCommand::Start => {
                 for node in self.nodes.values_mut() {
-                    node.stage.control(cmd, &mut self.context)?;
+                    node.stage.lock().unwrap().control(cmd, &mut self.context)?;
                     
                     // Emit a StageStarted event
                     if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::StageStarted {
@@ -385,7 +228,7 @@ impl PipelineGraph {
             }
             ControlCommand::Shutdown => {
                 for node in self.nodes.values_mut() {
-                    node.stage.control(cmd, &mut self.context)?;
+                    node.stage.lock().unwrap().control(cmd, &mut self.context)?;
                     
                     // Emit a StageStopped event
                     if let Err(e) = self.context.event_tx.send(crate::control::PipelineEvent::StageStopped {
@@ -397,7 +240,7 @@ impl PipelineGraph {
             }
             _ => {
                 for node in self.nodes.values_mut() {
-                    node.stage.control(cmd, &mut self.context)?;
+                    node.stage.lock().unwrap().control(cmd, &mut self.context)?;
                 }
             }
         }
@@ -414,7 +257,7 @@ impl PipelineGraph {
     /// TODO: This requires a mechanism to downcast `Stage` to `Drains`.
     pub fn flush(&mut self) -> Result<(), PipelineError> {
         for node in self.nodes.values_mut() {
-            if let Some(drains) = node.stage.as_drains() {
+            if let Some(drains) = node.stage.lock().unwrap().as_drains() {
                 drains.flush().map_err(|e| PipelineError::RuntimeError {
                     stage_name: node.name.clone(),
                     message: format!("IO error during flush: {}", e),
@@ -427,4 +270,5 @@ impl PipelineGraph {
     pub fn get_current_config(&self) -> SystemConfig {
         self.config.clone()
     }
+
 }

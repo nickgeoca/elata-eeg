@@ -49,8 +49,8 @@ impl Stage for ToVoltage {
         &mut self,
         pkt: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
-        match PacketView::from(&*pkt) {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
+        let result_packet = match PacketView::from(&*pkt) {
             PacketView::RawI32 { header, data } => {
                 tracing::debug!(
                     stage_id = self.id(),
@@ -61,7 +61,8 @@ impl Stage for ToVoltage {
                     RecycledF32Vec::with_capacity(ctx.allocator.clone(), data.len());
 
                 for &raw_sample in data.iter() {
-                    let voltage = ch_raw_to_voltage(raw_sample, header.meta.v_ref, header.meta.gain);
+                    let voltage =
+                        ch_raw_to_voltage(raw_sample, header.meta.v_ref, header.meta.gain);
                     voltage_samples.push(voltage);
                 }
 
@@ -72,10 +73,11 @@ impl Stage for ToVoltage {
                 output_packet.header.source_id = self.output_name.clone();
                 output_packet.header.packet_type = "Voltage".to_string();
 
-                Ok(Some(Arc::new(RtPacket::Voltage(output_packet))))
+                Arc::new(RtPacket::Voltage(output_packet))
             }
             // If the packet is not RawI32, pass it through.
-            _ => Ok(Some(pkt)),
-        }
+            _ => pkt,
+        };
+        Ok(vec![(self.output_name.clone(), result_packet)])
     }
 }

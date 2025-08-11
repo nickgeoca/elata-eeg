@@ -24,7 +24,7 @@ impl Stage for DoublerStage {
         &mut self,
         packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         if let RtPacket::Voltage(packet_data) = &*packet {
             let mut new_samples = RecycledF32Vec::new(ctx.allocator.clone());
             new_samples.extend(packet_data.samples.iter().map(|s| s * 2.0));
@@ -32,7 +32,7 @@ impl Stage for DoublerStage {
                 header: packet_data.header.clone(),
                 samples: new_samples,
             };
-            Ok(Some(Arc::new(RtPacket::Voltage(new_packet_data))))
+            Ok(vec![("out".to_string(), Arc::new(RtPacket::Voltage(new_packet_data)))])
         } else {
             Err(StageError::BadConfig(
                 "Expected RtPacket::Voltage".to_string(),
@@ -96,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         params: Default::default(),
         inputs: Default::default(),
         outputs: vec![],
+        channel_capacity: None,
     }, &init_ctx)?;
     let mut doubler_stage = DoublerStage;
     let mut ctx = StageContext::new(event_tx, allocator.clone());
@@ -103,14 +104,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Manually process the packet through the pipeline
     // Stage 1: Convert ADC counts to voltage
     let voltage_output = to_voltage_stage.process(input_packet, &mut ctx)?;
-    let voltage_packet = voltage_output.unwrap();
+    let (_, voltage_packet) = voltage_output.into_iter().next().unwrap();
     if let RtPacket::Voltage(d) = &*voltage_packet {
         println!("After ToVoltage: {:?}", d.samples);
     }
 
     // Stage 2: Double the voltage values
     let final_output = doubler_stage.process(voltage_packet, &mut ctx)?;
-    let final_packet = final_output.unwrap();
+    let (_, final_packet) = final_output.into_iter().next().unwrap();
     if let RtPacket::Voltage(d) = &*final_packet {
         println!("After Doubler:   {:?}", d.samples);
     }

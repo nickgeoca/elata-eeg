@@ -29,6 +29,7 @@ futures-util = "0.3"
 log = "0.4"
 nix = { version = "0.27", features = ["signal"] }
 pipeline = { path = "../pipeline" }
+lazy_static = "1.4.0"
 rppal = { version = "0.22.1", features = ["hal"] }
 sensors = { path = "../sensors" }
 serde = { version = "1.0", features = ["derive"] }

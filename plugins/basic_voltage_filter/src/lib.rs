@@ -43,7 +43,7 @@ impl Stage for BasicVoltageFilterPlugin {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         match &*packet {
             RtPacket::RawI32(data) => {
                 let vref = 4.5;
@@ -59,7 +59,7 @@ impl Stage for BasicVoltageFilterPlugin {
 
                 let samples_per_channel = voltage_samples.len() / self.num_channels;
                 if samples_per_channel == 0 {
-                    return Ok(None);
+                    return Ok(vec![]);
                 }
 
                 for channel_idx in 0..self.num_channels {
@@ -82,10 +82,10 @@ impl Stage for BasicVoltageFilterPlugin {
                     samples: (voltage_samples, Default::default()).into(),
                 });
 
-                Ok(Some(Arc::new(new_packet)))
+                Ok(vec![("out".to_string(), Arc::new(new_packet))])
             }
             // Pass through other packet types without modification
-            _ => Ok(Some(packet)),
+            _ => Ok(vec![("out".to_string(), packet)]),
         }
     }
 

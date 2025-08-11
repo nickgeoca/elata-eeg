@@ -7,9 +7,8 @@ use crate::error::StageError;
 use eeg_types::comms::BrokerMessage;
 use flume::Sender;
 use sensors::types::AdcDriver;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
-use tokio::sync::Mutex;
 
 /// The possible states of a stage in the pipeline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,7 +97,16 @@ pub trait Stage: Send + Sync {
         &mut self,
         packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError>;
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError>;
+
+    /// Producer path (actively generates data).
+    /// Default: do nothing this tick.
+    fn produce(
+        &mut self,
+        _ctx: &mut StageContext,
+    ) -> Result<Option<Vec<(String, Arc<RtPacket>)>>, StageError> {
+        Ok(None)
+    }
 
     /// Reconfigures the stage with new parameters.
     ///
@@ -159,7 +167,7 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
         &mut self,
         packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         (**self).process(packet, ctx)
     }
 
@@ -169,6 +177,13 @@ impl<T: Stage + ?Sized> Stage for Box<T> {
         ctx: &mut StageContext,
     ) -> Result<(), StageError> {
         (**self).reconfigure(config, ctx)
+    }
+
+    fn produce(
+        &mut self,
+        ctx: &mut StageContext,
+    ) -> Result<Option<Vec<(String, Arc<RtPacket>)>>, StageError> {
+        (**self).produce(ctx)
     }
 
     fn control(

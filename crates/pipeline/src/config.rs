@@ -26,7 +26,9 @@ pub struct StageConfig {
     pub inputs: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<String>,
-    }
+    #[serde(default)]
+    pub channel_capacity: Option<usize>,
+}
     
     #[cfg(test)]
     mod tests {

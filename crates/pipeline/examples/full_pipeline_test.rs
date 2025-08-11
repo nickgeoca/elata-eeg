@@ -57,7 +57,7 @@ impl Stage for MultiplierStage {
         &mut self,
         packet: Arc<RtPacket>,
         ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         info!("MultiplierStage processing packet");
         if let RtPacket::Voltage(packet_data) = &*packet {
             let mut new_samples = RecycledF32Vec::new(ctx.allocator.clone());
@@ -67,7 +67,10 @@ impl Stage for MultiplierStage {
                 header: packet_data.header.clone(),
                 samples: new_samples,
             };
-            Ok(Some(Arc::new(RtPacket::Voltage(new_packet_data))))
+            Ok(vec![(
+                "out".to_string(),
+                Arc::new(RtPacket::Voltage(new_packet_data)),
+            )])
         } else {
             Err(StageError::BadConfig(
                 "Expected RtPacket::Voltage".to_string(),
@@ -120,11 +123,11 @@ impl Stage for TestSink {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         if let RtPacket::Voltage(packet_data) = &*packet {
             self.output_tx.send(packet_data.samples.len()).unwrap();
         }
-        Ok(None) // Sinks consume the packet
+        Ok(vec![]) // Sinks consume the packet
     }
 }
 
@@ -191,7 +194,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         PipelineGraph::build(&config, &registry, event_tx, Some(test_allocator.clone()), &None, None)?;
 
     // 4. Create and start the executor
-    let (executor, input_tx, _, _) = Executor::new(graph);
+    let (executor, _, _control_bus, mut producer_txs) = Executor::new(graph);
+    let input_tx = producer_txs.remove("eeg_source").unwrap();
 
     // 5. Send a large number of packets into the pipeline
     let num_packets = 1_000;

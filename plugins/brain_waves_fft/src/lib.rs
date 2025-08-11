@@ -40,11 +40,11 @@ impl Stage for BrainWavesFftPlugin {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, pipeline::error::StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, pipeline::error::StageError> {
         if let RtPacket::Voltage(packet_data) = &*packet {
             let samples_per_channel = packet_data.samples.len() / self.num_channels;
             if samples_per_channel == 0 {
-                return Ok(None);
+                return Ok(vec![]);
             }
 
             for ch in 0..self.num_channels {
@@ -80,9 +80,9 @@ impl Stage for BrainWavesFftPlugin {
                 }
             }
 
-            Ok(Some(packet))
+            Ok(vec![("out".to_string(), packet)])
         } else {
-            Ok(None)
+            Ok(vec![])
         }
     }
 }

@@ -42,10 +42,10 @@ impl Stage for Acquire {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         // In this test setup, the Acquire stage is just a pass-through.
         // The test itself is the source of the data.
         debug!("Acquire stage passing packet through.");
-        Ok(Some(packet))
+        Ok(vec![("out".to_string(), packet)])
     }
 }

@@ -32,7 +32,7 @@ impl Stage for WebsocketSink {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> std::result::Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         // 1. Determine the packet type and get header/samples.
         // This also serves as our primary assertion. The `match` is exhaustive,
         // but we only handle the `Voltage` case. Any other packet type will
@@ -83,26 +83,27 @@ impl Stage for WebsocketSink {
             self.last_meta_rev = Some(header.meta.meta_rev);
         }
 
-        // 3. Create and serialize the per-packet data header
-        let data_header = DataPacketHeader::new(header, &self.topic, packet_type);
-        let json_header = serde_json::to_string(&data_header)?;
-        let json_header_bytes = json_header.as_bytes();
-        let json_len = json_header_bytes.len() as u32;
-
-        // 4. Construct the final binary payload: [len][json][samples] (No padding)
-        let mut binary_payload = Vec::with_capacity(4 + json_header_bytes.len() + samples_bytes.len());
-        binary_payload.extend_from_slice(&json_len.to_be_bytes());
-        binary_payload.extend_from_slice(json_header_bytes);
+        // 3. Construct the final binary payload using the standardized header format.
+        // [u32 meta_rev][u64 seq][u64 t0_ns][u32 n_samples][payload...]
+        let n_samples = header.batch_size;
+        let mut binary_payload =
+        	Vec::with_capacity(4 + 8 + 8 + 4 + samples_bytes.len());
+        
+        binary_payload.extend_from_slice(&header.meta.meta_rev.to_le_bytes());
+        binary_payload.extend_from_slice(&header.frame_id.to_le_bytes());
+        binary_payload.extend_from_slice(&header.ts_ns.to_le_bytes());
+        binary_payload.extend_from_slice(&n_samples.to_le_bytes());
         binary_payload.extend_from_slice(samples_bytes);
-
-        // 5. Send the data packet as a single binary message
+      
+        // 4. Send the data packet as a single binary message
         let broker_msg = Arc::new(BrokerMessage::Data {
             topic: self.topic.clone(),
             payload: BrokerPayload::Data(binary_payload),
         });
         let _ = self.sender.send(broker_msg);
 
-        return Ok(None);
+        // This is a sink, so it does not produce any output packets
+        Ok(vec![])
     }
 }
 

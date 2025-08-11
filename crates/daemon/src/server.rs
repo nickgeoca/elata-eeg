@@ -36,7 +36,7 @@ async fn websocket_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(|socket| async move { state.broker.add_client(socket).await })
+    ws.on_upgrade(|socket| async move { state.broker.add_client(socket) })
 }
 
 pub async fn run(

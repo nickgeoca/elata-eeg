@@ -1,42 +1,111 @@
-use sensors::raw::mock_eeg::MockDriver;
-use sensors::AdcDriver;
-use pipeline::bridge::BridgeMsg;
-use pipeline::config::{StageConfig, SystemConfig};
-use pipeline::control::{ControlCommand, PipelineEvent};
-use pipeline::error::StageError;
-use pipeline::graph::PipelineGraph;
-use pipeline::registry::{StageFactory, StageRegistry};
-use pipeline::stage::{Stage};
-use pipeline::stages::test_stage::StatefulTestStage;
-use pipeline::executor::Executor;
-use pipeline::data::RtPacket;
-use pipeline::allocator::PacketAllocator;
+use adc_daemon::websocket_broker::WebSocketBroker;
+use axum::{
+    extract::{ws::WebSocketUpgrade, State},
+    response::IntoResponse,
+    routing::get,
+    Router,
+};
+use eeg_types::comms::{
+	client::{ClientMessage, ServerMessage, SubscribedAck},
+	pipeline::BrokerMessage,
+};
+use futures_util::{SinkExt, StreamExt};
+use pipeline::{
+    config::{StageConfig, SystemConfig},
+    control::{ControlCommand, PipelineEvent},
+    error::StageError,
+    executor::Executor,
+    graph::PipelineGraph,
+    registry::{StageFactory, StageRegistry},
+    stage::{Stage, StageInitCtx},
+    data::RtPacket,
+};
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::broadcast;
-use flume::{Receiver, Sender, TryRecvError};
+use std::{
+    net::SocketAddr,
+    sync::Arc,
+    time::Duration,
+};
+use tokio::{net::TcpListener, sync::broadcast};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
+use flume::Receiver;
+use lazy_static::lazy_static;
 
-use pipeline::stage::StageInitCtx;
+lazy_static! {
+    static ref STATEFUL_TEST_STAGE_TX: std::sync::Mutex<Option<flume::Sender<Arc<RtPacket>>>> = std::sync::Mutex::new(None);
+}
+
+// A simple pass-through stage for testing control-plane functionality.
+struct StatefulTestStage {
+    id: String,
+    state: u32,
+}
+
+impl StatefulTestStage {
+    fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            state: 0,
+        }
+    }
+}
+
+impl Stage for StatefulTestStage {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn process(
+        &mut self,
+        packet: Arc<RtPacket>,
+        _ctx: &mut pipeline::stage::StageContext,
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
+        Ok(vec![("out".to_string(), packet)])
+    }
+
+    fn control(
+        &mut self,
+        cmd: &ControlCommand,
+        ctx: &mut pipeline::stage::StageContext,
+    ) -> Result<(), StageError> {
+        if let ControlCommand::SetTestState(new_state) = cmd {
+            self.state = *new_state;
+            ctx.emit_event(PipelineEvent::TestStateChanged(self.state))?;
+        }
+        Ok(())
+    }
+}
+
 struct StatefulTestStageFactory;
-
 impl StageFactory for StatefulTestStageFactory {
     fn create(
         &self,
         config: &StageConfig,
         _init_ctx: &StageInitCtx,
     ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
-        let (_tx, rx) = flume::unbounded();
-        Ok((
-            Box::new(StatefulTestStage::new(&config.name)),
-            Some(rx),
-        ))
+        let (tx, rx) = flume::unbounded();
+        // This is a producer stage for the test, so we send the TX half to the test
+        // and the RX half to the executor.
+        STATEFUL_TEST_STAGE_TX.lock().unwrap().replace(tx);
+        Ok((Box::new(StatefulTestStage::new(&config.name)), Some(rx)))
     }
 }
 
+
+// A simple sink stage that does nothing.
+struct TestSink;
+impl Stage for TestSink {
+    fn id(&self) -> &str {
+        "test_sink"
+    }
+    fn process(
+        &mut self,
+        _packet: Arc<RtPacket>,
+        _ctx: &mut pipeline::stage::StageContext,
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
+        Ok(vec![])
+    }
+}
 struct TestSinkFactory;
 impl StageFactory for TestSinkFactory {
     fn create(
@@ -48,27 +117,57 @@ impl StageFactory for TestSinkFactory {
     }
 }
 
-struct TestSink;
-impl Stage for TestSink {
-    fn id(&self) -> &str { "test_sink" }
-    fn process(&mut self, _packet: Arc<RtPacket>, _ctx: &mut pipeline::stage::StageContext) -> Result<Option<Arc<RtPacket>>, StageError> {
-        Ok(None)
+/// A test harness to simplify setup and teardown of integrated tests.
+struct TestHarness {
+    pub broker: Arc<WebSocketBroker>,
+    pub server_addr: SocketAddr,
+    pub pipeline_tx: broadcast::Sender<Arc<BrokerMessage>>,
+    _server_handle: tokio::task::JoinHandle<()>,
+}
+
+impl TestHarness {
+    async fn new() -> Self {
+        let (pipeline_tx, pipeline_rx) = broadcast::channel(128);
+        let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
+        broker.clone().start();
+
+        let app = Router::new()
+            .route("/ws", get(ws_handler))
+            .with_state(broker.clone());
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let server_addr = listener.local_addr().unwrap();
+
+        let server_handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        Self {
+            broker,
+            server_addr,
+            pipeline_tx,
+            _server_handle: server_handle,
+        }
+    }
+
+    fn ws_url(&self) -> String {
+        format!("ws://{}/ws", self.server_addr)
     }
 }
 
-/// Sets up a complete, running daemon instance for testing.
-async fn setup_test_daemon() -> (
-    Receiver<PipelineEvent>,
-    Sender<pipeline::control::ControlCommand>,
-    Arc<AtomicBool>,
-    String, // WebSocket address
-    Executor,
-) {
-    let (event_tx, event_rx) = flume::unbounded::<PipelineEvent>();
-    let (bridge_tx, bridge_rx) = flume::unbounded::<BridgeMsg>();
-    let bridge_rx = Arc::new(Mutex::new(bridge_rx));
-    let (error_tx, _) = broadcast::channel::<StageError>(32);
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(broker): State<Arc<WebSocketBroker>>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        broker.add_client(socket);
+    })
+}
 
+#[tokio::test]
+async fn test_full_stack_command_and_shutdown() {
+    // 1. Setup
+    let (event_tx, event_rx) = flume::unbounded();
     let test_config = SystemConfig {
         version: "1.0".to_string(),
         metadata: Default::default(),
@@ -84,258 +183,139 @@ async fn setup_test_daemon() -> (
                 "type": "test_sink",
                 "inputs": ["test_stage_1.out"]
             }))
-            .unwrap()
+            .unwrap(),
         ],
     };
-
-    // --- Pipeline Thread ---
-    let (executor, _input_tx, _fatal_error_rx, control_tx) = {
-        let mut registry = StageRegistry::new();
-        registry.register(
-            "stateful_test_stage",
-            Box::new(StatefulTestStageFactory),
-        );
-        registry.register(
-            "test_sink",
-            Box::new(TestSinkFactory),
-        );
-        let registry = Arc::new(registry);
-        let graph = PipelineGraph::build(
-            &test_config,
-            &registry,
-            event_tx.clone(),
-            None,
-            &None,
-            None,
-        )
-        .unwrap();
-        Executor::new(graph)
-    };
-
-    // --- Sensor Thread ---
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let _sensor_thread_handle = {
-        let config = sensors::AdcConfig {
-            chips: vec![sensors::types::ChipConfig {
-                channels: (0..8).collect(),
-                ..Default::default()
-            }],
-            sample_rate: 1000,
-            ..Default::default()
-        };
-        let mut driver = MockDriver::new(config).unwrap();
-        let stop_flag_clone = stop_flag.clone();
-        thread::spawn(move || {
-            let _ = driver.acquire_batched(1, &stop_flag_clone);
-        })
-    };
-
-    // --- Server ---
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    // Note: The server setup might need adjustment if it relies on tokio mpsc.
-    // For this test, we assume it can be adapted or mocked if necessary.
-    // The `server` module is not fully visible, so we proceed with the assumption
-    // that it can work with a `crossbeam_channel` sender, or that we can adapt it.
-    // let ws_routes = server::setup_websocket_routes(runtime_tx.clone(), error_tx.clone());
-    // let server_handle = tokio::spawn(warp::serve(ws_routes).run_incoming(TcpListenerStream::new(listener)));
-
-    // --- Main Event Loop (simplified for this test) ---
-    let main_loop_handle = {
-        let stop_flag_clone = stop_flag.clone();
-        // The main loop is simplified and doesn't need to send data for this test.
-        // let input_tx_clone = input_tx.clone();
-        let allocator = Arc::new(PacketAllocator::with_capacity(16, 16, 16, 1024));
-        tokio::spawn(async move {
-            loop {
-                if stop_flag_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let msg_result = {
-                    // Lock, try_recv, and then immediately drop the lock
-                    bridge_rx.lock().unwrap().try_recv()
-                };
-
-                match msg_result {
-                    Ok(BridgeMsg::Data(_packet_data)) => {
-                        // Data sending is not needed for this test.
-                    }
-                    Ok(BridgeMsg::Error(_)) => { /* Ignore sensor errors */ }
-                    Err(TryRecvError::Empty) => {
-                        tokio::time::sleep(Duration::from_millis(1)).await;
-                    }
-                    Err(TryRecvError::Disconnected) => {
-                        break; // Sensor thread died.
-                    }
-                }
-            }
-            // server_handle.abort();
-        })
-    };
-
-    (event_rx, control_tx, stop_flag, addr, executor)
-}
-
-#[tokio::test]
-async fn test_full_stack_command_and_shutdown() {
-    // The server part is commented out as it requires more info to fix.
-    // This test will focus on the pipeline and control logic.
-    let (event_rx, control_tx, stop_flag, _addr, executor) = setup_test_daemon().await;
+    let mut registry = StageRegistry::new();
+    registry.register("stateful_test_stage", Box::new(StatefulTestStageFactory));
+    registry.register("test_sink", Box::new(TestSinkFactory));
+    let graph = PipelineGraph::build(&test_config, &registry, event_tx, None, &None, None).unwrap();
+    let (executor, _fatal_error_rx, control_bus, _) = Executor::new(graph);
 
     // 2. Send command to change state
     let cmd = ControlCommand::SetTestState(42);
-    control_tx.send(cmd).unwrap();
+    control_bus.send_all(cmd);
+   
+       // 2a. Send a dummy packet to unblock the producer stage so it can process the control command.
+       let dummy_packet = Arc::new(RtPacket::Voltage(eeg_types::data::PacketData {
+           header: Default::default(),
+           samples: (vec![], Default::default()).into(),
+       }));
+       STATEFUL_TEST_STAGE_TX.lock().unwrap().as_ref().unwrap().send(dummy_packet).unwrap();
+       tokio::time::sleep(Duration::from_millis(100)).await;
+
 
     // 3. Verify the pipeline emits the correct event
     let event = event_rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert_eq!(event, PipelineEvent::TestStateChanged(42));
 
-    // 4. Initiate graceful shutdown
-    control_tx
-        .send(ControlCommand::Shutdown)
-        .unwrap();
-
-    // 5. Signal all threads to stop
-    stop_flag.store(true, Ordering::Relaxed);
-
-    // 6. Wait for the pipeline to shut down
+    // 4. Initiate graceful shutdown and wait for it to complete
     executor.stop();
-
-    // Test passed if it reaches here without panicking
-}
-use adc_daemon::websocket_broker::WebSocketBroker;
-use eeg_types::comms::client::ServerMessage;
-use futures_util::{SinkExt, StreamExt};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-
-use axum::{
-    extract::{
-        ws::WebSocketUpgrade,
-        State,
-    },
-    response::IntoResponse,
-    routing::get,
-    Router,
-};
-
-async fn ws_handler(
-    ws: WebSocketUpgrade,
-    State(broker): State<Arc<WebSocketBroker>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| async move {
-        broker.add_client(socket).await;
-    })
 }
 
 #[tokio::test]
 async fn test_broker_closes_connection_on_invalid_payload() {
     // 1. Setup
-    let (pipeline_tx, pipeline_rx) = broadcast::channel(16);
-    let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
-    broker.clone().start();
+    let harness = TestHarness::new().await;
+    let topic = "eeg_raw".to_string();
 
-    // 2. Setup an Axum server
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .with_state(broker.clone());
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("ws://{}/ws", addr);
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    // 2. Register the topic before the client connects to avoid race condition
+    harness
+        .pipeline_tx
+        .send(Arc::new(BrokerMessage::RegisterTopic {
+            topic: topic.clone(),
+            epoch: 1,
+        }))
+        .unwrap();
+    // Give the broker a moment to process the registration
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 3. Connect a client and subscribe
-    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    let (ws_stream, _) = connect_async(harness.ws_url())
+        .await
+        .expect("Failed to connect");
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    let subscribe_msg = serde_json::to_string(&json!({
-        "type": "subscribe",
-        "topic": "eeg_raw"
-    }))
-    .unwrap();
+    let subscribe_msg = ClientMessage::Subscribe { topic: topic.clone(), epoch: 1 };
     ws_tx
-        .send(Message::Text(subscribe_msg))
+        .send(Message::Text(serde_json::to_string(&subscribe_msg).unwrap()))
         .await
         .unwrap();
-
-    // Give the broker a moment to register the client before checking for the ACK
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4. Wait for subscription ACK
     let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");
     assert!(matches!(ack_msg, Message::Text(_)), "Expected Text message for ACK");
     let ack: ServerMessage = serde_json::from_str(ack_msg.to_text().unwrap()).expect("Failed to parse ACK message");
-    assert_eq!(ack, ServerMessage::Subscribed("eeg_raw".to_string()));
-
-    // Give the server a moment to process the subscription before sending the next message
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+    	ack,
+    	ServerMessage::Subscribed(SubscribedAck {
+    		topic: topic.clone(),
+    		meta_rev: None
+    	})
+    );
 
     // 5. Send a malicious binary payload from the client
-    let binary_payload = vec![0, 1, 2, 3];
     ws_tx
-        .send(Message::Binary(binary_payload))
+        .send(Message::Binary(vec![0, 1, 2, 3]))
         .await
         .unwrap();
 
-    // 7. Verify the connection is closed
-    // The broker should detect the protocol violation and close the connection.
+    // 6. Verify the connection is closed
     loop {
-        match ws_rx.next().await {
-            Some(Ok(Message::Close(_))) => break, // Correctly closed
-            Some(Ok(Message::Ping(_))) => continue, // Ignore pings
-            other => panic!("Expected connection to be closed, but received: {:?}", other),
+        tokio::select! {
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) => break, // Correctly closed
+                    Some(Ok(Message::Ping(_))) => continue, // Ignore pings
+                    other => panic!("Expected connection to be closed, but received: {:?}", other),
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                panic!("Test timed out waiting for connection to close");
+            }
         }
     }
 }
+
 #[tokio::test]
 async fn test_broker_closes_connection_on_malformed_json() {
     // 1. Setup
-    let (pipeline_tx, pipeline_rx) = broadcast::channel(16);
-    let broker = Arc::new(WebSocketBroker::new(pipeline_rx));
-    broker.clone().start();
+    let harness = TestHarness::new().await;
+    let topic = "eeg_raw".to_string();
 
-    // 2. Setup an Axum server
-    let app = Router::new()
-        .route("/ws", get(ws_handler))
-        .with_state(broker.clone());
-
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let url = format!("ws://{}/ws", addr);
-
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
+    // 2. Register the topic before the client connects
+    harness
+        .pipeline_tx
+        .send(Arc::new(BrokerMessage::RegisterTopic {
+            topic: topic.clone(),
+            epoch: 1,
+        }))
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 3. Connect a client and subscribe
-    let (ws_stream, _) = connect_async(&url).await.expect("Failed to connect");
+    let (ws_stream, _) = connect_async(harness.ws_url())
+        .await
+        .expect("Failed to connect");
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    let subscribe_msg = serde_json::to_string(&json!({
-        "type": "subscribe",
-        "topic": "eeg_raw"
-    }))
-    .unwrap();
+    let subscribe_msg = ClientMessage::Subscribe { topic: topic.clone(), epoch: 1 };
     ws_tx
-        .send(Message::Text(subscribe_msg))
+        .send(Message::Text(serde_json::to_string(&subscribe_msg).unwrap()))
         .await
         .unwrap();
-
-    // Give the broker a moment to register the client before checking for the ACK
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // 4. Wait for subscription ACK
     let ack_msg = ws_rx.next().await.expect("Server closed connection before sending ACK").expect("Error receiving ACK");
     assert!(matches!(ack_msg, Message::Text(_)), "Expected Text message for ACK");
     let ack: ServerMessage = serde_json::from_str(ack_msg.to_text().unwrap()).expect("Failed to parse ACK message");
-    assert_eq!(ack, ServerMessage::Subscribed("eeg_raw".to_string()));
-    
-    // Give the server a moment to process the subscription before sending the next message
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+    	ack,
+    	ServerMessage::Subscribed(SubscribedAck {
+    		topic: topic.clone(),
+    		meta_rev: None
+    	})
+    );
 
     // 5. Send a malformed JSON payload from the client
     let malformed_json = r#"{"type": "some_unsupported_action"}"#;
@@ -344,12 +324,19 @@ async fn test_broker_closes_connection_on_malformed_json() {
         .await
         .unwrap();
 
-    // 7. Verify the connection is closed
+    // 6. Verify the connection is closed
     loop {
-        match ws_rx.next().await {
-            Some(Ok(Message::Close(_))) => break, // Correctly closed
-            Some(Ok(Message::Ping(_))) => continue, // Ignore pings
-            other => panic!("Expected connection to be closed, but received: {:?}", other),
+        tokio::select! {
+            msg = ws_rx.next() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) => break, // Correctly closed
+                    Some(Ok(Message::Ping(_))) => continue, // Ignore pings
+                    other => panic!("Expected connection to be closed, but received: {:?}", other),
+                }
+            },
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                panic!("Test timed out waiting for connection to close");
+            }
         }
     }
 }

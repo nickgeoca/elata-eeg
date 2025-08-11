@@ -109,11 +109,11 @@ impl Stage for CsvSink {
         &mut self,
         packet: Arc<RtPacket>,
         _ctx: &mut StageContext,
-    ) -> Result<Option<Arc<RtPacket>>, StageError> {
+    ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         if let RtPacket::RawAndVoltage(packet) = &*packet {
             let is_recording = self.is_recording.lock().unwrap();
             if !*is_recording {
-                return Ok(None); // Not recording, so drop the packet.
+                return Ok(vec![]); // Not recording, so drop the packet.
             }
 
             let mut writer_opt = self.writer.lock().unwrap();
@@ -136,7 +136,9 @@ impl Stage for CsvSink {
             *last_frame_id = Some(packet.header.frame_id);
 
             // Check for file rotation
-            if let (Some(st), Some(max_mins)) = (*start_time, self.params.max_recording_length_minutes) {
+            if let (Some(st), Some(max_mins)) =
+                (*start_time, self.params.max_recording_length_minutes)
+            {
                 if st.elapsed() >= Duration::from_secs(max_mins as u64 * 60) {
                     *writer_opt = None; // Force creation of a new writer
                     *header_written = false;
@@ -167,7 +169,7 @@ impl Stage for CsvSink {
             writeln!(writer, "{}", line)
                 .map_err(|e| StageError::Fatal(format!("Failed to write to CSV: {}", e)))?;
         }
-        Ok(None)
+        Ok(vec![])
     }
 
     fn is_locked(&self) -> bool {
