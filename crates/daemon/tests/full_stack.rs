@@ -10,7 +10,7 @@ use pipeline::stage::{Stage};
 use pipeline::stages::test_stage::StatefulTestStage;
 use pipeline::executor::Executor;
 use pipeline::data::RtPacket;
-use pipeline::allocator::{PacketAllocator, RecycledI32Vec};
+use pipeline::allocator::PacketAllocator;
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -205,24 +205,19 @@ async fn test_full_stack_command_and_shutdown() {
     // Test passed if it reaches here without panicking
 }
 use adc_daemon::websocket_broker::WebSocketBroker;
-use eeg_types::comms::{
-    client::ServerMessage,
-    pipeline::{BrokerMessage, BrokerPayload},
-};
+use eeg_types::comms::client::ServerMessage;
 use futures_util::{SinkExt, StreamExt};
-use tokio::net::TcpStream;
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 use axum::{
     extract::{
-        ws::{WebSocket, WebSocketUpgrade},
+        ws::WebSocketUpgrade,
         State,
     },
     response::IntoResponse,
     routing::get,
     Router,
 };
-use std::net::SocketAddr;
 
 async fn ws_handler(
     ws: WebSocketUpgrade,

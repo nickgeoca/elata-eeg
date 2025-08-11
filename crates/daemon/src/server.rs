@@ -1,20 +1,14 @@
-use crate::{
-    api::{self, AppState},
-    websocket_broker::WebSocketBroker,
-};
+use crate::api::{self, AppState};
 use axum::{
     body::Body,
-    extract::{ConnectInfo, State, WebSocketUpgrade},
+    extract::{State, WebSocketUpgrade},
     response::{IntoResponse, Response},
     routing::get,
 };
 use http::StatusCode;
 use log::error;
-use std::{any::Any, net::SocketAddr, sync::Arc};
-use tower_http::{
-    catch_panic::CatchPanicLayer,
-    cors::{Any as CorsAny, CorsLayer},
-};
+use std::{any::Any, net::SocketAddr};
+use tower_http::cors::{Any as CorsAny, CorsLayer};
 
 fn handle_panic(err: Box<dyn Any + Send + 'static>) -> Response<Body> {
     let details = if let Some(s) = err.downcast_ref::<String>() {

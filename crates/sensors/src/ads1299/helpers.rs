@@ -1,7 +1,6 @@
 //! Helper functions for the ADS1299 driver.
 
 use crate::types::DriverError;
-use log::debug;
 
 /// Convert 24-bit SPI data to a signed 32-bit integer (sign-extended)
 pub fn ch_sample_to_raw(msb: u8, mid: u8, lsb: u8) -> i32 {

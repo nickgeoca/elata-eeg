@@ -1,23 +1,19 @@
-use eeg_types::data::{PacketOwned, SensorMeta};
 use eeg_types::SensorError;
-use log::{debug, error, info, warn};
-use rppal::gpio::{Gpio, OutputPin};
-use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
+use log::info;
+use rppal::gpio::Gpio;
+use rppal::spi::{Bus, Mode};
 use sensors::{
     ads1299::{
         driver::Ads1299Driver,
         registers::{
             self, BIAS_SENSN_REG, CHN_OFF, CHN_REG, CONFIG1_REG, CONFIG2_REG, CONFIG3_REG,
-            CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR, CMD_RDATAC, CMD_START, CMD_WAKEUP,
+            CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, CH1SET_ADDR,
 BIASREF_INT , PD_BIAS , PD_REFBUF, BIAS_SENS_OFF_MASK, SRB1,MUX_NORMAL        },
     },
     spi_bus::SpiBus,
     AdcConfig, AdcDriver, DriverError, DriverStatus,
 };
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
-use std::thread;
-use std::time::Duration;
-use thread_priority::ThreadPriority;
+use std::sync::{atomic::AtomicBool, Arc};
 
 pub struct ElataV1Driver {
     inner: Ads1299Driver,

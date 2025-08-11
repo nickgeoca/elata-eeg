@@ -1,7 +1,5 @@
 //! Common types and traits for sensor drivers
 
-use std::error::Error;
-use std::fmt;
 use std::sync::atomic::AtomicBool;
 
 use eeg_types::SensorError as EegSensorError;

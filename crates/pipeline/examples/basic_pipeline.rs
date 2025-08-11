@@ -1,7 +1,7 @@
 //! Basic pipeline example demonstrating the new, simplified architecture.
 
 use std::sync::Arc;
-use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
+use pipeline::allocator::{PacketAllocator, RecycledF32Vec};
 use eeg_types::SensorMeta;
 use pipeline::data::{RtPacket, PacketData, PacketHeader};
 use pipeline::config::StageConfig;

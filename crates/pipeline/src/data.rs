@@ -1,4 +1,4 @@
-use crate::allocator::{RecycledF32Vec, RecycledI32F32TupleVec, RecycledI32Vec};
+use crate::allocator::{RecycledF32Vec, RecycledI32F32TupleVec};
 pub use eeg_types::data::{PacketData, PacketHeader, PacketOwned};
 
 /// The different types of data packets that can exist in the pipeline at runtime.

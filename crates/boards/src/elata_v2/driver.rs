@@ -1,23 +1,19 @@
-use std::collections::HashMap;
-use std::error::Error;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use flume::{Receiver, Sender, Selector};
-use log::{debug, error, info, warn};
+use flume::Receiver;
+use log::{error, info, warn};
 use rppal::gpio::{Gpio, InputPin, OutputPin, Trigger};
-use rppal::spi::{Bus, Mode, SlaveSelect, Spi};
+use rppal::spi::{Bus, Mode};
 use thread_priority::ThreadPriority;
 
-use eeg_types::data::{PacketData, PacketOwned, SensorMeta};
 use eeg_types::SensorError;
 use sensors::{
     ads1299::registers::{
-        self, BIAS_SENSN_REG, BIAS_SENSP_REG, CH1SET_ADDR, CHN_OFF, CHN_REG, CMD_RDATAC,
-        CMD_RESET, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG,
+        self, CH1SET_ADDR, CHN_REG, CMD_RDATAC, CMD_SDATAC, CMD_STANDBY, CMD_WAKEUP, CONFIG1_REG,
         CONFIG2_REG, CONFIG3_REG, CONFIG4_REG, LOFF_SESP_REG, MISC1_REG, DAISY_DISABLE,
-    BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, DC_TEST, SRB1, MUX_NORMAL, POWER_OFF_CH},
+    BIASREF_INT , PD_BIAS, PD_REFBUF, BIAS_SENS_OFF_MASK, SRB1, MUX_NORMAL, POWER_OFF_CH},
     spi_bus::SpiBus,
     AdcConfig, AdcDriver, DriverError, DriverStatus,
     ads1299::driver::Ads1299Driver,

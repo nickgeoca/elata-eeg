@@ -4,7 +4,7 @@ use eeg_types::comms::{
     client::{ClientMessage, ServerMessage},
     pipeline::{BrokerMessage, BrokerPayload},
 };
-use futures::{stream::FuturesUnordered, FutureExt, SinkExt, Stream, StreamExt};
+use futures::{stream::FuturesUnordered, FutureExt, SinkExt, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -138,7 +138,7 @@ impl WebSocketBroker {
                                                 }
 
                                                 info!("[Client {}] Subscribing to topic: {} with epoch {}", client_id, topic, epoch);
-                                                let mut sub_rx = topic_state_guard.sender.subscribe();
+                                                let sub_rx = topic_state_guard.sender.subscribe();
 
                                                 // Send ACK *before* waiting for the first message
                                                 let ack = ServerMessage::Subscribed(topic.clone());

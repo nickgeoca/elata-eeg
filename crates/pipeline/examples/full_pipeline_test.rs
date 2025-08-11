@@ -1,6 +1,6 @@
 //! A test demonstrating a multi-stage synchronous pipeline.
 
-use pipeline::allocator::{PacketAllocator, RecycledF32Vec, RecycledI32Vec};
+use pipeline::allocator::{PacketAllocator, RecycledF32Vec};
 use pipeline::config::{StageConfig, SystemConfig};
 use eeg_types::SensorMeta;
 use pipeline::data::{PacketData, PacketHeader, RtPacket};

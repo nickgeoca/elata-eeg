@@ -47,10 +47,10 @@ fn test_full_static_pipeline() {
 
     // 4. Build the graph
     let graph =
-        crate::graph::PipelineGraph::build(&config, &registry, event_tx.clone(), None, &None).unwrap();
+        crate::graph::PipelineGraph::build(&config, &registry, event_tx.clone(), None, &None, None).unwrap();
 
     // 5. Run the pipeline in a separate task
-    let (executor, _input_tx, _) = Executor::new(graph);
+    let (executor, _input_tx, _, _) = Executor::new(graph);
 
     // 6. Send a shutdown command
     executor.stop();

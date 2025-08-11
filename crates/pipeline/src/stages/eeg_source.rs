@@ -3,7 +3,6 @@
 //! This stage is responsible for interfacing with EEG hardware drivers,
 //! acquiring raw data in batches, and forwarding it into the pipeline.
 
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
@@ -13,7 +12,7 @@ use tokio::task::{self, JoinHandle};
 
 use serde::Deserialize;
 
-use sensors::types::{AdcConfig, AdcDriver, DriverError};
+use sensors::types::{AdcConfig, AdcDriver};
 
 use crate::config::StageConfig;
 use crate::data::{PacketData, PacketHeader, RtPacket};

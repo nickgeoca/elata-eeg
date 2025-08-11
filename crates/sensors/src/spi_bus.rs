@@ -62,7 +62,7 @@ impl SpiBus {
         read_buffer: &mut [u8],
         write_buffer: &[u8],
     ) -> Result<(), DriverError> {
-        let mut spi = self.spi.lock().unwrap();
+        let spi = self.spi.lock().unwrap();
 
         cs_pin.set_high();
 

@@ -4,7 +4,6 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use flume::{Receiver, Sender};
 use log::{debug, info, warn};
 use rppal::gpio::OutputPin;
 

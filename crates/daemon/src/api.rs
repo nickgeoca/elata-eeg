@@ -1,6 +1,5 @@
 use axum::{
     extract::{
-        ws::{WebSocket, WebSocketUpgrade},
         FromRef, Path, State,
     },
     http::StatusCode,
@@ -8,10 +7,7 @@ use axum::{
     routing::post,
     Router,
 };
-use futures::{
-    stream::{self, Stream, StreamExt},
-    Future,
-};
+use futures::stream::{self, Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;

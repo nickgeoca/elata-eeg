@@ -1,6 +1,6 @@
 //! Pipeline graph construction and management.
 
-use crate::allocator::{PacketAllocator, RecycledI32Vec, SharedPacketAllocator};
+use crate::allocator::{PacketAllocator, SharedPacketAllocator};
 use crate::config::{SystemConfig, StageConfig};
 use crate::control::ControlCommand;
 use crate::data::{PacketOwned, RtPacket};
@@ -8,7 +8,7 @@ use crate::error::{PipelineError, StageError};
 use crate::registry::StageRegistry;
 use crate::stage::{DefaultPolicy, Stage, StageContext, StagePolicy, StageState};
 use eeg_types::comms::BrokerMessage;
-use flume::{Receiver, Sender};
+use flume::Receiver;
 use petgraph::algo::toposort;
 use petgraph::graph::DiGraph;
 use std::collections::HashMap;

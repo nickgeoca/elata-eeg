@@ -117,7 +117,7 @@ async fn main() -> Result<(), DriverError> {
     };
     tracing::info!("Pipeline graph built.");
 
-    let (mut executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
+    let (executor, input_tx, fatal_error_rx, control_tx) = Executor::new(graph);
     tracing::info!("Default pipeline executor started.");
 
 

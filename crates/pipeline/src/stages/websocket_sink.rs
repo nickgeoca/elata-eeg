@@ -3,7 +3,6 @@ use std::sync::Arc;
 use eeg_types::comms::pipeline::{BrokerMessage, BrokerPayload};
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use tracing::info;
 
 use crate::{
     data::RtPacket,

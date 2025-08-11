@@ -77,7 +77,6 @@ impl Debug for ControlCommand {
 
 /// Events sent from the pipeline back to the control plane (e.g., the `device` crate).
 use eeg_types::data::SensorMeta;
-use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
 pub enum PipelineEvent {

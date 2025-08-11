@@ -2,8 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use log::{info, warn, debug};
-use crate::types::AdcDriver;
+use log::{info, debug};
 use lazy_static::lazy_static;
 
 use crate::types::{AdcConfig, DriverStatus, DriverError};
