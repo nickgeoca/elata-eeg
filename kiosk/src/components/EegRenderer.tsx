@@ -59,6 +59,8 @@ export const EegRenderer = React.memo(function EegRenderer({
   const vbos      = useRef<WebGLBuffer[]>([]);
   const cpuY      = useRef<Float32Array[]>([]);
   const rafId     = useRef<number>(0);
+  const workerRef = useRef<Worker | null>(null);
+  const ringBufferRef = useRef<SharedArrayBuffer | null>(null);
 
   const NCH   = config.channels.length;
   const NPTS  = config.samplesPerLine ?? 1024;
@@ -104,7 +106,21 @@ export const EegRenderer = React.memo(function EegRenderer({
       cpuY.current.push(arr); // keep same reference, we’ll mutate y’s
     }
 
+    // Initialize worker
+    if (typeof SharedArrayBuffer !== 'undefined' && typeof Worker !== 'undefined') {
+        const worker = new Worker(new URL('../workers/eegProcessor.worker.ts', import.meta.url));
+        workerRef.current = worker;
+        const buffer = new SharedArrayBuffer(NPTS * Float32Array.BYTES_PER_ELEMENT);
+        ringBufferRef.current = buffer;
+        worker.postMessage({ type: 'init', payload: { buffer } });
+    } else {
+        console.warn("SharedArrayBuffer or Worker is not available. Using a less performant fallback.");
+    }
+
     return () => {
+      if (workerRef.current) {
+        workerRef.current.terminate();
+      }
       cancelAnimationFrame(rafId.current);
       const gl = glRef.current;
       const prog = program.current;
@@ -142,71 +158,76 @@ export const EegRenderer = React.memo(function EegRenderer({
     const draw = () => {
       // 1. ingest new EEG samples and shift data
       const chunks = dataBuffer.getAndClearData();
-      // Process all available chunks to keep the visualization as real-time as possible,
-      // but be mindful of performance. The underlying data handling should be efficient.
-      if (chunks.length > 0) {
-        // 1. De-interleave all incoming samples into per-channel batches
-        const batches: number[][] = Array.from({ length: NCH }, () => []);
-        chunks.forEach(chk => {
-          const samples = chk.samples;
-          const numMetaChannels = chk.meta.channel_names.length;
-          if (numMetaChannels === 0) return;
-
-          // Performance workaround: If we are in single-channel mode (NCH=1),
-          // we assume the data is not interleaved. This is to counteract a
-          // suspected issue where the backend sends 1-channel data but the
-          // metadata still reports 8 channels, causing the de-interleaving
-          // logic to discard 7/8th of the samples and leading to a very
-          // expensive data-shifting operation on the CPU.
-          if (NCH === 1) {
-            const batch = batches[0];
-            if (batch) {
-              for (let i = 0; i < samples.length; i++) {
-                batch.push(samples[i]);
-              }
-            }
-          } else {
-            // Original logic for correctly interleaved multi-channel data.
-            for (let i = 0; i < samples.length; i++) {
-              const channelIndex = i % numMetaChannels;
-              if (channelIndex < NCH) {
-                batches[channelIndex].push(samples[i]);
-              }
-            }
-          }
+      if (chunks.length > 0 && workerRef.current && ringBufferRef.current) {
+        chunks.forEach(chunk => {
+          workerRef.current?.postMessage({ type: 'data', payload: chunk });
         });
+      }
 
-        // 2. Update WebGL buffers with the new batches
+      if (ringBufferRef.current) {
+        const ringBuffer = new Float32Array(ringBufferRef.current);
         for (let ch = 0; ch < NCH; ch++) {
-          if (!batches[ch].length) continue;
-
-          const ary = cpuY.current[ch]; // Interleaved (x,y,x,y,...) array
-          const newVals = batches[ch];
-          const numNew = newVals.length;
-
-          if (numNew >= NPTS) {
-            // If new data is more than the buffer can hold, just take the latest
-            const latestVals = newVals.slice(-NPTS);
-            for (let i = 0; i < NPTS; i++) {
-              ary[i * 2 + 1] = latestVals[i]; // Update Y value
-            }
-          } else {
-            const numExisting = NPTS - numNew;
-            // Shift existing Y values to the left
-            for (let i = 0; i < numExisting; i++) {
-              ary[i * 2 + 1] = ary[(i + numNew) * 2 + 1];
-            }
-            // Append new Y values to the end
-            for (let i = 0; i < numNew; i++) {
-              ary[(numExisting + i) * 2 + 1] = newVals[i];
-            }
+          const ary = cpuY.current[ch];
+          const data = ringBuffer.slice(); // In a real scenario, you'd read only new data
+          for (let i = 0; i < NPTS; i++) {
+            ary[i * 2 + 1] = data[i];
           }
-
-          // Upload the entire modified buffer
           gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
           gl.bufferSubData(gl.ARRAY_BUFFER, 0, ary);
         }
+      } else {
+        // Fallback rendering when SharedArrayBuffer is not available
+        if (chunks.length > 0) {
+          const batches: number[][] = Array.from({ length: NCH }, () => []);
+          chunks.forEach(chk => {
+            const samples = chk.samples;
+            const numMetaChannels = chk.meta.channel_names.length;
+            if (numMetaChannels === 0) return;
+
+            if (NCH === 1) {
+                const batch = batches[0];
+                if (batch) {
+                    for (let i = 0; i < samples.length; i++) {
+                        batch.push(samples[i]);
+                    }
+                }
+            } else {
+                for (let i = 0; i < samples.length; i++) {
+                    const channelIndex = i % numMetaChannels;
+                    if (channelIndex < NCH) {
+                        batches[channelIndex].push(samples[i]);
+                    }
+                }
+            }
+        });
+
+        for (let ch = 0; ch < NCH; ch++) {
+            if (!batches[ch] || !batches[ch].length) continue;
+
+            const ary = cpuY.current[ch];
+            const newVals = batches[ch];
+            const numNew = newVals.length;
+
+            if (numNew >= NPTS) {
+                const latestVals = newVals.slice(-NPTS);
+                for (let i = 0; i < NPTS; i++) {
+                    ary[i * 2 + 1] = latestVals[i];
+                }
+            } else {
+                const numExisting = NPTS - numNew;
+                for (let i = 0; i < numExisting; i++) {
+                    ary[i * 2 + 1] = ary[(i + numNew) * 2 + 1];
+                }
+                for (let i = 0; i < numNew; i++) {
+                    ary[(numExisting + i) * 2 + 1] = newVals[i];
+                }
+            }
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, vbos.current[ch]);
+            gl.bufferSubData(gl.ARRAY_BUFFER, 0, ary);
+        }
       }
+    }
 
       // 2. draw
       gl.clear(gl.COLOR_BUFFER_BIT);

@@ -67,6 +67,7 @@ interface EegDataProviderProps {
 export const EegDataProvider = ({ children }: EegDataProviderProps) => {
   const rawSamplesRef = useRef<SampleChunk[]>([]);
   const configUpdateTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const animationFrameIdRef = useRef<number | null>(null);
   const [dataVersion, setDataVersion] = useState(0);
   const [fftData, setFftData] = useState<Record<number, number[]>>({});
   const [fullFftPacket, setFullFftPacket] = useState<FftPacket | null>(null);
@@ -183,14 +184,21 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, []);
 
-  const handleSamples = useCallback((newChunk: SampleChunk) => {
-    const now = Date.now();
-    
-    // The new chunk is now directly what we want to store.
-    const newSamples = [...rawSamplesRef.current, newChunk];
-    sampleTimestamps.current.push(now);
+  const incomingDataQueueRef = useRef<SampleChunk[]>([]);
 
-    // Enforce a hard limit on the number of chunks to prevent memory leaks
+  const processDataQueue = useCallback(() => {
+    if (incomingDataQueueRef.current.length === 0) {
+      animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
+      return;
+    }
+
+    const newChunks = incomingDataQueueRef.current;
+    incomingDataQueueRef.current = [];
+
+    const now = Date.now();
+    const newSamples = [...rawSamplesRef.current, ...newChunks];
+    newChunks.forEach(() => sampleTimestamps.current.push(now));
+
     if (newSamples.length > MAX_SAMPLE_CHUNKS) {
       const excess = newSamples.length - MAX_SAMPLE_CHUNKS;
       sampleTimestamps.current.splice(0, excess);
@@ -198,21 +206,32 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     } else {
       rawSamplesRef.current = newSamples;
     }
-    
+
     setDataVersion(v => v + 1);
-    // Always update data received status when we get new data
     handleDataUpdateRef.current(true);
-    
-    // Publish the new data to all subscribers. We wrap it in an array to maintain
-    // the existing callback signature which expects an array of chunks.
-    Object.values(rawDataSubscribersRef.current.raw).forEach(callback => callback([newChunk]));
-    
-    // Periodic cleanup of old data (every 10 seconds)
+
+    Object.values(rawDataSubscribersRef.current.raw).forEach(callback => callback(newChunks));
+
     if (now - lastCleanupTime.current > 10000) {
       cleanupOldData();
       lastCleanupTime.current = now;
     }
+
+    animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
   }, [cleanupOldData]);
+
+  useEffect(() => {
+    animationFrameIdRef.current = requestAnimationFrame(processDataQueue);
+    return () => {
+      if (animationFrameIdRef.current) {
+        cancelAnimationFrame(animationFrameIdRef.current);
+      }
+    };
+  }, [processDataQueue]);
+
+  const handleSamples = useCallback((newChunk: SampleChunk) => {
+    incomingDataQueueRef.current.push(newChunk);
+  }, []);
 
   const handleFftData = useCallback((data: FftPacket) => {
     setFullFftPacket(data); // Store the full packet

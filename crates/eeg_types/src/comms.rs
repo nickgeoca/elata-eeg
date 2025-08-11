@@ -25,6 +25,16 @@ pub mod pipeline {
             epoch: u32,
         },
     }
+
+    #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+    pub struct DataPacketHeader {
+        pub topic: String,
+        pub packet_type: String,
+        pub ts_ns: u64,
+        pub batch_size: u32,
+        pub num_channels: u32,
+        pub meta_rev: u32,
+    }
 }
 
 pub use pipeline::*;

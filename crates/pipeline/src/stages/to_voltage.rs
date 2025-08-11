@@ -34,8 +34,7 @@ pub struct ToVoltage {
 
 impl ToVoltage {
     pub fn new(id: String, outputs: Vec<String>) -> Self {
-        let output_name =
-            format!("{}.{}", id, outputs.get(0).cloned().unwrap_or_else(|| "0".to_string()));
+        let output_name = outputs.get(0).cloned().unwrap_or_else(|| "out".to_string());
         Self { id, output_name }
     }
 }
@@ -70,7 +69,7 @@ impl Stage for ToVoltage {
                     header: header.clone(),
                     samples: voltage_samples,
                 };
-                output_packet.header.source_id = self.output_name.clone();
+                output_packet.header.source_id = format!("{}.{}", self.id, self.output_name);
                 output_packet.header.packet_type = "Voltage".to_string();
 
                 Arc::new(RtPacket::Voltage(output_packet))

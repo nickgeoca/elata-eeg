@@ -31,6 +31,8 @@ const wsProxy = createProxyMiddleware({
 
 app.prepare().then(() => {
   createServer((req, res) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
     const parsedUrl = parse(req.url, true);
     const { pathname } = parsedUrl;
 

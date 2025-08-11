@@ -46,10 +46,13 @@ impl StageFactory for EegSourceFactory {
             config.name.clone(),
             driver,
             params.batch_size,
-            params.outputs.clone(),
+            config.outputs.clone(),
             init_ctx.event_tx.clone(),
         )?;
-        Ok((Box::new(stage), None))
+
+        // Create a channel for this producer stage
+        let (_tx, rx) = flume::unbounded();
+        Ok((Box::new(stage), Some(rx)))
     }
 }
 

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use eeg_types::comms::pipeline::{BrokerMessage, BrokerPayload};
+use eeg_types::comms::pipeline::{BrokerMessage, BrokerPayload, DataPacketHeader};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 
@@ -34,9 +34,6 @@ impl Stage for WebsocketSink {
         _ctx: &mut StageContext,
     ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         // 1. Determine the packet type and get header/samples.
-        // This also serves as our primary assertion. The `match` is exhaustive,
-        // but we only handle the `Voltage` case. Any other packet type will
-        // trigger the panic, immediately revealing a pipeline wiring issue.
         let (header, samples_bytes, packet_type) = match &*packet {
             RtPacket::Voltage(data) => (
                 &data.header,
@@ -49,7 +46,6 @@ impl Stage for WebsocketSink {
                 "VoltageF32",
             ),
             other => {
-                // Panic if we receive any packet type other than Voltage.
                 panic!(
                     "websocket_sink received unexpected packet type: {:?}. This indicates a misconfigured pipeline.",
                     other
@@ -84,19 +80,28 @@ impl Stage for WebsocketSink {
             self.last_meta_rev = Some(header.meta.meta_rev);
         }
 
-        // 3. Construct the final binary payload using the standardized header format.
-        // [u32 meta_rev][u64 seq][u64 t0_ns][u32 n_samples][payload...]
-        let n_samples = header.batch_size;
+        // 3. Construct the data packet header
+        let data_packet_header = DataPacketHeader {
+            topic: self.topic.clone(),
+            packet_type: packet_type.to_string(),
+            ts_ns: header.ts_ns,
+            batch_size: header.batch_size,
+            num_channels: header.num_channels,
+            meta_rev: header.meta.meta_rev,
+        };
+        let header_json = serde_json::to_string(&data_packet_header)?;
+        let header_bytes = header_json.as_bytes();
+        let header_len = header_bytes.len() as u32;
+
+        // 4. Construct the final binary payload
+        // [u32 json_len][json_header][samples]
         let mut binary_payload =
-        	Vec::with_capacity(4 + 8 + 8 + 4 + samples_bytes.len());
-        
-        binary_payload.extend_from_slice(&header.meta.meta_rev.to_le_bytes());
-        binary_payload.extend_from_slice(&header.frame_id.to_le_bytes());
-        binary_payload.extend_from_slice(&header.ts_ns.to_le_bytes());
-        binary_payload.extend_from_slice(&n_samples.to_le_bytes());
+            Vec::with_capacity(4 + header_bytes.len() + samples_bytes.len());
+        binary_payload.extend_from_slice(&header_len.to_be_bytes()); // Use big-endian for network byte order
+        binary_payload.extend_from_slice(header_bytes);
         binary_payload.extend_from_slice(samples_bytes);
-      
-        // 4. Send the data packet as a single binary message
+
+        // 5. Send the data packet as a single binary message
         let broker_msg = Arc::new(BrokerMessage::Data {
             topic: self.topic.clone(),
             payload: BrokerPayload::Data(binary_payload.into()),
