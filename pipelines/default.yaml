@@ -25,6 +25,18 @@ stages:
       - "eeg_source.raw_data"
     outputs: ["voltage_data"]
 
+  - name: "filter"
+    type: "gui_filter"
+    params:
+      channels: 2
+      high_pass: 16
+      low_pass: 40.0
+      notch: 60.0
+      output: "filtered_data"
+    inputs:
+      - "to_voltage.voltage_data"
+    outputs: ["filtered_data"]
+
   - name: "csv_sink"
     type: "csv_sink"
     params:
@@ -38,4 +50,4 @@ stages:
     params:
       topic: "eeg_voltage"
     inputs:
-      - "to_voltage.voltage_data"
+      - "filter.filtered_data"

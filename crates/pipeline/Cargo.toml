@@ -29,6 +29,7 @@ boards = { path = "../boards", features = ["elata_v1", "elata_v2"] }
 byteorder = "1.4.3"
 bytemuck = { version = "1.12", features = ["derive"] }
 futures = "0.3"
+biquad = "0.4"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

@@ -9,6 +9,7 @@ pub mod filter;
 pub mod test_stage;
 pub mod to_voltage;
 pub mod websocket_sink;
+pub mod gui_filter;
 
 pub use acquire::AcquireFactory;
 pub use csv_sink::CsvSinkFactory;
@@ -17,6 +18,7 @@ pub use filter::FilterFactory;
 pub use test_stage::StatefulTestStage;
 pub use to_voltage::ToVoltageFactory;
 pub use websocket_sink::WebsocketSinkFactory;
+pub use gui_filter::TripleIirFactory;
 
 /// Registers all built-in stages with the provided registry.
 pub fn register_builtin_stages(registry: &mut StageRegistry) {
@@ -29,4 +31,5 @@ pub fn register_builtin_stages(registry: &mut StageRegistry) {
         "websocket_sink",
         Box::new(WebsocketSinkFactory::default()),
     );
+    registry.register("gui_filter", Box::new(TripleIirFactory::default()));
 }
