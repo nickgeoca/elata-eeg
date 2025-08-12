@@ -1,4 +1,4 @@
-import {useRef, useCallback} from 'react';
+import {useRef, useCallback, useMemo} from 'react';
 
 export function useDataBuffer<T>(maxSize: number) {
   const buffer = useRef<T[]>([]);
@@ -23,5 +23,5 @@ export function useDataBuffer<T>(maxSize: number) {
     buffer.current = [];
   }, []);
 
-  return {addData, getAndClearData, clear};
+  return useMemo(() => ({addData, getAndClearData, clear}), [addData, getAndClearData, clear]);
 }

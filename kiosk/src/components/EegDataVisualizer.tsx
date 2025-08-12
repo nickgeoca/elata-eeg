@@ -18,42 +18,42 @@ export default function EegDataVisualizer({ activeView, config, uiVoltageScaleFa
   const containerRef = useRef<HTMLDivElement>(null);
   const [viewReadyState, setViewReadyState] = useState({ signalGraph: false, appletBrainWaves: false });
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
-  const signalGraphBuffer = useDataBuffer<SampleChunk>();
+  const signalGraphBuffer = useDataBuffer<SampleChunk>(1000);
 
   const { subscribeRaw } = useEegData();
   const { fftData, fullFftPacket } = useEegDynamicData();
 
-  // Effect for all data subscriptions
+  // Effect for managing raw data subscription for the signal graph
   useEffect(() => {
-    // Always clean up previous subscriptions on re-run
-    let unsubRaw: (() => void) | null = null;
-    let isSubscribedToFft = false;
+    let unsubscribe: (() => void) | null = null;
 
     if (activeView === 'signalGraph') {
-      const targetBuffer = signalGraphBuffer;
-      console.log(`[Visualizer] Subscribing to raw data for ${activeView}.`);
-      targetBuffer.clear();
-      unsubRaw = subscribeRaw((newSampleChunks) => {
+      console.log('[Visualizer] Subscribing to raw data for signalGraph.');
+      // Clear previous data to ensure a fresh start
+      signalGraphBuffer.clear();
+      
+      unsubscribe = subscribeRaw((newSampleChunks) => {
         if (newSampleChunks.length > 0) {
-          targetBuffer.addData(newSampleChunks);
+          signalGraphBuffer.addData(newSampleChunks);
         }
       });
-    } else if (activeView === 'appletBrainWaves') {
-      console.log('[Visualizer] Subscribing to Fft');
-      isSubscribedToFft = true;
-      setViewReadyState(s => ({ ...s, appletBrainWaves: true }));
     }
 
-    // Return a cleanup function that handles all cases
+    // Cleanup function to unsubscribe when the component unmounts or dependencies change
     return () => {
-      if (unsubRaw) {
-        console.log(`[Visualizer] Unsubscribing from raw data for view: ${activeView}`);
-        unsubRaw();
-      }
-      if (isSubscribedToFft) {
-        console.log('[Visualizer] Unsubscribing from Fft');
+      if (unsubscribe) {
+        console.log('[Visualizer] Unsubscribing from raw data for signalGraph.');
+        unsubscribe();
       }
     };
+  }, [activeView, subscribeRaw]);
+
+  // Effect for managing FFT data subscription
+  useEffect(() => {
+    if (activeView === 'appletBrainWaves') {
+      console.log('[Visualizer] View is appletBrainWaves, FFT data is handled by EegDataContext.');
+      setViewReadyState(s => ({ ...s, appletBrainWaves: true }));
+    }
   }, [activeView]);
 
   // Effect to setup ResizeObserver

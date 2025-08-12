@@ -389,7 +389,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     }
   }, [isReconnecting]);
 
-  const [wsStatus, setWsStatus] = useState('Disconnected');
+  const [wsStatus, setWsStatus] = useState('Idle');
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null); // For managing reconnection timer
   
@@ -559,7 +559,21 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     if (shouldConnect) {
       connect();
     }
-  }, [shouldConnect]); // REMOVED `connect` from dependency array
+  
+    // Cleanup function to close WebSocket and clear timers
+    return () => {
+      if (ws.current) {
+        ws.current.close();
+        ws.current = null;
+      }
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+      // Reset the connection guard on cleanup
+      // @ts-ignore
+      window[connectionGuardKey] = false;
+    };
+  }, [shouldConnect, connect]);
 
 
   const stableValue = useMemo(() => ({
