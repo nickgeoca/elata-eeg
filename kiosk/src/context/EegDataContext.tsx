@@ -488,8 +488,8 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
 
         // 5. Process the samples based on the explicit packet_type
         const samplesBuffer = event.data.slice(samplesOffset);
-        const samples =
-          header.packet_type === 'RawI32'
+         const samples =
+           header.packet_type === 'RawI32'
             ? new Int32Array(samplesBuffer)
             : new Float32Array(samplesBuffer);
         
@@ -567,7 +567,7 @@ export const EegDataProvider = ({ children }: EegDataProviderProps) => {
     getRawSamples,
     clearOldData,
     config,
-  }), [subscribeRaw, getRawSamples, clearOldData, config]);
+ }), [subscribeRaw, getRawSamples, clearOldData, config]);
 
   const dynamicValue = useMemo(() => ({
     dataVersion,

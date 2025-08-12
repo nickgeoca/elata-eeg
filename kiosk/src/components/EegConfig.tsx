@@ -10,8 +10,10 @@ export interface EegConfig {
   sample_rate: number;
   channels: number[];
   gain: number;
+  vref: number;
   board_driver: string;
   batch_size: number;
+  chips: { channels: number[] }[];
   // Defined from config file
   fps: number;
   // Powerline filter setting
@@ -121,8 +123,10 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         sample_rate: sampleRate,
         channels: channels,
         gain: gain,
+        vref: 4.5, // Add default vref
         board_driver: boardDriver,
         batch_size: batchSize,
+        chips: [{ channels: channels, spi_bus: 0, cs_pin: 0 }],
         fps: 60.0,
         powerline_filter_hz: powerlineFilterHz
       };
@@ -161,8 +165,10 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
           ...(configRef.current || {
             sample_rate: 250,
             gain: 1,
+            vref: 4.5, // Add default vref
             board_driver: 'default',
             batch_size: 128,
+            chips: [{ channels: [], spi_bus: 0, cs_pin: 0 }],
             fps: 60.0,
             powerline_filter_hz: null
           }),
@@ -208,10 +214,10 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       }
   
       // Explicitly build the command to ensure all fields are present.
-      const sampleRate = configRef.current.sample_rate || 250; // Use current or default
+      const sampleRate = newConfig.sample_rate || configRef.current.sample_rate || 250;
       const channels = newConfig.channels || configRef.current.channels || [];
-      const vref = configRef.current.vref || 4.5; // Use current or default
-      const gain = configRef.current.gain || 1.0; // Use current or default
+      const vref = newConfig.vref || configRef.current.vref || 4.5;
+      const gain = newConfig.gain || configRef.current.gain || 1.0;
   
       const command = {
         "eeg_source": {

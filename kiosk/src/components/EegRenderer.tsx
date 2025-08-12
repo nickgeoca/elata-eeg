@@ -90,7 +90,7 @@ export const EegRenderer = React.memo(function EegRenderer({
     location.current.res = gl.getUniformLocation(prog, 'u_res');
     location.current.sso = gl.getUniformLocation(prog, 'u_scrollScaleOffset');
     location.current.col = gl.getUniformLocation(prog, 'u_color');
-
+  
     /* VBO per channel, interleaved (x,y) */
     for (let ch = 0; ch < NCH; ch++) {
       const buf = gl.createBuffer()!;
@@ -101,7 +101,7 @@ export const EegRenderer = React.memo(function EegRenderer({
       vbos.current.push(buf);
       cpuY.current.push(arr); // keep same reference, we’ll mutate y’s
     }
-
+  
     return () => {
       cancelAnimationFrame(rafId.current);
       const gl = glRef.current;

@@ -76,8 +76,13 @@ export default function EegMonitorWebGL() {
     // This ensures all required fields are present for deserialization
     const driverParams: any = {
       sample_rate: config?.sample_rate || 250,
-      vref: config?.v_ref || 4.5,
+      vref: config?.vref || 4.5,
       gain: config?.gain || 1.0,
+      chips: config?.chips || [{
+        channels: config?.channels || [],
+        spi_bus: 0,
+        cs_pin: 0
+      }]
     };
     
     let changesMade = false;
