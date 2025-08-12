@@ -51,11 +51,11 @@ impl Stage for ToVoltage {
     ) -> Result<Vec<(String, Arc<RtPacket>)>, StageError> {
         let result_packet = match PacketView::from(&*pkt) {
             PacketView::RawI32 { header, data } => {
-                tracing::debug!(
-                    stage_id = self.id(),
-                    packet_type = "RawI32",
-                    "Converting RawI32 packet to Voltage"
-                );
+                // tracing::debug!(
+                //     stage_id = self.id(),
+                //     packet_type = "RawI32",
+                //     "Converting RawI32 packet to Voltage"
+                // );
                 let mut voltage_samples =
                     RecycledF32Vec::with_capacity(ctx.allocator.clone(), data.len());
 

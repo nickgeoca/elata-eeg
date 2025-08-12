@@ -53,12 +53,12 @@ impl Stage for WebsocketSink {
             }
         };
 
-        tracing::debug!(
-            topic = %self.topic,
-            packet_type = packet_type,
-            meta_rev = header.meta.meta_rev,
-            "sink_got_packet"
-        );
+        // tracing::debug!(
+        //     topic = %self.topic,
+        //     packet_type = packet_type,
+        //     meta_rev = header.meta.meta_rev,
+        //     "sink_got_packet"
+        // );
 
         // 2. Send metadata update if revision has changed
         if self.last_meta_rev != Some(header.meta.meta_rev) {
