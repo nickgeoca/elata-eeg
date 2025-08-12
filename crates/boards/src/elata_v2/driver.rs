@@ -19,11 +19,11 @@ use sensors::{
     ads1299::driver::Ads1299Driver,
 };
 
-const NUM_CHIPS: usize = 2;
 const START_PIN: u8 = 22; // GPIO for START pulse
 
 pub struct ElataV2Driver {
     chip_drivers: Vec<Ads1299Driver>,
+    bus: Arc<SpiBus>,
     gpio: Arc<Gpio>,
     status: Arc<Mutex<DriverStatus>>,
     config: AdcConfig,
@@ -36,17 +36,11 @@ pub struct ElataV2Driver {
 
 impl ElataV2Driver {
     pub fn new(config: AdcConfig) -> Result<Self, DriverError> {
-        if config.chips.len() != NUM_CHIPS {
-            return Err(DriverError::ConfigurationError(format!(
-                "ElataV2Driver requires exactly {} chip configurations",
-                NUM_CHIPS
-            )));
-        }
 
         let gpio = Arc::new(Gpio::new()?);
         info!("GPIO initialized.");
 
-        let mut chip_drivers = Vec::with_capacity(NUM_CHIPS);
+        let mut chip_drivers = Vec::with_capacity(config.chips.len());
         let bus = Arc::new(SpiBus::new(
             Bus::Spi0,
             1_240_000,
@@ -54,10 +48,19 @@ impl ElataV2Driver {
         )?);
         info!("SPI bus initialized.");
 
-        for chip_config in config.chips.iter() {
-            let cs_pin = gpio.get(chip_config.cs_pin)?.into_output();
-            info!("CS pin {} initialized for software control.", chip_config.cs_pin);
-
+        for (i, chip_config) in config.chips.iter().enumerate() {
+            // Define CS pins internally based on chip index for ElataV2 hardware
+            let cs_pin_num = match i {
+                0 => 7,  // Chip 0 uses CS pin 7
+                1 => 8,  // Chip 1 uses CS pin 8
+                _ => return Err(DriverError::ConfigurationError(
+                    format!("ElataV2 driver only supports 2 chips, but chip {} was provided", i)
+                )),
+            };
+            
+            let cs_pin = gpio.get(cs_pin_num)?.into_output();
+            info!("CS pin {} initialized for software control.", cs_pin_num);
+            
             let driver = Ads1299Driver::new(chip_config.clone(), bus.clone(), cs_pin)?;
             chip_drivers.push(driver);
         }
@@ -68,6 +71,7 @@ impl ElataV2Driver {
 
         Ok(Self {
             chip_drivers,
+            bus,
             gpio,
             status: Arc::new(Mutex::new(DriverStatus::Stopped)),
             config,
@@ -82,7 +86,10 @@ impl ElataV2Driver {
 
 impl AdcDriver for ElataV2Driver {
     fn initialize(&mut self) -> Result<(), DriverError> {
-        info!("Initializing ElataV2 board with {} chips...", NUM_CHIPS);
+        // Ensure a fresh start for the acquisition thread
+        self.stop_acq_thread.store(false, Ordering::Relaxed);
+        
+        info!("Initializing ElataV2 board with {} chips...", self.config.chips.len());
 
         // 1. Initialize chip registers first
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
@@ -289,16 +296,43 @@ impl AdcDriver for ElataV2Driver {
         Ok(self.config.clone())
     }
     fn reconfigure(&mut self, config: &AdcConfig) -> Result<(), DriverError> {
-        self.config = config.clone();
-        // Reconfigure each chip driver with new settings
-        for (i, chip_driver) in self.chip_drivers.iter_mut().enumerate() {
-            if let Some(chip_config) = config.chips.get(i) {
-                let mut single_chip_adc_config = config.clone();
-                single_chip_adc_config.chips = vec![chip_config.clone()];
-                chip_driver.reconfigure(&single_chip_adc_config)?;
-            }
+        // Validate that the incoming configuration has the correct number of chips
+        // Validate that the incoming configuration has the same number of chips
+        if config.chips.len() != self.config.chips.len() {
+            return Err(DriverError::ConfigurationError(format!(
+                "ElataV2Driver requires exactly {} chip configurations",
+                self.config.chips.len()
+            )));
         }
-        Ok(())
+        
+        info!("ElataV2 reconfigure: performing full shutdown + reinitialize");
+        // Stop acquisition thread, clear IRQs and pins, and power down chips
+        self.shutdown()?;
+        
+        // Recreate chip drivers with new configuration
+        self.chip_drivers.clear();
+        for (i, chip_config) in config.chips.iter().enumerate() {
+            // Define CS pins internally based on chip index for ElataV2 hardware
+            let cs_pin_num = match i {
+                0 => 7,  // Chip 0 uses CS pin 7
+                1 => 8,  // Chip 1 uses CS pin 8
+                _ => return Err(DriverError::ConfigurationError(
+                    format!("ElataV2 driver only supports 2 chips, but chip {} was provided", i)
+                )),
+            };
+            
+            let cs_pin = self.gpio.get(cs_pin_num)?.into_output();
+            info!("CS pin {} initialized for software control.", cs_pin_num);
+            
+            let driver = Ads1299Driver::new(chip_config.clone(), self.bus.clone(), cs_pin)?;
+            self.chip_drivers.push(driver);
+        }
+        
+        // Update runtime configuration
+        self.config = config.clone();
+        
+        // Re-run the known-good board-level initialization sequence
+        self.initialize()
     }
 
     fn shutdown(&mut self) -> Result<(), DriverError> {

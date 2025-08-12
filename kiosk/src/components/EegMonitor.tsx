@@ -3,7 +3,8 @@ import React from 'react'; // Added to resolve React.Fragment error
 
 import { useRef, useState, useEffect, useContext } from 'react';
 import EegRecordingControls from './EegRecordingControls';
-import { useEegData, useEegStatus } from '../context/EegDataContext';
+import { useEegStatus } from '../context/EegDataContext';
+import { useEegConfig } from './EegConfig';
 import { usePipeline } from '@/context/PipelineContext';
 import { useEventStream, useEventStreamData } from '../context/EventStreamContext';
 import EegDataVisualizer from './EegDataVisualizer';
@@ -26,7 +27,7 @@ export default function EegMonitorWebGL() {
   const lastConfigRef = useRef<any>(null);
 
   // Get all data and config from the new central context
-  const { config } = useEegData();
+  const { config, updateConfig } = useEegConfig();
   const { dataStatus } = useEegStatus();
   const { dataReceived, driverError, wsStatus } = dataStatus;
   const { fatalError } = useEventStreamData();
@@ -65,107 +66,33 @@ export default function EegMonitorWebGL() {
     }
   }, [config]);
 
-  const { sendCommand, sendPowerlineFilterCommand, startPipeline, stopPipeline, pipelineState } = usePipeline();
-  const handleUpdateConfig = async () => {
+  const { sendPowerlineFilterCommand } = usePipeline();
+
+  const handleUpdateConfig = () => {
     if (isRecording) {
       setConfigUpdateStatus('Cannot change configuration during recording.');
       return;
     }
 
-    // Start with a complete driver configuration based on the current config
-    // This ensures all required fields are present for deserialization
-    const driverParams: any = {
-      sample_rate: config?.sample_rate || 250,
-      vref: config?.vref || 4.5,
-      gain: config?.gain || 1.0,
-      chips: config?.chips || [{
-        channels: config?.channels || [],
-        spi_bus: 0,
-        cs_pin: 0
-      }]
-    };
-    
-    let changesMade = false;
-
-    if (selectedChannelCount !== undefined) {
-      const numChannels = parseInt(selectedChannelCount, 10);
-      if (!isNaN(numChannels) && numChannels >= 0 && numChannels <= 8) {
-        const currentChannels = config?.channels || [];
-        const newChannelsArray = Array.from({ length: numChannels }, (_, i) => i);
-        if (JSON.stringify(currentChannels) !== JSON.stringify(newChannelsArray)) {
-          // The backend expects a structure like { chips: [{ channels: [0, 1, ...] }] }
-          // Include default values for spi_bus and cs_pin to ensure complete structure
-          driverParams.chips = [{
-            channels: newChannelsArray,
-            spi_bus: 0,
-            cs_pin: 0
-          }];
-          changesMade = true;
-        }
-      } else {
-        setConfigUpdateStatus('Invalid number of channels selected.');
-        return;
-      }
-    }
-
-    if (selectedSampleRate !== undefined) {
-      const rate = parseInt(selectedSampleRate, 10);
-      const validRates = [250, 500, 1000, 2000];
-      if (!isNaN(rate) && validRates.includes(rate)) {
-        if (config?.sample_rate !== rate) {
-          driverParams.sample_rate = rate;
-          changesMade = true;
-        }
-      } else {
-        setConfigUpdateStatus(`Invalid sample rate: ${rate}. Valid: ${validRates.join(', ')}`);
-        return;
-      }
-    }
-
-    if (selectedPowerlineFilter !== undefined) {
-      let filterValue: number | null = null;
-      if (selectedPowerlineFilter === 'off') {
-        filterValue = null;
-      } else {
-        const parsedFilter = parseInt(selectedPowerlineFilter, 10);
-        if (!isNaN(parsedFilter) && (parsedFilter === 50 || parsedFilter === 60)) {
-          filterValue = parsedFilter;
-        } else {
-          setConfigUpdateStatus(`Invalid powerline filter value: ${selectedPowerlineFilter}`);
-          return;
-        }
-      }
-      if (config?.powerline_filter_hz !== filterValue) {
-        // This parameter is not part of the driver config, so we handle it separately
-        // This will be removed once the backend handles this via SetParameter
-        sendPowerlineFilterCommand(filterValue);
-        // We don't set changesMade for this, as it's a separate command
-      }
-    }
-
-    if (!changesMade) {
-      setConfigUpdateStatus('No changes selected to update.');
+    // Ensure all selections are made before proceeding
+    if (selectedChannelCount === undefined || selectedSampleRate === undefined || selectedPowerlineFilter === undefined) {
+      setConfigUpdateStatus('Please make a selection for all configuration options.');
       return;
     }
 
-    // Check if config actually changed using the useRef hook
-    const newConfig = { driver: driverParams };
-    if (JSON.stringify(newConfig) === JSON.stringify(lastConfigRef.current)) {
-      setConfigUpdateStatus('No changes to apply');
-      return;
-    }
-
-    // Update the last config ref
-    lastConfigRef.current = newConfig;
-
-    const params = {
-      target_stage: 'eeg_source',
-      parameters: newConfig,
-    };
+    const numChannels = parseInt(selectedChannelCount, 10);
+    const sampleRate = parseInt(selectedSampleRate, 10);
+    const powerlineFilter = selectedPowerlineFilter === 'off' ? null : parseInt(selectedPowerlineFilter, 10);
 
     setConfigUpdateStatus('Sending configuration update...');
     try {
-      await sendCommand('SetParameter', params);
+      // Simplified call to centralized updateConfig function.
+      // It will handle constructing the full, valid payload.
+      updateConfig({
+        channels: numChannels,
+        sample_rate: sampleRate,
+        powerline_filter_hz: powerlineFilter,
+      });
       setConfigUpdateStatus('Configuration update sent successfully.');
     } catch (error) {
       console.error('Failed to send configuration update:', error);
@@ -355,7 +282,7 @@ export default function EegMonitorWebGL() {
                 className="w-full p-2 rounded bg-gray-700 border border-gray-600"
                 disabled={!config}
               >
-                {[...Array(9).keys()].map(i => <option key={i} value={i}>{i === 0 ? 'All Off' : `${i} channel${i > 1 ? 's' : ''}`}</option>)}
+                {[...Array(17).keys()].map(i => <option key={i} value={i}>{i === 0 ? 'All Off' : `${i} channel${i !== 1 ? 's' : ''}`}</option>)}
               </select>
             </div>
 

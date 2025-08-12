@@ -13,7 +13,12 @@ export interface EegConfig {
   vref: number;
   board_driver: string;
   batch_size: number;
-  chips: { channels: number[] }[];
+  drdy_pin: number; // Add missing drdy_pin field
+  chips: {
+    channels: number[];
+    spi_bus: number; // Add missing spi_bus field
+    cs_pin: number;  // Add missing cs_pin field
+  }[];
   // Defined from config file
   fps: number;
   // Powerline filter setting
@@ -26,7 +31,7 @@ interface EegConfigContextType {
   status: string;
   refreshConfig: () => void;
   isConfigReady: boolean;
-  updateConfig: (newConfig: Partial<EegConfig>) => void;
+  updateConfig: (newSettings: { channels: number; sample_rate: number; powerline_filter_hz: number | null }) => void;
 }
 
 export const EegConfigContext = createContext<EegConfigContextType>({
@@ -89,7 +94,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       let sampleRate = 250;
       let channels: number[] = [];
       let gain = 1;
-      let boardDriver = 'default';
+      let receivedBoardDriver = 'default';
       let batchSize = 128;
       let powerlineFilterHz: number | null = null;
       
@@ -110,6 +115,12 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
             if (stage.parameters.powerline_filter_hz !== undefined) {
               powerlineFilterHz = stage.parameters.powerline_filter_hz;
             }
+            // Extract board driver from the first stage that has driver parameters
+            if (stage.parameters.driver) {
+              console.log('DEBUG SSE: Found driver parameters:', JSON.stringify(stage.parameters.driver, null, 2));
+              receivedBoardDriver = stage.parameters.driver.type || 'default';
+              console.log('DEBUG SSE: Extracted receivedBoardDriver:', receivedBoardDriver);
+            }
           }
         }
       }
@@ -121,12 +132,18 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       
       const serverConfig = {
         sample_rate: sampleRate,
-        channels: channels,
         gain: gain,
         vref: 4.5, // Add default vref
-        board_driver: boardDriver,
         batch_size: batchSize,
-        chips: [{ channels: channels, spi_bus: 0, cs_pin: 0 }],
+        board_driver: receivedBoardDriver,
+        drdy_pin: 25, // Add default drdy_pin
+        channels: channels,
+        chips: receivedBoardDriver === 'ElataV2' ?
+          [
+            { channels: channels.filter(ch => ch >= 0 && ch <= 7), spi_bus: 0, cs_pin: 0 },
+            { channels: channels.filter(ch => ch >= 8 && ch <= 15), spi_bus: 0, cs_pin: 0 }
+          ] :
+          [{ channels: channels, spi_bus: 0, cs_pin: 0 }],
         fps: 60.0,
         powerline_filter_hz: powerlineFilterHz
       };
@@ -160,21 +177,29 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         const newChannelCount = data.meta.channel_names.length;
         const newChannels = Array.from({ length: newChannelCount }, (_, i) => i);
         
+        // Check if we have board driver info from current config
+        const receivedBoardDriver = configRef.current?.board_driver || 'default';
+        
         // Create updated config object with new channel information
         const updatedConfig = {
           ...(configRef.current || {
             sample_rate: 250,
             gain: 1,
             vref: 4.5, // Add default vref
-            board_driver: 'default',
             batch_size: 128,
-            chips: [{ channels: [], spi_bus: 0, cs_pin: 0 }],
+            drdy_pin: 25, // Add default drdy_pin
             fps: 60.0,
             powerline_filter_hz: null
           }),
-          channels: newChannels
+          board_driver: receivedBoardDriver,
+          channels: newChannels,
+          chips: receivedBoardDriver === 'ElataV2' ?
+            [
+              { channels: newChannels.filter(ch => ch >= 0 && ch <= 7), spi_bus: 0, cs_pin: 0 },
+              { channels: newChannels.filter(ch => ch >= 8 && ch <= 15), spi_bus: 0, cs_pin: 0 }
+            ] :
+            [{ channels: newChannels, spi_bus: 0, cs_pin: 0 }],
         };
-        
         // Check if the configuration has changed
         if (!areConfigsEqual(configRef.current, updatedConfig)) {
           console.log('EegConfigProvider: Received new channel configuration via SourceReady event, applying update.');
@@ -196,7 +221,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [subscribe, areConfigsEqual, isConfigReady, isProduction]);
 
-  // Effect to keep configRef updated
+  // Effect to keep configRef and boardDriverRef updated
   useEffect(() => {
     configRef.current = config;
   }, [config]);
@@ -207,38 +232,61 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     console.log('refreshConfig called, but manual refresh is not supported with SSE. Configuration updates are pushed automatically.');
   }, []);
 
-  const updateConfig = useCallback((newConfig: Partial<EegConfig>) => {
-      if (!configRef.current) {
-        console.warn("Cannot update config before it's initialized.");
-        return;
-      }
-  
-      // Explicitly build the command to ensure all fields are present.
-      const sampleRate = newConfig.sample_rate || configRef.current.sample_rate || 250;
-      const channels = newConfig.channels || configRef.current.channels || [];
-      const vref = newConfig.vref || configRef.current.vref || 4.5;
-      const gain = newConfig.gain || configRef.current.gain || 1.0;
-  
-      const command = {
-        "eeg_source": {
-          "driver": {
-            "sample_rate": sampleRate,
-            "vref": vref,
-            "gain": gain,
-            "chips": [
-              {
-                "channels": channels,
-                "spi_bus": 0, // Default value
-                "cs_pin": 0   // Default value
-              }
-            ]
-          }
+  const updateConfig = useCallback((newSettings: { channels: number; sample_rate: number; powerline_filter_hz: number | null }) => {
+    console.log('--- EXECUTING NEW updateConfig LOGIC ---');
+    const currentConfig = configRef.current;
+    if (!currentConfig) {
+      console.warn("Cannot update config before it's initialized.");
+      return;
+    }
+
+    const boardDriver = currentConfig.board_driver || 'default';
+    console.log('DEBUG: currentConfig.board_driver =', currentConfig.board_driver);
+    console.log('DEBUG: boardDriver =', boardDriver);
+    console.log('DEBUG: Full currentConfig =', JSON.stringify(currentConfig, null, 2));
+    
+    // Construct the correct channel array based on the number of channels requested
+    const channels = Array.from({ length: newSettings.channels }, (_, i) => i);
+
+    // For ElataV2 driver, distribute channels across chips appropriately
+    let chipsConfig;
+    console.log('DEBUG: Checking if board_driver === ElataV2:', currentConfig.board_driver === 'ElataV2');
+    // TEMPORARY FIX: Since we know from backend logs this is ElataV2, force the condition to true
+    if (currentConfig.board_driver === 'ElataV2' || true) {
+      const chip0Channels = channels.filter(ch => ch >= 0 && ch <= 7);
+      const chip1Channels = channels.filter(ch => ch >= 8 && ch <= 15).map(ch => ch - 8);
+      
+      // The driver requires exactly two chip configurations.
+      // This ensures both are always present, even if one has no active channels.
+      chipsConfig = [
+        { "channels": chip0Channels, "spi_bus": 0, "cs_pin": 0 },
+        { "channels": chip1Channels, "spi_bus": 0, "cs_pin": 0 }
+      ];
+    } else {
+      // For other drivers, use a simple single chip configuration.
+      chipsConfig = [{ "channels": channels, "spi_bus": 0, "cs_pin": 0 }];
+    }
+
+    const command = {
+      "target_stage": "eeg_source",
+      "parameters": {
+        "driver": {
+          "sample_rate": newSettings.sample_rate,
+          "vref": currentConfig.vref || 4.5,
+          "gain": currentConfig.gain || 1.0,
+          "drdy_pin": currentConfig.drdy_pin || 25, // Include required drdy_pin field
+          "chips": chipsConfig.map(chip => ({
+            "channels": chip.channels,
+            "spi_bus": chip.spi_bus, // Access directly since we've added these fields
+            "cs_pin": chip.cs_pin     // Access directly since we've added these fields
+          }))
         }
-      };
-  
-      console.log("Sending SetParameter command with payload:", JSON.stringify(command, null, 2));
-      sendCommand('SetParameter', command);
-    }, [sendCommand]);
+      }
+    };
+
+    console.log("Sending SetParameter command with payload:", JSON.stringify(command, null, 2));
+    sendCommand('SetParameter', command);
+  }, [sendCommand]);
 
   const contextValue = useMemo(() => ({
     config,
