@@ -1,6 +1,6 @@
 //! Main driver implementation for the ADS1299 chip.
 
-use std::sync::{atomic::AtomicBool, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, AtomicUsize, Ordering}, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -73,6 +73,22 @@ impl Ads1299Driver {
         // We must read all 27 bytes (3 status + 8 channels * 3 bytes) to avoid stalling the SPI bus.
         let mut frame_buffer = vec![0u8; 27];
         self.read_frame(&mut inner, &mut frame_buffer)?;
+
+        // One-shot frame dump when exactly 3 channels are configured, to help debug mapping
+        if true {
+            let hex = frame_buffer.iter().map(|b| format!("{:02X}", b)).collect::<Vec<_>>().join(" ");
+            debug!("ADS1299 frame dump (27 bytes): {}", hex);
+            for &ch in &inner.config.channels {
+                let off = 3 + (ch as usize) * 3;
+                let raw = ch_sample_to_raw(frame_buffer[off], frame_buffer[off + 1], frame_buffer[off + 2]);
+                debug!(
+                    "CH{} bytes: {:02X} {:02X} {:02X} -> raw {}",
+                    ch,
+                    frame_buffer[off], frame_buffer[off + 1], frame_buffer[off + 2],
+                    raw
+                );
+            }
+        }
 
         let mut samples = Vec::with_capacity(num_channels);
         for &channel_index in &inner.config.channels {

@@ -4,7 +4,7 @@ use axum::{
     },
     http::StatusCode,
     response::{sse::Event, IntoResponse, Json, Sse},
-    routing::post,
+    routing::{get, post},
     Router,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -262,6 +262,95 @@ pub async fn state_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+// --- New minimal runtime-config endpoints ---
+
+/// Alias for current runtime config. Equivalent to `/api/state` but semantically clearer.
+pub async fn get_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    tracing::info!("GET /api/config");
+    if let Some(handle) = &*state.pipeline_handle.lock().await {
+        if let Some(executor) = &handle.executor {
+            let config = executor.get_current_config();
+            return Json(json!(config)).into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, "No pipeline running").into_response()
+}
+
+#[derive(Deserialize)]
+pub struct SetDriverConfigPayload {
+    /// Parameters to forward to the eeg_source stage as `{ driver: ... }`.
+    pub driver: Value,
+    /// Optional target stage name; defaults to "eeg_source".
+    #[serde(default = "default_eeg_source_name")]
+    pub target_stage: String,
+}
+
+fn default_eeg_source_name() -> String { "eeg_source".to_string() }
+
+/// Applies a driver configuration to the running pipeline by forwarding a SetParameter
+/// to the eeg_source stage. Returns 202 on success dispatch.
+pub async fn set_config_handler(
+    State(state): State<AppState>,
+    Json(payload): Json<SetDriverConfigPayload>,
+) -> impl IntoResponse {
+    tracing::info!("POST /api/set-config -> forwarding SetParameter to '{}'", payload.target_stage);
+
+    if let Some(ref mut handle) = *state.pipeline_handle.lock().await {
+        let params = json!({ "driver": payload.driver });
+        let cmd = pipeline::control::ControlCommand::SetParameter {
+            target_stage: payload.target_stage.clone(),
+            parameters: params,
+        };
+        handle.control_bus.send_all(cmd);
+
+        // Return the current runtime snapshot for convenience
+        if let Some(executor) = &handle.executor {
+            let config = executor.get_current_config();
+            return (StatusCode::ACCEPTED, Json(json!(config))).into_response();
+        }
+        return (StatusCode::ACCEPTED, Json(json!({}))).into_response();
+    }
+
+    (StatusCode::NOT_FOUND, "No pipeline running").into_response()
+}
+
+/// Persists the current runtime config to the YAML file backing the running pipeline ID.
+pub async fn save_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    tracing::info!("POST /api/save-config");
+
+    // Resolve current pipeline and its config
+    let (pipeline_id, config) = {
+        let handle_guard = state.pipeline_handle.lock().await;
+        if let Some(handle) = &*handle_guard {
+            if let Some(executor) = &handle.executor {
+                (handle.id.clone(), executor.get_current_config())
+            } else {
+                return (StatusCode::NOT_FOUND, "No pipeline running").into_response();
+            }
+        } else {
+            return (StatusCode::NOT_FOUND, "No pipeline running").into_response();
+        }
+    };
+
+    // Find YAML path for this pipeline
+    let path = {
+        let map = state.pipelines.lock().await;
+        match map.get(&pipeline_id) {
+            Some(p) => p.clone(),
+            None => return (StatusCode::NOT_FOUND, "Pipeline configuration not found").into_response(),
+        }
+    };
+
+    // Serialize and write
+    match serde_yaml::to_string(&config) {
+        Ok(yaml) => match std::fs::write(&path, yaml) {
+            Ok(_) => (StatusCode::OK, format!("Saved runtime config to {}", path.display())).into_response(),
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write YAML: {}", e)).into_response(),
+        },
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to serialize runtime config: {}", e)).into_response(),
+    }
+}
+
 
 
 use tokio_stream::wrappers::BroadcastStream;
@@ -313,8 +402,6 @@ pub async fn sse_handler(
     )
 }
 
-use axum::routing::get;
-
 pub fn create_router() -> Router<AppState> {
     Router::new()
         .route("/api/pipelines", get(list_pipelines_handler))
@@ -323,5 +410,8 @@ pub fn create_router() -> Router<AppState> {
         .route("/api/pipelines/:id", post(update_pipeline_handler))
         .route("/api/pipelines/:id/control", post(control_handler)) // Added control route
         .route("/api/state", get(state_handler))
+        .route("/api/config", get(get_config_handler))
+        .route("/api/set-config", post(set_config_handler))
+        .route("/api/save-config", post(save_config_handler))
         .route("/api/events", get(sse_handler))
 }

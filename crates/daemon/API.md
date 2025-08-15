@@ -119,22 +119,42 @@ sequenceDiagram
 
 ### Control and State
 
-*   **`POST /api/control`**
-    *   **Description:** Sends a control command to the currently running pipeline, such as changing a parameter.
+*   **`POST /api/pipelines/{id}/control`**
+    *   **Description:** Sends a control command to the running pipeline (e.g., `SetParameter`). See examples below.
+    *   **Response:** `202 Accepted`
+
+*   **`GET /api/state`**
+    *   **Description:** Retrieves the current runtime configuration snapshot from the executor.
+    *   **Response:** `200 OK` with the configuration as JSON.
+
+#### Runtime Config Convenience Endpoints
+
+To make the runtime model explicit (YAML at boot; runtime is authoritative; explicit save), the daemon also provides:
+
+*   **`GET /api/config`**
+    *   **Description:** Alias for the current runtime configuration (same as `/api/state`).
+    *   **Response:** `200 OK` with the configuration as JSON.
+
+*   **`POST /api/set-config`**
+    *   **Description:** Apply runtime configuration changes. Minimal supported form forwards a driver payload to the `eeg_source` stage via `SetParameter`.
     *   **Request Body:**
     ```json
     {
-        "command": "SetParameter",
-        "stage_id": "filter_stage",
-        "parameter_id": "center_frequency",
-        "value": 60
+      "driver": {
+        "type": "ElataV2",
+        "sample_rate": 250,
+        "vref": 4.5,
+        "gain": 24.0,
+        "chips": [ {"channels": [0,1,2]}, {"channels": []} ]
+      },
+      "target_stage": "eeg_source"
     }
     ```
-    *   **Response:** `200 OK`
+    *   **Response:** `202 Accepted` with the current runtime config snapshot.
 
-*   **`GET /api/state`**
-    *   **Description:** Retrieves the current state and configuration of the running pipeline. This is useful for the UI to dynamically render controls.
-    *   **Response:** `200 OK` with the current pipeline configuration as JSON.
+*   **`POST /api/save-config`**
+    *   **Description:** Persist the current runtime configuration back to the YAML for the active pipeline ID.
+    *   **Response:** `200 OK` on success.
 
 ### Real-time Events
 
@@ -200,6 +220,10 @@ The `websocket_sink` pipeline stage no longer creates a server. Its role is to f
 #### Data Format
 
 The data sent over the WebSocket is the raw binary representation of an `RtPacket`.
+
+UI discipline:
+- Size visuals using the packet header's `num_channels` and the latest `SourceReady` metadata.
+- Avoid inferring channel counts from non-shape events.
 
 ## Design Rationale (FAQ)
 

@@ -49,8 +49,7 @@ export const useEegConfig = () => useContext(EegConfigContext);
 // Provider component
 export function EegConfigProvider({ children }: { children: React.ReactNode }) {
   const [config, setConfig] = useState<EegConfig | null>(null);
-  const configRef = useRef<EegConfig | null>(null); // Add a ref for the latest config
-  const lastDriverTypeRef = useRef<string | null>(null); // Track latest driver.type from SSE
+  const configRef = useRef<EegConfig | null>(null); // Latest config snapshot
   const [status, setStatus] = useState('Initializing...'); // Start as Initializing
   const [isConfigReady, setIsConfigReady] = useState(false);
   const isProduction = process.env.NODE_ENV === 'production';
@@ -97,12 +96,13 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       const cfg = payload?.config ?? payload;
       const stages = cfg?.stages;
 
-      let sampleRate = 250;
-      let channels: number[] = [];
-      let gain = 1;
-      let receivedBoardDriver = 'default';
-      let batchSize = 128;
-      let powerlineFilterHz: number | null = null;
+      let sampleRate = configRef.current?.sample_rate ?? 250;
+      // IMPORTANT: Do not derive channels from config events; SourceReady is authoritative.
+      const channels: number[] = configRef.current?.channels ?? [];
+      let gain = configRef.current?.gain ?? 1;
+      let receivedBoardDriver = configRef.current?.board_driver ?? 'default';
+      let batchSize = configRef.current?.batch_size ?? 128;
+      let powerlineFilterHz: number | null = configRef.current?.powerline_filter_hz ?? null;
 
       if (Array.isArray(stages)) {
         // Prefer values from the eeg_source stage only
@@ -115,33 +115,12 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
           if (params.powerline_filter_hz !== undefined) powerlineFilterHz = params.powerline_filter_hz;
           if (params.batch_size !== undefined) batchSize = params.batch_size;
 
-          if (params.driver) {
+          if (params.driver && typeof params.driver.type === 'string') {
             console.log('DEBUG SSE: Found driver parameters:', JSON.stringify(params.driver, null, 2));
-            receivedBoardDriver = params.driver.type || 'default';
-            console.log('DEBUG SSE: Extracted receivedBoardDriver:', receivedBoardDriver);
-            lastDriverTypeRef.current = receivedBoardDriver; // cache latest driver type
-
-            // Derive channel list from driver chips when present
-            if (Array.isArray(params.driver.chips)) {
-              if (receivedBoardDriver === 'ElataV2') {
-                const chip0 = params.driver.chips[0]?.channels || [];
-                const chip1Local = params.driver.chips[1]?.channels || [];
-                const chip1Global = chip1Local.map((c: number) => c + 8);
-                channels = ([] as number[]).concat(chip0, chip1Global);
-              } else if (params.driver.chips[0]?.channels) {
-                channels = params.driver.chips[0].channels.slice();
-              }
-            }
-          }
-
-          // Only override channels from stage params if it is an array
-          if (Array.isArray(params.channels)) {
-            channels = params.channels;
+            receivedBoardDriver = params.driver.type || receivedBoardDriver;
           }
         }
       }
-
-      if (!Array.isArray(channels) || channels.length === 0) channels = [0, 1, 2, 3];
 
       const serverConfig = {
         sample_rate: sampleRate,
@@ -151,12 +130,10 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         board_driver: receivedBoardDriver,
         drdy_pin: 25,
         channels,
-        chips: receivedBoardDriver === 'ElataV2'
-          ? [
-              { channels: channels.filter((ch: number) => ch >= 0 && ch <= 7), spi_bus: 0, cs_pin: 0 },
-              { channels: channels.filter((ch: number) => ch >= 8 && ch <= 15).map((ch: number) => ch - 8), spi_bus: 0, cs_pin: 0 },
-            ]
-          : [{ channels, spi_bus: 0, cs_pin: 0 }],
+        // Preserve previous chip layout if known; otherwise leave a basic default
+        chips: (configRef.current?.chips && configRef.current.chips.length > 0)
+          ? configRef.current.chips
+          : (receivedBoardDriver === 'ElataV2' ? [{ channels: [], spi_bus: 0, cs_pin: 0 }, { channels: [], spi_bus: 0, cs_pin: 0 }] : [{ channels: [], spi_bus: 0, cs_pin: 0 }]),
         fps: 60.0,
         powerline_filter_hz: powerlineFilterHz,
       };
@@ -179,7 +156,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [subscribe, areConfigsEqual, isConfigReady, isProduction]);
 
-  // Effect to also listen for SourceReady events that contain channel metadata
+  // Effect to listen for SourceReady events (authoritative shape)
   useEffect(() => {
     const unsubscribe = subscribe('SourceReady', (data: any) => {
       // The actual metadata is nested inside the 'meta' property of the event data
@@ -188,11 +165,7 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
         const newChannelCount = data.meta.channel_names.length;
         const newChannels = Array.from({ length: newChannelCount }, (_, i) => i);
         
-        // Check if we have board driver info from current config
         const receivedBoardDriver = configRef.current?.board_driver || 'default';
-        if (receivedBoardDriver) {
-          lastDriverTypeRef.current = receivedBoardDriver; // keep cache in sync
-        }
         
         // Create updated config object with new channel information
         const prev = (configRef.current || {
@@ -211,12 +184,13 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
           vref: data.meta?.v_ref ?? prev.vref,
           board_driver: receivedBoardDriver,
           channels: newChannels,
-          chips: receivedBoardDriver === 'ElataV2' ?
-            [
-              { channels: newChannels.filter((ch: number) => ch >= 0 && ch <= 7), spi_bus: 0, cs_pin: 0 },
-              { channels: newChannels.filter((ch: number) => ch >= 8 && ch <= 15).map((ch: number) => ch - 8), spi_bus: 0, cs_pin: 0 }
-            ] :
-            [{ channels: newChannels, spi_bus: 0, cs_pin: 0 }],
+          // Derive basic chip split for payload building only
+          chips: receivedBoardDriver === 'ElataV2'
+            ? [
+                { channels: newChannels.filter((ch: number) => ch >= 0 && ch <= 7), spi_bus: 0, cs_pin: 0 },
+                { channels: newChannels.filter((ch: number) => ch >= 8 && ch <= 15).map((ch: number) => ch - 8), spi_bus: 0, cs_pin: 0 }
+              ]
+            : [{ channels: newChannels, spi_bus: 0, cs_pin: 0 }],
         } as EegConfig;
         // Check if the configuration has changed
         if (!areConfigsEqual(configRef.current, updatedConfig)) {
@@ -239,20 +213,6 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
     };
   }, [subscribe, areConfigsEqual, isConfigReady, isProduction]);
 
-  // On mount or when pipelineState changes, try to prime lastDriverType from current state
-  useEffect(() => {
-    const cfg = (pipelineState && (pipelineState as any).config) || null;
-    const stages = cfg?.stages;
-    if (Array.isArray(stages)) {
-      const eegStage = stages.find((s: any) => (s?.type === 'eeg_source' || s?.stage_type === 'eeg_source' || s?.name === 'eeg_source')) || stages[0];
-      const params = eegStage?.params || eegStage?.parameters;
-      const drvType = params?.driver?.type;
-      if (typeof drvType === 'string' && drvType.length > 0) {
-        lastDriverTypeRef.current = drvType;
-      }
-    }
-  }, [pipelineState]);
-
   // Effect to keep configRef and boardDriverRef updated
   useEffect(() => {
     configRef.current = config;
@@ -272,48 +232,29 @@ export function EegConfigProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const boardDriver = currentConfig.board_driver || 'default';
-    console.log('DEBUG: currentConfig.board_driver =', currentConfig.board_driver);
-    console.log('DEBUG: boardDriver =', boardDriver);
-    console.log('DEBUG: Full currentConfig =', JSON.stringify(currentConfig, null, 2));
+    // Infer driver type from the running pipeline's eeg_source stage if available
+    let driverType: string | undefined;
+    try {
+      const cfg = (pipelineState && (pipelineState as any).config) || null;
+      const stages = cfg?.stages;
+      if (Array.isArray(stages)) {
+        const eegStage = stages.find((s: any) => (s?.type === 'eeg_source' || s?.stage_type === 'eeg_source' || s?.name === 'eeg_source')) || stages[0];
+        const params = eegStage?.params || eegStage?.parameters;
+        driverType = params?.driver?.type;
+      }
+    } catch {}
 
-    // TEMP: force two-chip board until SSE carries driver.type (toggle with localStorage flag)
-    const forceTwoChip =
-      typeof window !== 'undefined' &&
-      window.localStorage &&
-      window.localStorage.getItem('eeg_force_two_chip') === '1';
-
-    // Use latest known driver.type from SSE to avoid timing races where board_driver is still 'default'
-    // Try to infer driver from the freshest sources in priority order
-    const inferredDriver = forceTwoChip
-      ? 'ElataV2'
-      : (
-          lastDriverTypeRef.current ||
-          // fallback to pipeline state
-          (() => {
-            try {
-              const cfg = (pipelineState && (pipelineState as any).config) || null;
-              const stages = cfg?.stages;
-              if (Array.isArray(stages)) {
-                const eegStage = stages.find((s: any) => (s?.type === 'eeg_source' || s?.stage_type === 'eeg_source' || s?.name === 'eeg_source')) || stages[0];
-                const params = eegStage?.params || eegStage?.parameters;
-                return params?.driver?.type;
-              }
-            } catch {}
-            return undefined;
-          })() ||
-          currentConfig.board_driver ||
-          'default'
-        );
-
-    if (!forceTwoChip && (!inferredDriver || inferredDriver === 'default')) {
-      console.warn('EEG driver type unknown; aborting Apply. Wait for SSE to populate driver.type or set override with localStorage.setItem("eeg_force_two_chip","1") and refresh.');
-      return;
+    let effectiveConfig = { ...currentConfig } as EegConfig;
+    if (driverType === 'ElataV2' || effectiveConfig.chips?.length === 2) {
+      effectiveConfig.board_driver = 'ElataV2';
+      // Ensure two-chip layout present for payload builder
+      if (!effectiveConfig.chips || effectiveConfig.chips.length !== 2) {
+        effectiveConfig.chips = [
+          { channels: [], spi_bus: 0, cs_pin: 0 },
+          { channels: [], spi_bus: 0, cs_pin: 0 },
+        ];
+      }
     }
-
-    const effectiveConfig = inferredDriver === 'ElataV2'
-      ? { ...currentConfig, board_driver: 'ElataV2', chips: currentConfig.chips?.length === 2 ? currentConfig.chips : [{ channels: [], spi_bus: 0, cs_pin: 0 }, { channels: [], spi_bus: 0, cs_pin: 0 }] }
-      : currentConfig;
 
     const driver = buildDriverPayload(effectiveConfig, {
       channels: newSettings.channels,

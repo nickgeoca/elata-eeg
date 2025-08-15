@@ -122,14 +122,24 @@ impl EegSource {
     }
 }
 
+fn flatten_global_channel_indices(config: &AdcConfig) -> Vec<u8> {
+    let mut globals: Vec<u8> = Vec::new();
+    for (chip_idx, chip) in config.chips.iter().enumerate() {
+        let base = (chip_idx as u8) * 8;
+        for &c in &chip.channels {
+            globals.push(base + (c as u8));
+        }
+    }
+    globals
+}
+
 fn create_sensor_meta_from_config(
     config: &AdcConfig,
     meta_rev: &Arc<AtomicUsize>,
 ) -> SensorMeta {
-    let channel_names: Vec<String> = config
-        .chips
-        .iter()
-        .flat_map(|chip| chip.channels.iter().map(|&c| format!("CH{}", c)))
+    let channel_names: Vec<String> = flatten_global_channel_indices(config)
+        .into_iter()
+        .map(|g| format!("CH{}", g))
         .collect();
 
     SensorMeta {
@@ -171,25 +181,51 @@ impl Stage for EegSource {
                 );
 
                 if let Some(driver_params) = parameters.get("driver") {
-                    match serde_json::from_value(driver_params.clone()) {
+                    match serde_json::from_value::<AdcConfig>(driver_params.clone()) {
                         Ok(new_config) => {
                             log::info!("Reconfiguring driver...");
-                            let mut driver_guard = self.driver.lock().unwrap();
-                            if let Err(e) = driver_guard.reconfigure(&new_config) {
+                            // Capture old shape for comparison
+                            let (shape_before, reconfig_result) = {
+                                let mut driver_guard = self.driver.lock().unwrap();
+                                let old_cfg = driver_guard.get_config().unwrap_or_else(|_| new_config.clone());
+                                let before = (
+                                    old_cfg.sample_rate,
+                                    old_cfg.vref,
+                                    old_cfg.gain,
+                                    flatten_global_channel_indices(&old_cfg),
+                                );
+                                let res = driver_guard.reconfigure(&new_config);
+                                (before, res)
+                            };
+
+                            if let Err(e) = reconfig_result {
                                 log::error!("Failed to reconfigure driver: {}", e);
                             } else {
-                                self.meta_rev_counter.fetch_add(1, Ordering::Relaxed);
-                                let new_meta = Arc::new(create_sensor_meta_from_config(
-                                    &new_config,
-                                    &self.meta_rev_counter,
-                                ));
-                                log::info!(
-                                    "Sending SourceReady event with new metadata (rev: {})",
-                                    new_meta.meta_rev
+                                // Determine if data shape changed (channels/rate/gain/vref)
+                                let shape_after = (
+                                    new_config.sample_rate,
+                                    new_config.vref,
+                                    new_config.gain,
+                                    flatten_global_channel_indices(&new_config),
                                 );
-                                let _ = self.event_tx.send(PipelineEvent::SourceReady {
-                                    meta: (*new_meta).clone(),
-                                });
+                                let shape_changed = shape_before != shape_after;
+
+                                if shape_changed {
+                                    self.meta_rev_counter.fetch_add(1, Ordering::Relaxed);
+                                    let new_meta = Arc::new(create_sensor_meta_from_config(
+                                        &new_config,
+                                        &self.meta_rev_counter,
+                                    ));
+                                    log::info!(
+                                        "Sending SourceReady event with new metadata (rev: {})",
+                                        new_meta.meta_rev
+                                    );
+                                    let _ = self.event_tx.send(PipelineEvent::SourceReady {
+                                        meta: (*new_meta).clone(),
+                                    });
+                                } else {
+                                    log::info!("Driver reconfigured with no data shape change; not emitting SourceReady");
+                                }
                             }
                         }
                         Err(e) => {
