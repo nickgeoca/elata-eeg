@@ -13,8 +13,10 @@ use flume::Receiver;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TripleIirConfig {
-    /// Channels in interleaved stream
-    pub channels: usize,
+    /// Optional override for channels in interleaved stream.
+    /// If not provided, infer from packet header.
+    #[serde(default)]
+    pub channels: Option<usize>,
     /// High-pass cutoff (Hz)
     pub high_pass: f32,
     /// Low-pass cutoff (Hz)
@@ -37,7 +39,7 @@ impl StageFactory for TripleIirFactory {
     ) -> Result<(Box<dyn Stage>, Option<Receiver<Arc<RtPacket>>>), StageError> {
         let cfg: TripleIirConfig = serde_json::from_value(serde_json::Value::Object(config.params.clone().into_iter().collect()))
             .map_err(|e| StageError::BadConfig(format!("TripleIir config error: {:?}", e)))?;
-        if cfg.channels == 0 { return Err(StageError::BadConfig("channels must be >=1".into())); }
+        if let Some(c) = cfg.channels { if c == 0 { return Err(StageError::BadConfig("channels must be >=1 if provided".into())); } }
         if !(cfg.high_pass > 0.0 && cfg.low_pass > cfg.high_pass) {
             return Err(StageError::BadConfig("0 < high_pass < low_pass required".into()));
         }
@@ -75,8 +77,8 @@ impl TripleIirStage {
         Self { id, out_name, cfg, fs_last: None, chains: Vec::new(), scratch: Vec::new() }
     }
 
-    fn rebuild_if_needed(&mut self, fs_hz: f32) -> Result<(), StageError> {
-        if self.fs_last == Some(fs_hz) && !self.chains.is_empty() { return Ok(()); }
+    fn rebuild_if_needed(&mut self, fs_hz: f32, chans: usize) -> Result<(), StageError> {
+        if self.fs_last == Some(fs_hz) && self.chains.len() == chans && !self.chains.is_empty() { return Ok(()); }
         if fs_hz <= 0.0 { return Err(StageError::BadConfig("sample_rate must be > 0".into())); }
         let nyq = fs_hz * 0.5;
         if !(self.cfg.high_pass > 0.0 && self.cfg.high_pass < nyq) { return Err(StageError::BadConfig("bad high_pass vs Nyquist".into())); }
@@ -95,7 +97,7 @@ impl TripleIirStage {
                 .map_err(|e| StageError::BadConfig(format!("Notch coeffs: {:?}", e)))?)
         } else { None };
 
-        self.chains = (0..self.cfg.channels).map(|_| ChannelChain {
+        self.chains = (0..chans).map(|_| ChannelChain {
             hp: DF2T::<f32>::new(hp),
             notch: notch.map(|n| DF2T::<f32>::new(n)),
             lp: DF2T::<f32>::new(lp),
@@ -117,9 +119,19 @@ impl Stage for TripleIirStage {
         let out_pkt = match PacketView::from(&*pkt) {
             PacketView::Voltage { header, data } => {
                 let fs = header.meta.sample_rate;
-                self.rebuild_if_needed(fs as f32)?;
+                // Determine channel count: explicit override or infer from header
+                let mut chans = self.cfg.channels.unwrap_or_else(|| header.num_channels as usize);
+                if chans == 0 {
+                    // Fallback: infer from batch_size if available
+                    let batch = header.batch_size as usize;
+                    if batch > 0 && data.len() % batch == 0 {
+                        chans = data.len() / batch;
+                    }
+                }
+                if chans == 0 { return Err(StageError::BadConfig("Unable to determine channel count".into())); }
 
-                let chans = self.cfg.channels;
+                self.rebuild_if_needed(fs as f32, chans)?;
+
                 let frames = data.len() / chans;
                 self.scratch.clear();
                 self.scratch.reserve(frames * chans);
@@ -150,7 +162,7 @@ impl Stage for TripleIirStage {
     fn reconfigure(&mut self, cfg: &serde_json::Value, _ctx: &mut StageContext) -> Result<(), StageError> {
         let new_cfg: TripleIirConfig = serde_json::from_value(cfg.clone())
             .map_err(|e| StageError::BadConfig(format!("TripleIir reconfig error: {:?}", e)))?;
-        if new_cfg.channels == 0 { return Err(StageError::BadConfig("channels must be >=1".into())); }
+        if let Some(c) = new_cfg.channels { if c == 0 { return Err(StageError::BadConfig("channels must be >=1 if provided".into())); } }
         if !(new_cfg.high_pass > 0.0 && new_cfg.low_pass > new_cfg.high_pass) {
             return Err(StageError::BadConfig("0 < high_pass < low_pass required".into()));
         }

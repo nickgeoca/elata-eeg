@@ -144,7 +144,7 @@ fi
 
 # Call rebuild.sh to build everything
 echo "🔧 Building all components..."
-./rebuild.sh from-install
+bash scripts/rebuild.sh from-install
 
 # Create systemd service for the Rust daemon
 echo "📝 Creating systemd service for Rust daemon..."

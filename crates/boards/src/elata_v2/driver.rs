@@ -58,7 +58,8 @@ impl ElataV2Driver {
                 )),
             };
             
-            let cs_pin = gpio.get(cs_pin_num)?.into_output();
+            let mut cs_pin = gpio.get(cs_pin_num)?.into_output();
+            cs_pin.set_high();
             info!("CS pin {} initialized for software control.", cs_pin_num);
             
             let driver = Ads1299Driver::new(chip_config.clone(), bus.clone(), cs_pin)?;
@@ -296,15 +297,20 @@ impl AdcDriver for ElataV2Driver {
         Ok(self.config.clone())
     }
     fn reconfigure(&mut self, config: &AdcConfig) -> Result<(), DriverError> {
-        // Validate that the incoming configuration has the correct number of chips
-        // Validate that the incoming configuration has the same number of chips
-        if config.chips.len() != self.config.chips.len() {
-            return Err(DriverError::ConfigurationError(format!(
-                "ElataV2Driver requires exactly {} chip configurations",
-                self.config.chips.len()
-            )));
+        // Pre-validate the incoming configuration BEFORE touching the running hardware.
+        // ElataV2 boards always have exactly 2 chips, and require at least one active channel.
+        if config.chips.len() != 2 {
+            return Err(DriverError::ConfigurationError(
+                "ElataV2Driver requires exactly 2 chip configurations".to_string(),
+            ));
         }
-        
+        let total_channels: usize = config.chips.iter().map(|c| c.channels.len()).sum();
+        if total_channels == 0 {
+            return Err(DriverError::ConfigurationError(
+                "At least one channel must be configured across both chips".to_string(),
+            ));
+        }
+
         info!("ElataV2 reconfigure: performing full shutdown + reinitialize");
         // Stop acquisition thread, clear IRQs and pins, and power down chips
         self.shutdown()?;
@@ -321,7 +327,8 @@ impl AdcDriver for ElataV2Driver {
                 )),
             };
             
-            let cs_pin = self.gpio.get(cs_pin_num)?.into_output();
+            let mut cs_pin = self.gpio.get(cs_pin_num)?.into_output();
+            cs_pin.set_high();
             info!("CS pin {} initialized for software control.", cs_pin_num);
             
             let driver = Ads1299Driver::new(chip_config.clone(), self.bus.clone(), cs_pin)?;

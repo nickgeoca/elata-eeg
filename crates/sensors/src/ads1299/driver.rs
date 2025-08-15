@@ -108,17 +108,30 @@ impl Ads1299Driver {
         bias_sensn: u8,
     ) -> Result<(), DriverError> {
         self.send_command(CMD_RESET)?;
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(40));
         self.send_command(CMD_SDATAC)?;  // keep this as a safe guard against peramently damaging the chip (MISO line)
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(40));
 
-        let id = self.read_register(REG_ID_ADDR)?;
-        debug!("Read device ID: 0x{:02X}", id);
-        if id != 0x3E {
-            warn!("Invalid device ID: 0x{:02X} (expected 0x3E)", id);
-            return Err(DriverError::HardwareNotFound(format!(
-                "Invalid device ID: 0x{:02X}", id
-            )));
+        // Robust device ID read with retry to handle unstable first read after reset
+        let _ = self.read_register(REG_ID_ADDR);
+        let mut id: u8 = 0;
+        let mut ok = false;
+        for attempt in 0..5 {
+            match self.read_register(REG_ID_ADDR) {
+                Ok(v) => {
+                    id = v;
+                    debug!("Read device ID (attempt {}): 0x{:02X}", attempt + 1, id);
+                    if id == 0x3E { ok = true; break; }
+                }
+                Err(e) => {
+                    warn!("ID read attempt {} failed: {}", attempt + 1, e);
+                }
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if !ok {
+            warn!("Invalid device ID after retries: 0x{:02X} (expected 0x3E)", id);
+            return Err(DriverError::HardwareNotFound(format!("Invalid device ID: 0x{:02X}", id)));
         }
 
         self.write_register(CONFIG1_ADDR, config1)?;

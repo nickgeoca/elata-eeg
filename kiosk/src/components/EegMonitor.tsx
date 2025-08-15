@@ -51,6 +51,7 @@ export default function EegMonitorWebGL() {
   const [selectedChannelCount, setSelectedChannelCount] = useState<string | undefined>(undefined);
   const [selectedSampleRate, setSelectedSampleRate] = useState<string | undefined>(undefined);
   const [selectedPowerlineFilter, setSelectedPowerlineFilter] = useState<string | undefined>(undefined);
+  const [selectedGain, setSelectedGain] = useState<string | undefined>(undefined);
 
   useEffect(() => {
     if (config) {
@@ -59,6 +60,12 @@ export default function EegMonitorWebGL() {
       }
       if (config.sample_rate !== undefined) {
         setSelectedSampleRate(String(config.sample_rate));
+      }
+      if ((config as any).gain !== undefined) {
+        const g = Number((config as any).gain);
+        const allowed = [1, 2, 4, 6, 8, 12, 24];
+        const normalized = allowed.includes(g) ? g : allowed.reduce((prev, curr) => Math.abs(curr - g) < Math.abs(prev - g) ? curr : prev, allowed[0]);
+        setSelectedGain(String(normalized));
       }
       if (config.powerline_filter_hz !== undefined) {
         setSelectedPowerlineFilter(config.powerline_filter_hz === null ? 'off' : String(config.powerline_filter_hz));
@@ -75,7 +82,7 @@ export default function EegMonitorWebGL() {
     }
 
     // Ensure all selections are made before proceeding
-    if (selectedChannelCount === undefined || selectedSampleRate === undefined || selectedPowerlineFilter === undefined) {
+    if (selectedChannelCount === undefined || selectedSampleRate === undefined || selectedPowerlineFilter === undefined || selectedGain === undefined) {
       setConfigUpdateStatus('Please make a selection for all configuration options.');
       return;
     }
@@ -83,6 +90,7 @@ export default function EegMonitorWebGL() {
     const numChannels = parseInt(selectedChannelCount, 10);
     const sampleRate = parseInt(selectedSampleRate, 10);
     const powerlineFilter = selectedPowerlineFilter === 'off' ? null : parseInt(selectedPowerlineFilter, 10);
+    const gain = parseInt(selectedGain, 10);
 
     setConfigUpdateStatus('Sending configuration update...');
     try {
@@ -92,6 +100,7 @@ export default function EegMonitorWebGL() {
         channels: numChannels,
         sample_rate: sampleRate,
         powerline_filter_hz: powerlineFilter,
+        gain,
       });
       setConfigUpdateStatus('Configuration update sent successfully.');
     } catch (error) {
@@ -196,6 +205,11 @@ export default function EegMonitorWebGL() {
           <div className="ml-4 text-xs text-gray-300">
             <span>WS: {wsStatus}</span>
           </div>
+          {config && (
+            <div className="ml-4 text-xs text-gray-300">
+              <span>Driver: {(config as any).board_driver || 'unknown'}</span>
+            </div>
+          )}
         </div>
         <div className="flex items-baseline space-x-2">
           <EegRecordingControls />
@@ -297,6 +311,20 @@ export default function EegMonitorWebGL() {
                 disabled={!config}
               >
                 {[250, 500, 1000, 2000].map(rate => <option key={rate} value={rate}>{rate}</option>)}
+              </select>
+            </div>
+
+            {/* Gain */}
+            <div className="mb-4">
+              <label htmlFor="gain" className="block mb-1 font-semibold">Gain</label>
+              <select
+                id="gain"
+                value={selectedGain ?? ''}
+                onChange={(e) => setSelectedGain(e.target.value)}
+                className="w-full p-2 rounded bg-gray-700 border border-gray-600"
+                disabled={!config}
+              >
+                {[1, 2, 4, 6, 8, 12, 24].map(g => <option key={g} value={g}>{g}x</option>)}
               </select>
             </div>
 

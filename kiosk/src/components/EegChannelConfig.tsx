@@ -68,7 +68,16 @@ export default function EegChannelConfig({ className = '' }: ChannelConfigProps)
     setIsUpdating(true);
     setMessage({ text: 'Updating configuration...', type: 'info' });
 
-    updateConfig({ channels: selectedChannels });
+    // This simple panel applies a contiguous channel count matching the selection size.
+    // Detailed per-index selection is not supported in this quick panel.
+    const desiredCount = selectedChannels.length;
+    const current = config;
+    updateConfig({
+      channels: desiredCount,
+      sample_rate: current?.sample_rate ?? 250,
+      powerline_filter_hz: current?.powerline_filter_hz ?? null,
+      gain: (current as any)?.gain ?? 1,
+    });
 
     // Since the update is now handled via the context, we can provide
     // optimistic feedback. The actual state will be updated via SSE.

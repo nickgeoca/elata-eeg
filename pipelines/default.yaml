@@ -14,8 +14,8 @@ stages:
         vref: 4.5
         gain: 24.0
         chips:
-          - channels: [2]
-          - channels: [1]
+          - channels: [0]
+          - channels: [3]
       batch_size: 32
     outputs: ["raw_data"]
 
@@ -28,7 +28,6 @@ stages:
   - name: "filter"
     type: "gui_filter"
     params:
-      channels: 2
       high_pass: 16
       low_pass: 40.0
       notch: 60.0
