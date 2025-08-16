@@ -15,22 +15,12 @@ self.onmessage = (event) => {
         const numMetaChannels = meta.channel_names.length;
         if (numMetaChannels === 0) return;
 
-        const NCH = 1; // Assuming single channel for now
-        if (NCH === 1) {
-          const batch = new Float32Array(samples);
-          ringBuffer.write(batch);
-        } else {
-          // De-interleaving logic for multi-channel data
-          const batches: number[][] = Array.from({ length: NCH }, () => []);
-          for (let i = 0; i < samples.length; i++) {
-            const channelIndex = i % numMetaChannels;
-            if (channelIndex < NCH) {
-              batches[channelIndex].push(samples[i]);
-            }
-          }
-          const batch = new Float32Array(batches[0]);
-          ringBuffer.write(batch);
-        }
+        // Set NCH to the actual number of channels from metadata
+        const NCH = numMetaChannels;
+        
+        // Write the full interleaved batch through
+        const batch = new Float32Array(samples);
+        ringBuffer.write(batch);
       }
       break;
   }

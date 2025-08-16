@@ -214,18 +214,24 @@ impl AdcDriver for ElataV2Driver {
             .map_err(|e| DriverError::Other(format!("Failed to spawn thread: {}", e)))?;
         self.acq_thread_handle = Some(acq_thread);
         // 4. Now, start data acquisition on all chips
+        // 4. Assert START pin HIGH after all chips are fully configured
         let mut start_pin = self.gpio.get(START_PIN)?.into_output();
-        start_pin.set_low();
-        for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
-            chip.send_command(CMD_WAKEUP)?;
-        }
-        thread::sleep(Duration::from_millis(10));
         start_pin.set_high();
         thread::sleep(Duration::from_millis(1));
+        
+        // 5. Send RDATAC only to chips with active channels
         for (i, chip) in self.chip_drivers.iter_mut().enumerate() {
-            chip.send_command(CMD_RDATAC)?;
+            // Wake up all chips first
+            chip.send_command(CMD_WAKEUP)?;
+            thread::sleep(Duration::from_millis(10));
+            
+            // Only send RDATAC to chips with active channels
+            if !self.config.chips[i].channels.is_empty() {
+                chip.send_command(CMD_RDATAC)?;
+                thread::sleep(Duration::from_millis(1));
+            }
         }
-        thread::sleep(Duration::from_millis(1));
+        
         *self.start_pin.lock().unwrap() = Some(start_pin);
         info!("ElataV2 board initialized successfully and is acquiring data.");
         Ok(())
